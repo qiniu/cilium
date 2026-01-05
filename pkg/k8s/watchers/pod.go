@@ -384,7 +384,7 @@ func (k *K8sPodWatcher) updateK8sPodV1(oldK8sPod, newK8sPod *slim_corev1.Pod) er
 					scopedLog.Warn(
 						"Source IP verification security control modified via annotation",
 						logfields.Value, newAnno[annotation.DisableSourceIPVerification],
-						"podUID", newK8sPod.UID)
+						logfields.K8sUID, newK8sPod.UID)
 					needsDatapathRegen = true
 				}
 			}

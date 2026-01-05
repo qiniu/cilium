@@ -348,10 +348,6 @@ func TestApplySourceIPVerificationFromAnnotation(t *testing.T) {
 				ctmap.NewFakeGCRunner(),
 				nil,
 				model,
-				fakeTypes.WireguardConfig{},
-				fakeTypes.IPsecConfig{},
-				nil,
-				nil,
 			)
 			require.NoError(t, err)
 
@@ -410,10 +406,6 @@ func TestApplySourceIPVerificationResetsToGlobalDefault(t *testing.T) {
 		ctmap.NewFakeGCRunner(),
 		nil,
 		model,
-		fakeTypes.WireguardConfig{},
-		fakeTypes.IPsecConfig{},
-		nil,
-		nil,
 	)
 	require.NoError(t, err)
 
