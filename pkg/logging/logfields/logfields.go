@@ -202,6 +202,9 @@ const (
 	// IPv6 is an IPv6 address
 	IPv6 = "ipv6"
 
+	// VNIID is the Virtual Network Identifier for an endpoint in native-vpc mode
+	VNIID = "vniID"
+
 	// BPFCompilationTime is the time elapsed to build a BPF endpoint program
 	BPFCompilationTime = "BPFCompilationTime"
 
