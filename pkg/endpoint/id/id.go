@@ -77,6 +77,20 @@ const (
 
 	// IPv6Prefix is the prefix used to refer to an endpoint via IPv6 address
 	IPv6Prefix PrefixType = "ipv6"
+
+	// VNIIPv4Prefix is used to address an endpoint via the endpoint's IPv4
+	// address combined with VNI (Virtual Network Identifier) in native-vpc mode.
+	// This allows distinguishing endpoints with overlapping IP addresses in
+	// different VPCs/overlay networks.
+	// Format: "vni-ipv4:<vni>:<ipv4>"
+	VNIIPv4Prefix PrefixType = "vni-ipv4"
+
+	// VNIIPv6Prefix is used to address an endpoint via the endpoint's IPv6
+	// address combined with VNI (Virtual Network Identifier) in native-vpc mode.
+	// This allows distinguishing endpoints with overlapping IP addresses in
+	// different VPCs/overlay networks.
+	// Format: "vni-ipv6:<vni>:<ipv6>"
+	VNIIPv6Prefix PrefixType = "vni-ipv6"
 )
 
 // NewCiliumID returns a new endpoint identifier of type CiliumLocalIdPrefix
@@ -151,9 +165,31 @@ func Parse(id string) (PrefixType, string, error) {
 		CEPNamePrefix,
 		PodNamePrefix,
 		IPv4Prefix,
-		IPv6Prefix:
+		IPv6Prefix,
+		VNIIPv4Prefix,
+		VNIIPv6Prefix:
 		return prefix, id, nil
 	}
 
 	return "", "", fmt.Errorf("unknown endpoint ID prefix \"%s\"", prefix)
+}
+
+// NewVNIIPPrefixID returns an identifier based on the VNI and IP address.
+// If ip is invalid or vniID is 0, an empty string is returned.
+// Format: "vni-ipv4:<vni>:<ipv4>" or "vni-ipv6:<vni>:<ipv6>"
+func NewVNIIPPrefixID(ip netip.Addr, vniID uint64) string {
+	if !ip.IsValid() || vniID == 0 {
+		return ""
+	}
+	vniStr := FormatVNIIP(vniID, ip)
+	if ip.Is4() {
+		return NewID(VNIIPv4Prefix, vniStr)
+	}
+	return NewID(VNIIPv6Prefix, vniStr)
+}
+
+// FormatVNIIP returns the string representation of VNI and IP address
+// in the format "vni:ip".
+func FormatVNIIP(vniID uint64, ip netip.Addr) string {
+	return strconv.FormatUint(vniID, 10) + ":" + ip.String()
 }

@@ -102,6 +102,9 @@ type EndpointChangeRequest struct {
 	// Whether to build an endpoint synchronously
 	//
 	SyncBuildEndpoint bool `json:"sync-build-endpoint,omitempty"`
+
+	// VNI (Virtual Network Identifier) for this endpoint in native-vpc mode. Used to distinguish endpoints with overlapping IP addresses in different VPCs/overlay networks. When set, IP conflict detection will consider both VNI and IP address together.
+	VniID int64 `json:"vni-id,omitempty"`
 }
 
 // Validate validates this endpoint change request
