@@ -126,11 +126,24 @@ func (e *Endpoint) Identifiers() id.Identifiers {
 	}
 
 	if e.IPv4.IsValid() {
-		refs[id.IPv4Prefix] = e.IPv4.String()
+		// For native-vpc mode, use VNI-aware identifier to distinguish
+		// endpoints with overlapping IPs in different VPCs.
+		// Mutually exclusive with global IP identifier to avoid index overwrite.
+		if e.VNIID > 0 {
+			refs[id.VNIIPv4Prefix] = id.FormatVNIIP(e.VNIID, e.IPv4)
+		} else {
+			refs[id.IPv4Prefix] = e.IPv4.String()
+		}
 	}
 
 	if e.IPv6.IsValid() {
-		refs[id.IPv6Prefix] = e.IPv6.String()
+		// For native-vpc mode, use VNI-aware identifier.
+		// Mutually exclusive with global IP identifier to avoid index overwrite.
+		if e.VNIID > 0 {
+			refs[id.VNIIPv6Prefix] = id.FormatVNIIP(e.VNIID, e.IPv6)
+		} else {
+			refs[id.IPv6Prefix] = e.IPv6.String()
+		}
 	}
 
 	if !e.disableLegacyIdentifiers && e.GetContainerName() != "" {

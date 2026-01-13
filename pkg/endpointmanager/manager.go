@@ -328,6 +328,12 @@ func (mgr *endpointManager) Lookup(id string) (*endpoint.Endpoint, error) {
 	case endpointid.IPv6Prefix:
 		return mgr.lookupIPv6(eid), nil
 
+	case endpointid.VNIIPv4Prefix:
+		return mgr.lookupVNIIPv4(eid), nil
+
+	case endpointid.VNIIPv6Prefix:
+		return mgr.lookupVNIIPv6(eid), nil
+
 	default:
 		return nil, ErrInvalidPrefix{InvalidPrefix: prefix.String()}
 	}
@@ -551,6 +557,24 @@ func (mgr *endpointManager) lookupIPv4(ipv4 string) *endpoint.Endpoint {
 
 func (mgr *endpointManager) lookupIPv6(ipv6 string) *endpoint.Endpoint {
 	if ep, ok := mgr.endpointsAux[endpointid.NewID(endpointid.IPv6Prefix, ipv6)]; ok {
+		return ep
+	}
+	return nil
+}
+
+// lookupVNIIPv4 looks up an endpoint by VNI-aware IPv4 identifier.
+// The vniIPv4 parameter should be in format "<vni>:<ipv4>".
+func (mgr *endpointManager) lookupVNIIPv4(vniIPv4 string) *endpoint.Endpoint {
+	if ep, ok := mgr.endpointsAux[endpointid.NewID(endpointid.VNIIPv4Prefix, vniIPv4)]; ok {
+		return ep
+	}
+	return nil
+}
+
+// lookupVNIIPv6 looks up an endpoint by VNI-aware IPv6 identifier.
+// The vniIPv6 parameter should be in format "<vni>:<ipv6>".
+func (mgr *endpointManager) lookupVNIIPv6(vniIPv6 string) *endpoint.Endpoint {
+	if ep, ok := mgr.endpointsAux[endpointid.NewID(endpointid.VNIIPv6Prefix, vniIPv6)]; ok {
 		return ep
 	}
 	return nil
