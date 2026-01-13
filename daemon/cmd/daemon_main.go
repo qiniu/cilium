@@ -426,6 +426,12 @@ func InitGlobalFlags(logger *slog.Logger, cmd *cobra.Command, vp *viper.Viper) {
 	flags.String(option.IPAM, ipamOption.IPAMClusterPool, "Backend to use for IPAM")
 	option.BindEnv(vp, option.IPAM)
 
+	flags.String(option.NativeVPCVNIAnnotationName, "", "Pod annotation key that contains the VNI for native-vpc mode")
+	option.BindEnv(vp, option.NativeVPCVNIAnnotationName)
+
+	flags.Bool(option.EnableNativeVPC, false, "Enable native-vpc mode")
+	option.BindEnv(vp, option.EnableNativeVPC)
+
 	flags.String(option.IPv4Range, AutoCIDR, "Per-node IPv4 endpoint prefix, e.g. 10.16.0.0/16")
 	option.BindEnv(vp, option.IPv4Range)
 

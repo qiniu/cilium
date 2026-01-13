@@ -207,7 +207,7 @@ enum TraceObservationPoint {
     // TO_CRYPTO indicates network packets are transmitted towards the crypto
     // process for encryption.
     TO_CRYPTO = 13;
-    
+
 }
 
 enum TraceReason {
@@ -283,6 +283,9 @@ message Endpoint {
     repeated string labels = 4;
     string pod_name = 5;
     repeated Workload workloads = 6;
+    // vni_id is the VNI (Virtual Network Identifier) for this endpoint in native-vpc mode.
+    // Used to distinguish endpoints with overlapping IP addresses in different VPCs.
+    uint64 vni_id = 8;
 }
 
 message Workload {

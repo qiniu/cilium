@@ -254,6 +254,11 @@ type Endpoint struct {
 	// Constant after endpoint creation / restoration.
 	IPv4IPAMPool string
 
+	// VNIID is the VNI (Virtual Network Identifier) for native-vpc mode.
+	// Used to distinguish endpoints with overlapping IPs in different VPCs.
+	// Constant after endpoint creation / restoration.
+	VNIID uint64
+
 	// nodeMAC is the MAC of the node (agent). The MAC is different for every endpoint (veth),
 	// or it may be all zeroes (netkit). Constant after endpoint creation / restoration.
 	nodeMAC mac.MAC
@@ -813,6 +818,12 @@ func (e *Endpoint) IPv6Address() netip.Addr {
 // GetNodeMAC returns the MAC address of the node from this endpoint's perspective.
 func (e *Endpoint) GetNodeMAC() mac.MAC {
 	return e.nodeMAC
+}
+
+// GetVNIID returns the VNI of the endpoint for native-vpc mode.
+// Returns 0 if VNI is not set.
+func (e *Endpoint) GetVNIID() uint64 {
+	return e.VNIID
 }
 
 // StringID returns the endpoint's ID in a string.
