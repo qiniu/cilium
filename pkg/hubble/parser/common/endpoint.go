@@ -147,6 +147,7 @@ func (r *EndpointResolver) ResolveEndpoint(ip netip.Addr, datapathSecurityIdenti
 				Namespace:   ep.GetK8sNamespace(),
 				Labels:      SortAndFilterLabels(r.log, labels.GetModel(), identity.NumericIdentity(epIdentity)),
 				PodName:     ep.GetK8sPodName(),
+				VniId:       ep.GetVNIID(),
 			}
 			if pod := ep.GetPod(); pod != nil {
 				workload, workloadTypeMeta, ok := utils.GetWorkloadMetaFromPod(pod)

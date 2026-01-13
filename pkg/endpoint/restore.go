@@ -442,6 +442,7 @@ func (e *Endpoint) toSerializedEndpoint() *serializableEndpoint {
 		IPv6IPAMPool:             e.IPv6IPAMPool,
 		IPv4:                     e.IPv4,
 		IPv4IPAMPool:             e.IPv4IPAMPool,
+		VNIID:                    e.VNIID,
 		NodeMAC:                  e.nodeMAC,
 		SecurityIdentity:         e.SecurityIdentity,
 		Options:                  e.Options,
@@ -525,6 +526,9 @@ type serializableEndpoint struct {
 
 	// IPv4IPAMPool is the IPAM address pool from which the IPv4 address was allocated
 	IPv4IPAMPool string
+
+	// VNIID is the VNI for native-vpc mode
+	VNIID uint64
 
 	// nodeMAC is the MAC of the node (agent). The MAC is different for every endpoint.
 	NodeMAC mac.MAC
@@ -622,6 +626,7 @@ func (ep *Endpoint) fromSerializedEndpoint(r *serializableEndpoint) {
 	ep.IPv6IPAMPool = r.IPv6IPAMPool
 	ep.IPv4 = r.IPv4
 	ep.IPv4IPAMPool = r.IPv4IPAMPool
+	ep.VNIID = r.VNIID
 	ep.nodeMAC = r.NodeMAC
 	ep.SecurityIdentity = r.SecurityIdentity
 	ep.DNSRules = r.DNSRules

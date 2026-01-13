@@ -424,6 +424,7 @@ type FakeEndpointInfo struct {
 	PodNamespace string
 	Labels       []string
 	Pod          *slim_corev1.Pod
+	VNIID        uint64
 
 	PolicyMap      map[policyTypes.Key]labels.LabelArrayListString
 	PolicyRevision uint64
@@ -466,6 +467,11 @@ func (e *FakeEndpointInfo) GetPolicyCorrelationInfoForKey(key policyTypes.Key) (
 	info.RuleLabels, ok = e.PolicyMap[key]
 	info.Revision = e.PolicyRevision
 	return info, ok
+}
+
+// GetVNIID returns the VNI of the endpoint.
+func (e *FakeEndpointInfo) GetVNIID() uint64 {
+	return e.VNIID
 }
 
 // FakePodMetadataGetter is used for unit tests that need a PodMetadataGetter.

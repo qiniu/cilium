@@ -2147,7 +2147,7 @@ localRedirectPolicy: false
 localRedirectPolicies:
   # -- Enable local redirect policies.
   enabled: false
-  
+
   # -- Limit the allowed addresses in Address Matcher rule of
   # Local Redirect Policies to the given CIDRs.
   # @schema@
@@ -2177,7 +2177,7 @@ maglev: {}
 # type: [null, boolean]
 # @schema
 # -- (bool) Enables masquerading of IPv4 traffic leaving the node from endpoints.
-# @default -- `true` unless ipam eni mode is active 
+# @default -- `true` unless ipam eni mode is active
 enableIPv4Masquerade: ~
 # -- Enables masquerading of IPv6 traffic leaving the node from endpoints.
 enableIPv6Masquerade: true
@@ -2924,7 +2924,7 @@ operator:
   # @schema
   # type: [null, array]
   # @schema
-  tolerations: 
+  tolerations:
     - key: "node-role.kubernetes.io/control-plane"
       operator: Exists
     - key: "node-role.kubernetes.io/master" #deprecated
@@ -4041,4 +4041,13 @@ authentication:
 enableInternalTrafficPolicy: true
 # -- Enable LoadBalancer IP Address Management
 enableLBIPAM: true
-
+# -- Native VPC mode configuration
+nativeVPC:
+  # -- Enable native VPC mode. When enabled, Cilium will use VNI+IP combination
+  # for endpoint conflict detection, allowing the same IP to exist in different VPCs.
+  enabled: false
+  # -- Pod annotation key that contains the VNI (Virtual Network Identifier) value.
+  # The annotation value must be a non-zero positive integer.
+  # This field is required when nativeVPC.enabled is true.
+  # Example: "your-cni.io/vni"
+  vniAnnotation: ""
