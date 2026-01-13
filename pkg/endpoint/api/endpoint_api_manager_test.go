@@ -134,3 +134,117 @@ func (f *fetcher) FetchK8sMetadataForEndpointFromPod(p *slim_corev1.Pod) (*endpo
 }
 
 var _ endpointmetadata.EndpointMetadataFetcher = &fetcher{}
+
+func TestParseVNIFromPod(t *testing.T) {
+	logger := hivetest.Logger(t)
+	vniKey := "your-cni.io/vni"
+
+	tests := []struct {
+		name          string
+		pod           *slim_corev1.Pod
+		key           string
+		expectedVNI   int64
+		expectedError string
+	}{
+		{
+			name: "HostNetwork pod",
+			pod: &slim_corev1.Pod{
+				Spec: slim_corev1.PodSpec{
+					HostNetwork: true,
+				},
+				ObjectMeta: slim_metav1.ObjectMeta{
+					Annotations: map[string]string{
+						vniKey: "100",
+					},
+				},
+			},
+			key:         vniKey,
+			expectedVNI: unsetVNI,
+		},
+		{
+			name: "No annotation",
+			pod: &slim_corev1.Pod{
+				ObjectMeta: slim_metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"other": "value",
+					},
+				},
+			},
+			key:         vniKey,
+			expectedVNI: unsetVNI,
+		},
+		{
+			name: "Valid VNI",
+			pod: &slim_corev1.Pod{
+				ObjectMeta: slim_metav1.ObjectMeta{
+					Annotations: map[string]string{
+						vniKey: "100",
+					},
+				},
+			},
+			key:         vniKey,
+			expectedVNI: 100,
+		},
+		{
+			name: "Invalid VNI (non-numeric)",
+			pod: &slim_corev1.Pod{
+				ObjectMeta: slim_metav1.ObjectMeta{
+					Annotations: map[string]string{
+						vniKey: "abc",
+					},
+				},
+			},
+			key:           vniKey,
+			expectedError: `invalid VNI annotation "your-cni.io/vni" value "abc": strconv.ParseInt: parsing "abc": invalid syntax`,
+		},
+		{
+			name: "Invalid VNI (zero)",
+			pod: &slim_corev1.Pod{
+				ObjectMeta: slim_metav1.ObjectMeta{
+					Annotations: map[string]string{
+						vniKey: "0",
+					},
+				},
+			},
+			key:           vniKey,
+			expectedError: `VNI annotation "your-cni.io/vni" has invalid value 0`,
+		},
+		{
+			name: "Invalid VNI (negative)",
+			pod: &slim_corev1.Pod{
+				ObjectMeta: slim_metav1.ObjectMeta{
+					Annotations: map[string]string{
+						vniKey: "-1",
+					},
+				},
+			},
+			key:           vniKey,
+			expectedError: `VNI annotation "your-cni.io/vni" has invalid value -1`,
+		},
+		{
+			name: "Invalid VNI (exceeds max)",
+			pod: &slim_corev1.Pod{
+				ObjectMeta: slim_metav1.ObjectMeta{
+					Annotations: map[string]string{
+						vniKey: "16777216",
+					},
+				},
+			},
+			key:           vniKey,
+			expectedError: `VNI annotation "your-cni.io/vni" value 16777216 exceeds maximum (16777215)`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vni, err := parseVNIFromPod(tt.pod, tt.key, logger)
+			if tt.expectedError != "" {
+				assert.Error(t, err)
+				assert.EqualError(t, err, tt.expectedError)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedVNI, vni)
+			}
+		})
+	}
+}

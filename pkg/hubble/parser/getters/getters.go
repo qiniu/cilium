@@ -78,5 +78,6 @@ type EndpointInfo interface {
 	GetK8sNamespace() string
 	GetLabels() labels.Labels
 	GetPod() *slim_corev1.Pod
+	GetVNIID() uint64
 	GetPolicyCorrelationInfoForKey(key policyTypes.Key) (policyTypes.PolicyCorrelationInfo, bool)
 }
