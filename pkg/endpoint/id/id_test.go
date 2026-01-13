@@ -135,3 +135,71 @@ func TestNewIPPrefix(t *testing.T) {
 	require.True(t, strings.HasPrefix(NewIPPrefixID(netip.MustParseAddr("1.1.1.1")), string(IPv4Prefix)))
 	require.True(t, strings.HasPrefix(NewIPPrefixID(netip.MustParseAddr("f00d::1")), string(IPv6Prefix)))
 }
+
+func TestNewVNIIPPrefixID(t *testing.T) {
+	tests := []struct {
+		name     string
+		ip       netip.Addr
+		vniID    uint64
+		expected string
+	}{
+		{
+			name:     "IPv4 with VNI 10",
+			ip:       netip.MustParseAddr("10.177.0.3"),
+			vniID:    10,
+			expected: "vni-ipv4:10:10.177.0.3",
+		},
+		{
+			name:     "IPv4 with VNI 0 returns empty (VNI=0 is invalid)",
+			ip:       netip.MustParseAddr("192.168.1.1"),
+			vniID:    0,
+			expected: "", // VNI=0 is not valid in native-vpc mode
+		},
+		{
+			name:     "IPv4 with large VNI (24-bit max)",
+			ip:       netip.MustParseAddr("10.0.0.1"),
+			vniID:    16777215, // max 24-bit VNI
+			expected: "vni-ipv4:16777215:10.0.0.1",
+		},
+		{
+			name:     "IPv6 with VNI 20",
+			ip:       netip.MustParseAddr("fd00::1"),
+			vniID:    20,
+			expected: "vni-ipv6:20:fd00::1",
+		},
+		{
+			name:     "IPv6 with VNI 100",
+			ip:       netip.MustParseAddr("2001:db8::1"),
+			vniID:    100,
+			expected: "vni-ipv6:100:2001:db8::1",
+		},
+		{
+			name:     "IPv6 with VNI 0 returns empty",
+			ip:       netip.MustParseAddr("::1"),
+			vniID:    0,
+			expected: "", // VNI=0 is not valid in native-vpc mode
+		},
+		{
+			name:     "Invalid IP returns empty",
+			ip:       netip.Addr{}, // zero value, invalid
+			vniID:    10,
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := NewVNIIPPrefixID(tt.ip, tt.vniID)
+			require.Equal(t, tt.expected, result)
+
+			// Also verify prefix type for valid results
+			if result != "" {
+				if tt.ip.Is4() {
+					require.True(t, strings.HasPrefix(result, string(VNIIPv4Prefix)))
+				} else {
+					require.True(t, strings.HasPrefix(result, string(VNIIPv6Prefix)))
+				}
+			}
+		})
+	}
+}

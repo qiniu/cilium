@@ -473,6 +473,13 @@ const (
 	// insert our plugin configuration
 	CNIChainingTarget = "cni-chaining-target"
 
+	// NativeVPCVNIAnnotationName is the name of the option to configure
+	// the Pod annotation key that contains the VNI (Virtual Network Identifier).
+	NativeVPCVNIAnnotationName = "native-vpc-vni-annotation"
+
+	// EnableNativeVPC is the name of the option to enable native-vpc mode
+	EnableNativeVPC = "enable-native-vpc"
+
 	// AuthMapEntriesMin defines the minimum auth map limit.
 	AuthMapEntriesMin = 1 << 8
 
@@ -1630,6 +1637,15 @@ type DaemonConfig struct {
 	// IPAM is the IPAM method to use
 	IPAM string
 
+	// NativeVPCVNIAnnotation specifies the Pod annotation key that contains
+	// the VNI (Virtual Network Identifier) for native-vpc mode.
+	// When set, Cilium will read VNI from this annotation and use VNI+IP
+	// for endpoint conflict detection, allowing overlapping IPs in different VPCs.
+	NativeVPCVNIAnnotation string
+
+	// EnableNativeVPC enables native-vpc mode
+	EnableNativeVPC bool
+
 	// IPAMMultiPoolPreAllocation defines the pre-allocation value for each IPAM pool
 	IPAMMultiPoolPreAllocation map[string]string
 	// IPAMDefaultIPPool the default IP Pool when using multi-pool
@@ -2234,6 +2250,10 @@ func (c *DaemonConfig) Validate(vp *viper.Viper) error {
 		return err
 	}
 
+	if c.EnableNativeVPC && c.NativeVPCVNIAnnotation == "" {
+		return fmt.Errorf("native-vpc mode is enabled but --%s is empty", NativeVPCVNIAnnotationName)
+	}
+
 	return nil
 }
 
@@ -2421,6 +2441,8 @@ func (c *DaemonConfig) Populate(logger *slog.Logger, vp *viper.Viper) {
 	c.CiliumIdentityMaxJitter = vp.GetDuration(CiliumIdentityMaxJitter)
 	c.IdentityRestoreGracePeriod = vp.GetDuration(IdentityRestoreGracePeriod)
 	c.IPAM = vp.GetString(IPAM)
+	c.NativeVPCVNIAnnotation = vp.GetString(NativeVPCVNIAnnotationName)
+	c.EnableNativeVPC = vp.GetBool(EnableNativeVPC)
 	c.IPAMDefaultIPPool = vp.GetString(IPAMDefaultIPPool)
 	c.IPv4Range = vp.GetString(IPv4Range)
 	c.IPv4NodeAddr = vp.GetString(IPv4NodeAddr)
