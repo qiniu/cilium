@@ -358,16 +358,12 @@ func TestApplySourceIPVerificationFromAnnotation(t *testing.T) {
 				nil,
 				nil,
 				s.repo,
-				nil,
+				testipcache.NewMockIPCache(),
 				&FakeEndpointProxy{},
 				testidentity.NewMockIdentityAllocator(nil),
 				ctmap.NewFakeGCRunner(),
 				nil,
 				model,
-				fakeTypes.WireguardConfig{},
-				fakeTypes.IPsecConfig{},
-				nil,
-				nil,
 			)
 			require.NoError(t, err)
 
@@ -421,16 +417,12 @@ func TestApplySourceIPVerificationResetsToGlobalDefault(t *testing.T) {
 		nil,
 		nil,
 		s.repo,
-		nil,
+		testipcache.NewMockIPCache(),
 		&FakeEndpointProxy{},
 		testidentity.NewMockIdentityAllocator(nil),
 		ctmap.NewFakeGCRunner(),
 		nil,
 		model,
-		fakeTypes.WireguardConfig{},
-		fakeTypes.IPsecConfig{},
-		nil,
-		nil,
 	)
 	require.NoError(t, err)
 
