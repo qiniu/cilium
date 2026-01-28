@@ -3064,6 +3064,18 @@
      - Enable RFC6052-prefixed translation
      - bool
      - ``false``
+   * - :spelling:ignore:`nativeVPC`
+     - Native VPC mode configuration
+     - object
+     - ``{"enabled":false,"vniAnnotation":""}``
+   * - :spelling:ignore:`nativeVPC.enabled`
+     - Enable native VPC mode. When enabled, Cilium will use VNI+IP combination for endpoint conflict detection, allowing the same IP to exist in different VPCs.
+     - bool
+     - ``false``
+   * - :spelling:ignore:`nativeVPC.vniAnnotation`
+     - Pod annotation key that contains the VNI (Virtual Network Identifier) value. The annotation value must be a non-zero positive integer. This field is required when nativeVPC.enabled is true. Example: "your-cni.io/vni"
+     - string
+     - ``""``
    * - :spelling:ignore:`nodeIPAM.enabled`
      - Configure Node IPAM ref: https://docs.cilium.io/en/stable/network/node-ipam/
      - bool
