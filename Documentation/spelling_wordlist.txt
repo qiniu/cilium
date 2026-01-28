@@ -5,7 +5,6 @@ Alibaba
 Aquantia
 Attestor
 Bertin
-blackhole
 Blanco
 Borkmann
 Brenden
@@ -160,9 +159,9 @@ allocatable
 allocateLoadBalancerNodePorts
 allocator
 allocators
+allowRemoteNodeIdentities
 allowedConfigOverrides
 allowlist
-allowRemoteNodeIdentities
 amd
 ansible
 api
@@ -203,6 +202,7 @@ behaviour
 benchmarking
 besteffort
 bgp
+blackhole
 blackholing
 blockedConfigOverrides
 bnxt
@@ -602,6 +602,7 @@ namespaceOverride
 namespaced
 namespaces
 nat
+nativeVPC
 natively
 netdev
 netdevice
@@ -883,6 +884,7 @@ virtualized
 vlan
 vmlinux
 vmxnet
+vni
 volumeMounts
 vpc
 vrf
