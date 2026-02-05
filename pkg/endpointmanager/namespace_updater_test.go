@@ -173,5 +173,5 @@ func TestNSUpdaterMultipleNS(t *testing.T) {
 	assert.NotContains(t, fix.oldIdtyLabels, "ns-b")
 	assert.Contains(t, fix.oldIdtyLabels, "ns-c")
 	assert.Equal(t, "true", fix.oldSIPAllowAnno["ns-a"])
-	assert.Equal(t, "", fix.oldSIPAllowAnno["ns-c"])
+	assert.Empty(t, fix.oldSIPAllowAnno["ns-c"])
 }
