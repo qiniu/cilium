@@ -1264,6 +1264,7 @@ type daemonParams struct {
 	Devices             statedb.Table[*datapathTables.Device]
 	DirectRoutingDevice datapathTables.DirectRoutingDevice
 	IPsecAgent          datapath.IPsecAgent
+	Orchestrator        datapath.Orchestrator
 	SyncHostIPs         *syncHostIPs
 	NodeDiscovery       *nodediscovery.NodeDiscovery
 	IPAM                *ipam.IPAM
