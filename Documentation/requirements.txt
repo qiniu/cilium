@@ -47,7 +47,7 @@ picobox==4.0.0
 pydantic==2.12.5
 pydantic_core==2.41.5
 pyenchant==3.3.0
-Pygments==2.19.2
+Pygments==2.20.0
 PyYAML==6.0.3
 referencing==0.37.0
 requests==2.32.5
