@@ -137,7 +137,7 @@ jobs:
 
       - name: Login to quay.io for CI
         # Disabled in fork workflows: push credentials are unavailable.
-        if: ${{ false }}
+        if: ${{ github.repository_owner == 'cilium' }}
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: quay.io
@@ -312,7 +312,7 @@ jobs:
 
       - name: Generate SBOM, Sign, and Attest Main CI Image
         # Disabled in fork workflows: no pushed remote image to sign/attest.
-        if: ${{ false }}
+        if: ${{ github.repository_owner == 'cilium' && matrix.name != 'cilium-cli' && steps.check.outputs.build != '' }}
         uses: ./../cilium-base-branch/.github/actions/cosign
         with:
           image: "quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/${{ matrix.name }}-ci@${{ steps.docker_build_ci.outputs.digest }}"
@@ -321,7 +321,7 @@ jobs:
 
       - name: Generate SBOM, Sign, and Attest Race Detection Image
         # Disabled in fork workflows: no pushed remote image to sign/attest.
-        if: ${{ false }}
+        if: ${{ github.repository_owner == 'cilium' && matrix.name != 'cilium-cli' && steps.docker_build_ci_detect_race_condition.outcome != 'skipped' }}
         uses: ./../cilium-base-branch/.github/actions/cosign
         with:
           image: "quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/${{ matrix.name }}-ci@${{ steps.docker_build_ci_detect_race_condition.outputs.digest }}"
@@ -331,7 +331,7 @@ jobs:
 
       - name: Generate SBOM, Sign, and Attest Unstripped Image
         # Disabled in fork workflows: no pushed remote image to sign/attest.
-        if: ${{ false }}
+        if: ${{ github.repository_owner == 'cilium' && matrix.name != 'cilium-cli' && steps.docker_build_ci_unstripped.outcome != 'skipped' }}
         uses: ./../cilium-base-branch/.github/actions/cosign
         with:
           image: "quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/${{ matrix.name }}-ci@${{ steps.docker_build_ci_unstripped.outputs.digest }}"
@@ -342,7 +342,7 @@ jobs:
       - name: CI Image Releases digests
         shell: bash
         # Disabled in fork workflows: digest list is only meaningful for pushed images.
-        if: ${{ false }}
+        if: ${{ github.repository_owner == 'cilium' && steps.check.outputs.build != '' }}
         run: |
           mkdir -p image-digest/
           # shellcheck disable=SC2078
@@ -361,7 +361,7 @@ jobs:
       - name: Upload artifact digests
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         # Disabled in fork workflows: no digest artifact when push is disabled.
-        if: ${{ false }}
+        if: ${{ github.repository_owner == 'cilium' && steps.check.outputs.build != '' }}
         with:
           name: image-digest ${{ matrix.name }}
           path: image-digest
@@ -375,7 +375,7 @@ jobs:
 
   image-digests:
     # Disabled in fork workflows: depends on digest artifacts from push workflow.
-    if: ${{ false }}
+    if: ${{ github.repository_owner == 'cilium' && always() }}
     name: Display Digests
     runs-on: ubuntu-24.04
     needs: build-and-push-prs
@@ -399,7 +399,7 @@ jobs:
 
   push-chart:
     # Disabled in fork workflows: chart push requires registry permissions.
-    if: ${{ false }}
+    if: ${{ github.repository_owner == 'cilium' }}
     name: Push dev chart
     needs: build-and-push-prs
     permissions:
