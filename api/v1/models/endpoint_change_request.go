@@ -101,6 +101,7 @@ type EndpointChangeRequest struct {
 	SyncBuildEndpoint bool `json:"sync-build-endpoint,omitempty"`
 
 	// VNI (Virtual Network Identifier) for this endpoint in native-vpc mode. Used to distinguish endpoints with overlapping IP addresses in different VPCs/overlay networks. When set, IP conflict detection will consider both VNI and IP address together.
+	// Maximum: 1.6777215e+07
 	VniID uint64 `json:"vni-id,omitempty"`
 }
 
@@ -226,13 +227,11 @@ func (m *EndpointChangeRequest) validateState(formats strfmt.Registry) error {
 }
 
 func (m *EndpointChangeRequest) validateVniID(formats strfmt.Registry) error {
-	_ = formats
-
 	if swag.IsZero(m.VniID) { // not required
 		return nil
 	}
 
-	if err := validate.MaximumUint("vni-id", "body", m.VniID, 16777215, false); err != nil {
+	if err := validate.MaximumUint("vni-id", "body", m.VniID, 1.6777215e+07, false); err != nil {
 		return err
 	}
 

@@ -2711,7 +2711,8 @@ func init() {
         "vni-id": {
           "description": "VNI (Virtual Network Identifier) for this endpoint in native-vpc mode. Used to distinguish endpoints with overlapping IP addresses in different VPCs/overlay networks. When set, IP conflict detection will consider both VNI and IP address together.",
           "type": "integer",
-          "format": "int64"
+          "format": "uint64",
+          "maximum": 16777215
         }
       }
     },
@@ -8108,7 +8109,8 @@ func init() {
         "vni-id": {
           "description": "VNI (Virtual Network Identifier) for this endpoint in native-vpc mode. Used to distinguish endpoints with overlapping IP addresses in different VPCs/overlay networks. When set, IP conflict detection will consider both VNI and IP address together.",
           "type": "integer",
-          "format": "int64"
+          "format": "uint64",
+          "maximum": 16777215
         }
       }
     },
