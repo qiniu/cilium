@@ -1523,12 +1523,13 @@ data:
   {{- end }}
 {{- end }}
 
-{{- if .Values.nativeVPC.enabled }}
+{{- $nativeVPC := (.Values.nativeVPC | default dict) }}
+{{- if $nativeVPC.enabled }}
   enable-native-vpc: "true"
-  {{- if not .Values.nativeVPC.vniAnnotation }}
+  {{- if not $nativeVPC.vniAnnotation }}
     {{- fail "nativeVPC.vniAnnotation must be set when nativeVPC.enabled is true" }}
   {{- end }}
-  native-vpc-vni-annotation: {{ .Values.nativeVPC.vniAnnotation | quote }}
+  native-vpc-vni-annotation: {{ $nativeVPC.vniAnnotation | quote }}
 {{- end }}
 
 # Extra config allows adding arbitrary properties to the cilium config.
