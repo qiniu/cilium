@@ -185,7 +185,6 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 	// 3. Read other annotations (bandwidth, MAC, etc.)
 	var pod *slim_corev1.Pod
 	var k8sMetadata *endpoint.K8sMetadata
-	var vniID uint64
 
 	if ep.K8sNamespaceAndPodNameIsSet() && m.clientset.IsEnabled() {
 		var err error
@@ -227,17 +226,19 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 
 			// For native-vpc mode, read VNI from Pod annotation before conflict detection.
 			if vniAnnotationKey := option.Config.NativeVPCVNIAnnotation; vniAnnotationKey != "" && pod != nil {
-				var err error
-				vniID, err = parseVNIFromPod(pod, vniAnnotationKey, m.logger)
+				parsedVNI, err := parseVNIFromPod(pod, vniAnnotationKey, m.logger)
 				if err != nil {
 					return invalidDataError(ep, err)
 				}
-				if vniID > 0 {
-					ep.VNIID = vniID
+
+				if parsedVNI > 0 {
+					ep.VNIID = uint64(parsedVNI)
 					m.logger.Debug("Read VNI from Pod annotation",
 						logfields.K8sPodName, ep.K8sNamespace+"/"+ep.K8sPodName,
-						logfields.VNIID, vniID,
+						logfields.VNIID, ep.VNIID,
 					)
+				} else {
+					ep.VNIID = 0
 				}
 			}
 
@@ -275,16 +276,16 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 	var checkIDs []string
 
 	if ep.IPv4.IsValid() {
-		if vniID > 0 {
-			checkIDs = append(checkIDs, endpointid.NewVNIIPPrefixID(ep.IPv4, vniID))
+		if ep.VNIID > 0 {
+			checkIDs = append(checkIDs, endpointid.NewVNIIPPrefixID(ep.IPv4, ep.VNIID))
 		} else {
 			checkIDs = append(checkIDs, endpointid.NewIPPrefixID(ep.IPv4))
 		}
 	}
 
 	if ep.IPv6.IsValid() {
-		if vniID > 0 {
-			checkIDs = append(checkIDs, endpointid.NewVNIIPPrefixID(ep.IPv6, vniID))
+		if ep.VNIID > 0 {
+			checkIDs = append(checkIDs, endpointid.NewVNIIPPrefixID(ep.IPv6, ep.VNIID))
 		} else {
 			checkIDs = append(checkIDs, endpointid.NewIPPrefixID(ep.IPv6))
 		}
@@ -565,31 +566,33 @@ func (m *endpointAPIManager) ModifyEndpointIdentityLabelsFromAPI(id string, add,
 	return PatchEndpointIDLabelsOKCode, nil
 }
 
+const unsetVNI = int64(-1)
+
 // parseVNIFromPod extracts and validates the VNI from the Pod annotation.
-// Returns 0 if no VNI annotation is present or if the Pod is using host networking.
-// Returns an error if the annotation value is invalid or 0.
-func parseVNIFromPod(pod *slim_corev1.Pod, vniAnnotationKey string, logger *slog.Logger) (uint64, error) {
+// Returns unsetVNI if no VNI annotation is present or if the Pod is using host networking.
+// Returns an error if the annotation value is invalid or not greater than 0.
+func parseVNIFromPod(pod *slim_corev1.Pod, vniAnnotationKey string, logger *slog.Logger) (int64, error) {
 	if pod.Spec.HostNetwork {
 		// Skip VNI for hostNetwork pods - they use host network stack directly,
 		// not overlay network, so VNI-based isolation is not applicable.
 		logger.Debug("Skipping VNI for hostNetwork pod",
 			logfields.K8sPodName, pod.Namespace+"/"+pod.Name,
 		)
-		return 0, nil
+		return unsetVNI, nil
 	}
 
 	vniStr, ok := pod.Annotations[vniAnnotationKey]
 	if !ok {
-		return 0, nil
+		return unsetVNI, nil
 	}
 
 	// VNI annotation exists, parse it
-	parsedVNI, err := strconv.ParseUint(vniStr, 10, 64)
+	parsedVNI, err := strconv.ParseInt(vniStr, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid VNI annotation %q value %q: %w", vniAnnotationKey, vniStr, err)
 	}
-	if parsedVNI == 0 {
-		return 0, fmt.Errorf("VNI annotation %q has invalid value 0", vniAnnotationKey)
+	if parsedVNI <= 0 {
+		return 0, fmt.Errorf("VNI annotation %q has invalid value %d", vniAnnotationKey, parsedVNI)
 	}
 
 	return parsedVNI, nil

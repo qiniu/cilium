@@ -143,7 +143,7 @@ func TestParseVNIFromPod(t *testing.T) {
 		name          string
 		pod           *slim_corev1.Pod
 		key           string
-		expectedVNI   uint64
+		expectedVNI   int64
 		expectedError string
 	}{
 		{
@@ -159,7 +159,7 @@ func TestParseVNIFromPod(t *testing.T) {
 				},
 			},
 			key:         vniKey,
-			expectedVNI: 0,
+			expectedVNI: unsetVNI,
 		},
 		{
 			name: "No annotation",
@@ -171,7 +171,7 @@ func TestParseVNIFromPod(t *testing.T) {
 				},
 			},
 			key:         vniKey,
-			expectedVNI: 0,
+			expectedVNI: unsetVNI,
 		},
 		{
 			name: "Valid VNI",
@@ -195,7 +195,7 @@ func TestParseVNIFromPod(t *testing.T) {
 				},
 			},
 			key:           vniKey,
-			expectedError: `invalid VNI annotation "your-cni.io/vni" value "abc": strconv.ParseUint: parsing "abc": invalid syntax`,
+			expectedError: `invalid VNI annotation "your-cni.io/vni" value "abc": strconv.ParseInt: parsing "abc": invalid syntax`,
 		},
 		{
 			name: "Invalid VNI (zero)",
@@ -219,7 +219,7 @@ func TestParseVNIFromPod(t *testing.T) {
 				},
 			},
 			key:           vniKey,
-			expectedError: `invalid VNI annotation "your-cni.io/vni" value "-1": strconv.ParseUint: parsing "-1": invalid syntax`,
+			expectedError: `VNI annotation "your-cni.io/vni" has invalid value -1`,
 		},
 	}
 
