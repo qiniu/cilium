@@ -847,7 +847,6 @@ cni:
   enableRouteMTUForCNIChaining: false
   # -- Enable the removal of iptables rules created by the AWS CNI VPC plugin.
   iptablesRemoveAWSRules: true
-
 # @schema
 # type: [null, number]
 # @schema
@@ -4439,7 +4438,6 @@ standaloneDnsProxy:
     digest: ""
     useDigest: true
     pullPolicy: "IfNotPresent"
-
 # -- Native VPC mode configuration
 nativeVPC:
   # -- Enable native VPC mode. When enabled, Cilium will use VNI+IP combination
