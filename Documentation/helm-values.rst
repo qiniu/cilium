@@ -37,19 +37,19 @@
      - bool
      - ``false``
    * - :spelling:ignore:`alibabacloud.nodeSpec.securityGroupTags`
-     -
+     - 
      - list
      - ``[]``
    * - :spelling:ignore:`alibabacloud.nodeSpec.securityGroups`
-     -
+     - 
      - list
      - ``[]``
    * - :spelling:ignore:`alibabacloud.nodeSpec.vSwitchTags`
-     -
+     - 
      - list
      - ``[]``
    * - :spelling:ignore:`alibabacloud.nodeSpec.vSwitches`
-     -
+     - 
      - list
      - ``[]``
    * - :spelling:ignore:`annotateK8sNode`
@@ -273,7 +273,7 @@
      - bool
      - ``false``
    * - :spelling:ignore:`azure.nodeSpec.azureInterfaceName`
-     -
+     - 
      - string
      - ``""``
    * - :spelling:ignore:`bandwidthManager`
@@ -1205,7 +1205,7 @@
      - string
      - ``nil``
    * - :spelling:ignore:`daemon.enableSourceIPVerification`
-     - enableSourceIPVerification is a boolean flag to enable or disable the Source IP verification of endpoints. This flag is useful when Cilium is chained with other CNIs. By default, this functionality is enabled. Pods can only override this behavior with the pod annotation ``config.cilium.io/disable-source-ip-verification`` if the namespace annotation ``config.cilium.io/allow-disable-source-ip-verification`` is explicitly enabled. Namespace-driven changes are security relevant, are logged at Warn level, and may trigger datapath regeneration for affected endpoints.
+     - enableSourceIPVerification is a boolean flag to enable or disable the Source IP verification of endpoints. This flag is useful when Cilium is chained with other CNIs.  By default, this functionality is enabled
      - bool
      - ``true``
    * - :spelling:ignore:`daemon.runPath`
@@ -3169,11 +3169,11 @@
      - object
      - ``{"enabled":false,"vniAnnotation":""}``
    * - :spelling:ignore:`nativeVPC.enabled`
-     - Enable native VPC mode. When enabled, Cilium uses the VNI+IP combination for endpoint conflict detection, allowing the same IP to exist in different VPCs. This mode is only active when both ``nativeVPC.enabled=true`` and ``nativeVPC.vniAnnotation`` is set.
+     - Enable native VPC mode. When enabled, Cilium will use VNI+IP combination for endpoint conflict detection, allowing the same IP to exist in different VPCs.
      - bool
      - ``false``
    * - :spelling:ignore:`nativeVPC.vniAnnotation`
-     - Pod annotation key that contains the VNI (Virtual Network Identifier) value. The annotation value must be an integer in the range ``1..16777215`` (VXLAN 24-bit limit). This field is required when ``nativeVPC.enabled`` is true. If the annotation is missing, Cilium falls back to global IP-based conflict detection. For ``hostNetwork`` pods the VNI is ignored. Example: ``your-cni.io/vni``
+     - Pod annotation key that contains the VNI (Virtual Network Identifier) value. The annotation value must be a non-zero positive integer. This field is required when nativeVPC.enabled is true. Example: "your-cni.io/vni"
      - string
      - ``""``
    * - :spelling:ignore:`nodeIPAM.enabled`
