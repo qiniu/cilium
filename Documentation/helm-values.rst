@@ -37,19 +37,19 @@
      - bool
      - ``false``
    * - :spelling:ignore:`alibabacloud.nodeSpec.securityGroupTags`
-     - 
+     -
      - list
      - ``[]``
    * - :spelling:ignore:`alibabacloud.nodeSpec.securityGroups`
-     - 
+     -
      - list
      - ``[]``
    * - :spelling:ignore:`alibabacloud.nodeSpec.vSwitchTags`
-     - 
+     -
      - list
      - ``[]``
    * - :spelling:ignore:`alibabacloud.nodeSpec.vSwitches`
-     - 
+     -
      - list
      - ``[]``
    * - :spelling:ignore:`annotateK8sNode`
@@ -273,7 +273,7 @@
      - bool
      - ``false``
    * - :spelling:ignore:`azure.nodeSpec.azureInterfaceName`
-     - 
+     -
      - string
      - ``""``
    * - :spelling:ignore:`bandwidthManager`
