@@ -221,6 +221,18 @@ func TestParseVNIFromPod(t *testing.T) {
 			key:           vniKey,
 			expectedError: `VNI annotation "your-cni.io/vni" has invalid value -1`,
 		},
+		{
+			name: "Invalid VNI (exceeds max)",
+			pod: &slim_corev1.Pod{
+				ObjectMeta: slim_metav1.ObjectMeta{
+					Annotations: map[string]string{
+						vniKey: "16777216",
+					},
+				},
+			},
+			key:           vniKey,
+			expectedError: `VNI annotation "your-cni.io/vni" value 16777216 exceeds maximum (16777215)`,
+		},
 	}
 
 	for _, tt := range tests {

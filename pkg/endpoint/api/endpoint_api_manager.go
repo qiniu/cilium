@@ -569,6 +569,7 @@ func (m *endpointAPIManager) ModifyEndpointIdentityLabelsFromAPI(id string, add,
 }
 
 const unsetVNI = int64(-1)
+const maxVNI = (1 << 24) - 1
 
 // parseVNIFromPod extracts and validates the VNI from the Pod annotation.
 // Returns unsetVNI if no VNI annotation is present or if the Pod is using host networking.
@@ -595,6 +596,9 @@ func parseVNIFromPod(pod *slim_corev1.Pod, vniAnnotationKey string, logger *slog
 	}
 	if parsedVNI <= 0 {
 		return 0, fmt.Errorf("VNI annotation %q has invalid value %d", vniAnnotationKey, parsedVNI)
+	}
+	if parsedVNI > maxVNI {
+		return 0, fmt.Errorf("VNI annotation %q value %d exceeds maximum (%d)", vniAnnotationKey, parsedVNI, maxVNI)
 	}
 
 	return parsedVNI, nil
