@@ -21,6 +21,7 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 func registerNamespaceUpdater(log *slog.Logger, jg job.Group, db *statedb.DB, namespaces statedb.Table[daemonk8s.Namespace], em EndpointManager) {
@@ -108,6 +109,7 @@ func (u *namespaceUpdater) update(newNS daemonk8s.Namespace) error {
 	eps := u.endpointManager.GetEndpointsByNamespace(newNS.Name)
 	failed := false
 	ciliumIdentityMaxJitter := option.Config.CiliumIdentityMaxJitter
+	sipRegenMaxJitter := option.Config.CiliumIdentityMaxJitter
 	for _, ep := range eps {
 		// Handle identity label updates
 		if labelsChanged {
@@ -125,14 +127,18 @@ func (u *namespaceUpdater) update(newNS daemonk8s.Namespace) error {
 			// Get pod annotations from the endpoint's cached pod
 			pod := ep.GetPod()
 			var podAnno map[string]string
+			podUID := ep.GetK8sUID()
 			if pod != nil {
 				podAnno = pod.Annotations
+				podUID = string(pod.UID)
 			}
 
 			// Re-apply SIP verification setting with new namespace annotations
 			if ep.ApplySourceIPVerificationFromAnnotation(podAnno, newNS.Annotations) {
-				u.log.Info("Namespace AllowDisableSourceIPVerification annotation changed, regenerating endpoint",
+				u.log.Warn("Source IP verification security control modified via namespace annotation",
 					logfields.K8sNamespace, newNS.Name,
+					logfields.K8sPodName, ep.GetK8sPodName(),
+					logfields.K8sUID, podUID,
 					logfields.EndpointID, ep.ID,
 					logfields.Value, newSIPAllowAnno)
 
@@ -142,7 +148,16 @@ func (u *namespaceUpdater) update(newNS daemonk8s.Namespace) error {
 					RegenerationLevel: regeneration.RegenerateWithDatapath,
 				}
 				if regen, _ := ep.SetRegenerateStateIfAlive(regenMetadata); regen {
-					ep.Regenerate(regenMetadata)
+					jitter := endpointRegenJitter(ep.ID, sipRegenMaxJitter)
+					if jitter > 0 {
+						epRef := ep
+						regenMetadataRef := regenMetadata
+						time.AfterFunc(jitter, func() {
+							epRef.Regenerate(regenMetadataRef)
+						})
+					} else {
+						ep.Regenerate(regenMetadata)
+					}
 				}
 			}
 		}
@@ -153,4 +168,14 @@ func (u *namespaceUpdater) update(newNS daemonk8s.Namespace) error {
 	u.oldIdtyLabels[newNS.Name] = newIdtyLabels
 	u.oldSIPAllowAnno[newNS.Name] = newSIPAllowAnno
 	return nil
+}
+
+func endpointRegenJitter(epID uint16, maxJitter time.Duration) time.Duration {
+	if maxJitter <= 0 {
+		return 0
+	}
+
+	// Use multiplicative hashing to spread endpoint IDs across jitter window.
+	hash := uint64(epID) * 2654435761
+	return time.Duration(hash % uint64(maxJitter))
 }
