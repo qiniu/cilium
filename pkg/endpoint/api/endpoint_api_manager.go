@@ -176,6 +176,7 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 	ctx, cancel = context.WithCancel(ctx)
 	m.endpointCreations.NewCreateRequest(ep, cancel)
 	defer m.endpointCreations.EndCreateRequest(ep)
+	nativeVPCEnabled := option.Config.EnableNativeVPC && option.Config.NativeVPCVNIAnnotation != ""
 
 	identityLbls := maps.Clone(apiLabels)
 
@@ -225,7 +226,8 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 			infoLabels.MergeLabels(k8sMetadata.InfoLabels)
 
 			// For native-vpc mode, read VNI from Pod annotation before conflict detection.
-			if vniAnnotationKey := option.Config.NativeVPCVNIAnnotation; vniAnnotationKey != "" && pod != nil {
+			if nativeVPCEnabled && pod != nil {
+				vniAnnotationKey := option.Config.NativeVPCVNIAnnotation
 				parsedVNI, err := parseVNIFromPod(pod, vniAnnotationKey, m.logger)
 				if err != nil {
 					return invalidDataError(ep, err)
