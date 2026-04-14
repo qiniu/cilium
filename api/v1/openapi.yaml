@@ -1253,7 +1253,8 @@ definitions:
           VPCs/overlay networks. When set, IP conflict detection will consider
           both VNI and IP address together.
         type: integer
-        format: int64
+        format: uint64
+        maximum: 16777215
       datapath-configuration:
         "$ref": "#/definitions/EndpointDatapathConfiguration"
       properties:

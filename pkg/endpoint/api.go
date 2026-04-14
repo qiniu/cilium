@@ -88,6 +88,7 @@ func NewEndpointFromChangeModel(ctx context.Context, logger *slog.Logger, dnsRul
 	ep.K8sNamespace = model.K8sNamespace
 	ep.K8sUID = model.K8sUID
 	ep.disableLegacyIdentifiers = model.DisableLegacyIdentifiers
+	ep.VNIID = model.VniID
 
 	if model.Mac != "" {
 		m, err := mac.ParseMAC(model.Mac)
