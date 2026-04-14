@@ -124,6 +124,10 @@ func (m *EndpointChangeRequest) Validate(formats strfmt.Registry) error {
 		res = append(res, err)
 	}
 
+	if err := m.validateVniID(formats); err != nil {
+		res = append(res, err)
+	}
+
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
@@ -216,6 +220,24 @@ func (m *EndpointChangeRequest) validateState(formats strfmt.Registry) error {
 
 			return err
 		}
+	}
+
+	return nil
+}
+
+func (m *EndpointChangeRequest) validateVniID(formats strfmt.Registry) error {
+	_ = formats
+
+	if swag.IsZero(m.VniID) { // not required
+		return nil
+	}
+
+	if err := validate.MinimumInt("vni-id", "body", m.VniID, 1, false); err != nil {
+		return err
+	}
+
+	if err := validate.MaximumInt("vni-id", "body", m.VniID, 16777215, false); err != nil {
+		return err
 	}
 
 	return nil
