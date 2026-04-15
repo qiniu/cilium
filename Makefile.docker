@@ -149,6 +149,12 @@ $(eval $(call DOCKER_IMAGE_TEMPLATE,dev-docker-opera%-image-debug,images/operato
 #
 docker-images-all: docker-cilium-image docker-plugin-image docker-hubble-relay-image docker-clustermesh-apiserver-image docker-operator-images-all docker-standalone-dns-proxy-image ## Build all Cilium related docker images.
 
+local-build-amd64: ## Build all Cilium related docker images for amd64 locally without pushing.
+	$(MAKE) docker-images-all DOCKER_FLAGS="--platform linux/amd64 --load" DOCKER_IMAGE_TAG=$(shell cat VERSION)
+
+local-build-arm64: ## Build all Cilium related docker images for arm64 locally without pushing.
+	$(MAKE) docker-images-all DOCKER_FLAGS="--platform linux/arm64 --load" DOCKER_IMAGE_TAG=$(shell cat VERSION)
+
 docker-images-all-unstripped: docker-cilium-image-unstripped docker-plugin-image-unstripped docker-hubble-relay-image-unstripped docker-clustermesh-apiserver-image-unstripped docker-operator-images-all-unstripped docker-standalone-dns-proxy-image-unstripped ## Build all Cilium related unstripped docker images.
 
 docker-operator-images-all: docker-operator-image docker-operator-aws-image docker-operator-azure-image docker-operator-alibabacloud-image docker-operator-generic-image ## Build all variants of cilium-operator images.
