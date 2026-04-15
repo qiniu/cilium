@@ -4743,6 +4743,17 @@
       },
       "type": "object"
     },
+    "nativeVPC": {
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "vniAnnotation": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "nodeIPAM": {
       "properties": {
         "enabled": {
