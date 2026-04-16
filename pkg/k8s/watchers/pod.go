@@ -409,8 +409,8 @@ func (k *K8sPodWatcher) updateK8sPodV1(oldK8sPod, newK8sPod *slim_corev1.Pod) er
 				}())
 			}
 
-			// Handle source IP verification annotation and trigger appropriate regeneration.
-			needsDatapathRegen := false
+			// Handle source IP verification annotation.
+			var sipRegenerated bool
 			if annoChangedDisableSIP {
 				// Get namespace annotations for permission check
 				nsAnno := k.getNamespaceAnnotations(newK8sPod.Namespace)
@@ -421,39 +421,34 @@ func (k *K8sPodWatcher) updateK8sPodV1(oldK8sPod, newK8sPod *slim_corev1.Pod) er
 						"Source IP verification security control modified via annotation",
 						logfields.Value, newAnno[annotation.DisableSourceIPVerification],
 						logfields.K8sUID, newK8sPod.UID)
-					needsDatapathRegen = true
+					regenMetadata := &regeneration.ExternalRegenerationMetadata{
+						Reason:            "source IP verification annotation updated",
+						RegenerationLevel: regeneration.RegenerateWithDatapath,
+					}
+					if regen, _ := podEP.SetRegenerateStateIfAlive(regenMetadata); regen {
+						podEP.Regenerate(regenMetadata)
+					}
+					sipRegenerated = true
 				}
 			}
 
-			// Trigger datapath regeneration for any BPF-affecting annotation change.
-			// All these annotations (bandwidth, priority, notrack, SIP) affect the BPF datapath
-			// and require regeneration with datapath rebuild for the affected pod endpoint.
-			otherDatapathAnnosChanged := annoChangedBandwidth || annoChangedPriority || annoChangedNoTrack
-			if needsDatapathRegen || otherDatapathAnnosChanged {
-				reason := "annotations updated"
-				if needsDatapathRegen && !otherDatapathAnnosChanged {
-					reason = "source IP verification annotation updated"
-				}
-				triggerEndpointRegeneration(podEP, reason, true)
+			// Regenerate policy and datapath if other datapath annotations changed.
+			// If SIP triggered a full RegenerateWithDatapath, it will pick up the
+			// bandwidth/notrack state changes already applied above. Only fire a
+			// separate regeneration if SIP did not already do so.
+			if !sipRegenerated && (annoChangedBandwidth || annoChangedPriority || annoChangedNoTrack) {
+				realizePodAnnotationUpdate(podEP)
 			}
-			// If only SIP annotation changed but value didn't (e.g., "1" -> "true"), no regeneration needed
 		}
 	}
 
 	return err
 }
 
-// triggerEndpointRegeneration triggers endpoint regeneration for annotation updates.
-// If withDatapath is true, a full datapath rebuild is performed (required for BPF-affecting changes
-// like source IP verification). Otherwise, only policy regeneration is performed.
-func triggerEndpointRegeneration(podEP *endpoint.Endpoint, reason string, withDatapath bool) {
-	level := regeneration.RegenerateWithoutDatapath
-	if withDatapath {
-		level = regeneration.RegenerateWithDatapath
-	}
+func realizePodAnnotationUpdate(podEP *endpoint.Endpoint) {
 	regenMetadata := &regeneration.ExternalRegenerationMetadata{
-		Reason:            reason,
-		RegenerationLevel: level,
+		Reason:            "annotations updated",
+		RegenerationLevel: regeneration.RegenerateWithDatapath,
 	}
 	// No need to log an error if the state transition didn't succeed,
 	// if it didn't succeed that means the endpoint is being deleted, or

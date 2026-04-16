@@ -913,3 +913,5 @@ xwing
 yaml
 zsh
 ztunnel
+falsy
+truthy

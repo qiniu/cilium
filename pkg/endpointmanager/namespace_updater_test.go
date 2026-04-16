@@ -92,7 +92,7 @@ func (f *nsUpdaterTestFixture) processChanges() {
 		} else {
 			// Simplified update: just track the values (skip endpoint operations)
 			f.oldIdtyLabels[change.Object.Name] = labels.Map2Labels(change.Object.Labels, labels.LabelSourceK8s)
-			f.oldSIPAllowAnno[change.Object.Name] = change.Object.Annotations[annotation.AllowDisableSourceIPVerification]
+			f.oldSIPAllowAnno[change.Object.Name] = change.Object.Annotations[annotation.DelegateSourceIPVerification]
 		}
 	}
 }
@@ -104,7 +104,7 @@ func TestNSUpdaterDeleteCleanup(t *testing.T) {
 
 	// Insert namespace
 	fix.insertNS(t, nsName, map[string]string{"env": "test"}, map[string]string{
-		annotation.AllowDisableSourceIPVerification: "true",
+		annotation.DelegateSourceIPVerification: "true",
 	})
 	fix.processChanges()
 
@@ -127,7 +127,7 @@ func TestNSUpdaterRecreate(t *testing.T) {
 
 	// Create with annotation "true"
 	fix.insertNS(t, nsName, nil, map[string]string{
-		annotation.AllowDisableSourceIPVerification: "true",
+		annotation.DelegateSourceIPVerification: "true",
 	})
 	fix.processChanges()
 	assert.Equal(t, "true", fix.oldSIPAllowAnno[nsName])
@@ -139,7 +139,7 @@ func TestNSUpdaterRecreate(t *testing.T) {
 
 	// Recreate with annotation "false"
 	fix.insertNS(t, nsName, nil, map[string]string{
-		annotation.AllowDisableSourceIPVerification: "false",
+		annotation.DelegateSourceIPVerification: "false",
 	})
 	fix.processChanges()
 
@@ -153,10 +153,10 @@ func TestNSUpdaterMultipleNS(t *testing.T) {
 
 	// Insert multiple namespaces
 	fix.insertNS(t, "ns-a", map[string]string{"env": "a"}, map[string]string{
-		annotation.AllowDisableSourceIPVerification: "true",
+		annotation.DelegateSourceIPVerification: "true",
 	})
 	fix.insertNS(t, "ns-b", map[string]string{"env": "b"}, map[string]string{
-		annotation.AllowDisableSourceIPVerification: "false",
+		annotation.DelegateSourceIPVerification: "false",
 	})
 	fix.insertNS(t, "ns-c", map[string]string{"env": "c"}, nil)
 	fix.processChanges()

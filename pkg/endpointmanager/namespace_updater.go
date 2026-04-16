@@ -41,7 +41,7 @@ func registerNamespaceUpdater(log *slog.Logger, jg job.Group, db *statedb.DB, na
 
 type namespaceUpdater struct {
 	oldIdtyLabels   map[string]labels.Labels
-	oldSIPAllowAnno map[string]string // Track AllowDisableSourceIPVerification annotation per namespace
+	oldSIPAllowAnno map[string]string // Track DelegateSourceIPVerification annotation per namespace
 	endpointManager EndpointManager
 	log             *slog.Logger
 	db              *statedb.DB
@@ -94,8 +94,8 @@ func (u *namespaceUpdater) update(newNS daemonk8s.Namespace) error {
 	oldIdtyLabels := u.oldIdtyLabels[newNS.Name]
 	newIdtyLabels, _ := labelsfilter.Filter(newLabels)
 
-	// Check if the AllowDisableSourceIPVerification annotation changed
-	newSIPAllowAnno := newNS.Annotations[annotation.AllowDisableSourceIPVerification]
+	// Check if the DelegateSourceIPVerification annotation changed
+	newSIPAllowAnno := newNS.Annotations[annotation.DelegateSourceIPVerification]
 	oldSIPAllowAnno := u.oldSIPAllowAnno[newNS.Name]
 	sipAllowAnnoChanged := newSIPAllowAnno != oldSIPAllowAnno
 
@@ -109,7 +109,6 @@ func (u *namespaceUpdater) update(newNS daemonk8s.Namespace) error {
 	eps := u.endpointManager.GetEndpointsByNamespace(newNS.Name)
 	failed := false
 	ciliumIdentityMaxJitter := option.Config.CiliumIdentityMaxJitter
-	sipRegenMaxJitter := option.Config.CiliumIdentityMaxJitter
 	for _, ep := range eps {
 		// Handle identity label updates
 		if labelsChanged {
@@ -144,11 +143,11 @@ func (u *namespaceUpdater) update(newNS daemonk8s.Namespace) error {
 
 				// Trigger datapath regeneration if the setting changed
 				regenMetadata := &regeneration.ExternalRegenerationMetadata{
-					Reason:            "namespace AllowDisableSourceIPVerification annotation changed",
+					Reason:            "namespace config.cilium.io/delegate-source-ip-verification annotation changed",
 					RegenerationLevel: regeneration.RegenerateWithDatapath,
 				}
 				if regen, _ := ep.SetRegenerateStateIfAlive(regenMetadata); regen {
-					jitter := endpointRegenJitter(ep.ID, sipRegenMaxJitter)
+					jitter := endpointRegenJitter(ep.ID, ciliumIdentityMaxJitter)
 					if jitter > 0 {
 						epRef := ep
 						regenMetadataRef := regenMetadata
