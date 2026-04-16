@@ -1,0 +1,59 @@
+name: Prepare kind local images
+description: Build Cilium test images locally and import them into kind when remote CI images are unavailable.
+inputs:
+  sha:
+    description: Image tag to build and load
+    required: true
+  cluster-name:
+    description: Optional kind cluster name
+    required: false
+    default: ''
+outputs:
+  enabled:
+    description: Whether local image mode is enabled
+    value: ${{ steps.mode.outputs.enabled }}
+  cilium_install_overrides:
+    description: Helm overrides for local images
+    value: ${{ steps.mode.outputs.cilium_install_overrides }}
+runs:
+  using: composite
+  steps:
+    - name: Determine whether local image mode is needed
+      id: mode
+      shell: bash
+      run: |
+        if [[ "${GITHUB_REPOSITORY_OWNER}" == "cilium" ]]; then
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          echo "cilium_install_overrides=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "enabled=true" >> "$GITHUB_OUTPUT"
+        echo "cilium_install_overrides=--helm-set=image.override=quay.io/cilium/cilium-dev:${{ inputs.sha }} --helm-set=operator.image.override=quay.io/cilium/operator-generic:${{ inputs.sha }} --helm-set=hubble.relay.image.override=quay.io/cilium/hubble-relay:${{ inputs.sha }} --helm-set=hubble.relay.gops.enabled=false" >> "$GITHUB_OUTPUT"
+
+    - name: Build local CI images
+      if: ${{ steps.mode.outputs.enabled == 'true' }}
+      shell: bash
+      run: |
+        make dev-docker-image DOCKER_IMAGE_TAG=${{ inputs.sha }}
+        make dev-docker-operator-generic-image DOCKER_IMAGE_TAG=${{ inputs.sha }}
+        make docker-hubble-relay-image DOCKER_IMAGE_TAG=${{ inputs.sha }}
+
+    - name: Import local images into kind
+      if: ${{ steps.mode.outputs.enabled == 'true' }}
+      shell: bash
+      run: |
+        cluster_name="${{ inputs.cluster-name }}"
+        if [[ -z "$cluster_name" ]]; then
+          cluster_name=$(kind get clusters | head -n1)
+        fi
+        if [[ -z "$cluster_name" ]]; then
+          echo "No kind cluster found to load local images into" >&2
+          exit 1
+        fi
+
+        kind load docker-image \
+          quay.io/cilium/cilium-dev:${{ inputs.sha }} \
+          quay.io/cilium/operator-generic:${{ inputs.sha }} \
+          quay.io/cilium/hubble-relay:${{ inputs.sha }} \
+          --name "$cluster_name"

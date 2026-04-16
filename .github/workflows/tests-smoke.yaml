@@ -121,7 +121,14 @@ jobs:
           config: ${{ env.KIND_CONFIG }}
           wait: 0 # The control-plane never becomes ready, since no CNI is present
 
+      - name: Prepare local kind images
+        id: local_kind_images
+        uses: ./.github/actions/prepare-kind-local-images
+        with:
+          sha: ${{ steps.sha.outputs.sha }}
+
       - name: Wait for images to be available
+        if: ${{ steps.local_kind_images.outputs.enabled != 'true' }}
         timeout-minutes: 30
         shell: bash
         run: |
@@ -180,6 +187,10 @@ jobs:
              --helm-set hubble.enabled=true \
              --helm-set=hubble.metrics.enabled=\"{dns,drop,tcp,flow,port-distribution,icmp,http}\" \
              --helm-set ingressController.enabled=true"
+
+          if [ "${{ steps.local_kind_images.outputs.enabled }}" = "true" ]; then
+            CILIUM_INSTALL_DEFAULTS="${CILIUM_INSTALL_DEFAULTS} ${{ steps.local_kind_images.outputs.cilium_install_overrides }}"
+          fi
 
           echo cilium_install_defaults=${CILIUM_INSTALL_DEFAULTS} >> $GITHUB_OUTPUT
 
