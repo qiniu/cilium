@@ -219,7 +219,7 @@ func TestApplySourceIPVerificationFromAnnotation(t *testing.T) {
 		{
 			name:                "ns allows + pod=true: disable SIP",
 			initialOptionValue:  option.OptionEnabled,
-			nsAnnotations:       map[string]string{annotation.AllowDisableSourceIPVerification: "true"},
+			nsAnnotations:       map[string]string{annotation.DelegateSourceIPVerification: "true"},
 			podAnnotations:      map[string]string{annotation.DisableSourceIPVerification: "true"},
 			expectedChanged:     true,
 			expectedOptionValue: option.OptionDisabled,
@@ -227,7 +227,7 @@ func TestApplySourceIPVerificationFromAnnotation(t *testing.T) {
 		{
 			name:                "ns allows + pod=false: enable SIP",
 			initialOptionValue:  option.OptionDisabled,
-			nsAnnotations:       map[string]string{annotation.AllowDisableSourceIPVerification: "true"},
+			nsAnnotations:       map[string]string{annotation.DelegateSourceIPVerification: "true"},
 			podAnnotations:      map[string]string{annotation.DisableSourceIPVerification: "false"},
 			expectedChanged:     true,
 			expectedOptionValue: option.OptionEnabled,
@@ -251,7 +251,7 @@ func TestApplySourceIPVerificationFromAnnotation(t *testing.T) {
 		{
 			name:                "ns=false + pod=true: use global default (ns explicitly denies)",
 			initialOptionValue:  option.OptionEnabled,
-			nsAnnotations:       map[string]string{annotation.AllowDisableSourceIPVerification: "false"},
+			nsAnnotations:       map[string]string{annotation.DelegateSourceIPVerification: "false"},
 			podAnnotations:      map[string]string{annotation.DisableSourceIPVerification: "true"},
 			expectedChanged:     false,
 			expectedOptionValue: option.OptionEnabled, // Pod annotation ignored
@@ -259,7 +259,7 @@ func TestApplySourceIPVerificationFromAnnotation(t *testing.T) {
 		{
 			name:                "ns=1 + pod=1: disable SIP (ParseBool accepts)",
 			initialOptionValue:  option.OptionEnabled,
-			nsAnnotations:       map[string]string{annotation.AllowDisableSourceIPVerification: "1"},
+			nsAnnotations:       map[string]string{annotation.DelegateSourceIPVerification: "1"},
 			podAnnotations:      map[string]string{annotation.DisableSourceIPVerification: "1"},
 			expectedChanged:     true,
 			expectedOptionValue: option.OptionDisabled,
@@ -267,7 +267,7 @@ func TestApplySourceIPVerificationFromAnnotation(t *testing.T) {
 		{
 			name:                "ns allows + pod=0: enable SIP",
 			initialOptionValue:  option.OptionDisabled,
-			nsAnnotations:       map[string]string{annotation.AllowDisableSourceIPVerification: "true"},
+			nsAnnotations:       map[string]string{annotation.DelegateSourceIPVerification: "true"},
 			podAnnotations:      map[string]string{annotation.DisableSourceIPVerification: "0"},
 			expectedChanged:     true,
 			expectedOptionValue: option.OptionEnabled,
@@ -275,7 +275,7 @@ func TestApplySourceIPVerificationFromAnnotation(t *testing.T) {
 		{
 			name:                "ns allows + no pod annotation: use global default",
 			initialOptionValue:  option.OptionEnabled,
-			nsAnnotations:       map[string]string{annotation.AllowDisableSourceIPVerification: "true"},
+			nsAnnotations:       map[string]string{annotation.DelegateSourceIPVerification: "true"},
 			podAnnotations:      map[string]string{},
 			expectedChanged:     false,
 			expectedOptionValue: option.OptionEnabled,
@@ -283,7 +283,7 @@ func TestApplySourceIPVerificationFromAnnotation(t *testing.T) {
 		{
 			name:                "ns allows + pod invalid: use global default",
 			initialOptionValue:  option.OptionDisabled,
-			nsAnnotations:       map[string]string{annotation.AllowDisableSourceIPVerification: "true"},
+			nsAnnotations:       map[string]string{annotation.DelegateSourceIPVerification: "true"},
 			podAnnotations:      map[string]string{annotation.DisableSourceIPVerification: "invalid"},
 			expectedChanged:     true,
 			expectedOptionValue: option.OptionEnabled, // Reset to global default
@@ -291,7 +291,7 @@ func TestApplySourceIPVerificationFromAnnotation(t *testing.T) {
 		{
 			name:                "ns allows + pod with spaces: disable SIP",
 			initialOptionValue:  option.OptionEnabled,
-			nsAnnotations:       map[string]string{annotation.AllowDisableSourceIPVerification: " true "},
+			nsAnnotations:       map[string]string{annotation.DelegateSourceIPVerification: " true "},
 			podAnnotations:      map[string]string{annotation.DisableSourceIPVerification: " true "},
 			expectedChanged:     true,
 			expectedOptionValue: option.OptionDisabled,
@@ -315,7 +315,7 @@ func TestApplySourceIPVerificationFromAnnotation(t *testing.T) {
 		{
 			name:                "ns allows + already correct value: no change",
 			initialOptionValue:  option.OptionDisabled,
-			nsAnnotations:       map[string]string{annotation.AllowDisableSourceIPVerification: "true"},
+			nsAnnotations:       map[string]string{annotation.DelegateSourceIPVerification: "true"},
 			podAnnotations:      map[string]string{annotation.DisableSourceIPVerification: "true"},
 			expectedChanged:     false,
 			expectedOptionValue: option.OptionDisabled,
@@ -323,7 +323,7 @@ func TestApplySourceIPVerificationFromAnnotation(t *testing.T) {
 		{
 			name:                "ns=invalid + pod=true: use global default (invalid ns value)",
 			initialOptionValue:  option.OptionEnabled,
-			nsAnnotations:       map[string]string{annotation.AllowDisableSourceIPVerification: "invalid"},
+			nsAnnotations:       map[string]string{annotation.DelegateSourceIPVerification: "invalid"},
 			podAnnotations:      map[string]string{annotation.DisableSourceIPVerification: "true"},
 			expectedChanged:     false,
 			expectedOptionValue: option.OptionEnabled, // Invalid NS value treated as not allowed
@@ -434,7 +434,7 @@ func TestApplySourceIPVerificationResetsToGlobalDefault(t *testing.T) {
 	require.NoError(t, err)
 
 	// Namespace that allows disabling SIP
-	nsAllowAnno := map[string]string{annotation.AllowDisableSourceIPVerification: "true"}
+	nsAllowAnno := map[string]string{annotation.DelegateSourceIPVerification: "true"}
 	// Namespace that does NOT allow
 	nsNoAllowAnno := map[string]string{}
 

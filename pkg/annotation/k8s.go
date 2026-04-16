@@ -185,25 +185,26 @@ const (
 	NoTrack      = PolicyPrefix + "/no-track-port"
 	NoTrackAlias = Prefix + ".no-track-port"
 
-	// AllowDisableSourceIPVerification is the namespace annotation that controls
-	// whether pods in this namespace are allowed to use the disable-source-ip-verification
-	// pod annotation. This is a security gate that must be explicitly enabled by
-	// cluster administrators before pods can modify source IP verification settings.
+	// DelegateSourceIPVerification is the namespace annotation that delegates
+	// source IP verification control for pods in the namespace to the namespace
+	// owner. This is a security gate that must be explicitly enabled by cluster
+	// administrators before namespace owners can modify pod-level source IP
+	// verification settings.
 	//
-	// Annotation: config.cilium.io/allow-disable-source-ip-verification
+	// Annotation: config.cilium.io/delegate-source-ip-verification
 	// Valid values: Any value accepted by strconv.ParseBool:
 	//   - Truthy: "1", "t", "T", "TRUE", "true", "True"
 	//   - Falsy:  "0", "f", "F", "FALSE", "false", "False"
 	//
 	// Behavior:
-	//   - Truthy value: Allows pods in this namespace to use the
-	//     disable-source-ip-verification pod annotation
+	//   - Truthy value: Delegates source IP verification control to the namespace
+	//     owner via the disable-source-ip-verification pod annotation
 	//   - Falsy or omitted: Pods inherit global daemon configuration,
 	//     pod annotations are ignored
 	//
 	// SECURITY NOTE: This annotation should only be set by cluster administrators.
 	// Use Kubernetes RBAC to restrict namespace annotation modifications.
-	AllowDisableSourceIPVerification = ConfigPrefix + "/allow-disable-source-ip-verification"
+	DelegateSourceIPVerification = ConfigPrefix + "/delegate-source-ip-verification"
 
 	// DisableSourceIPVerification controls source IP verification for the pod.
 	//
@@ -220,7 +221,7 @@ const (
 	//   - Omitted or invalid: Inherits global daemon configuration
 	//
 	// IMPORTANT: This annotation is only effective when the namespace has the
-	// allow-disable-source-ip-verification annotation set to true. Without
+	// delegate-source-ip-verification annotation set to true. Without
 	// namespace permission, pod annotations are ignored and global config applies.
 	//
 	// Use cases: NAT gateways, proxies, load balancers, VPN endpoints,

@@ -1785,11 +1785,11 @@ func (e *Endpoint) APICanModifyConfig(n models.ConfigurationMap) error {
 // This method handles locking internally for thread safety.
 //
 // Security model:
-// The namespace annotation (AllowDisableSourceIPVerification) acts as a permission gate.
+// The namespace annotation (DelegateSourceIPVerification) acts as a permission gate.
 // Only when the namespace grants permission can pod annotations take effect.
 //
 // Logic:
-//  1. If namespace AllowDisableSourceIPVerification is not truthy: ignore pod annotation,
+//  1. If namespace DelegateSourceIPVerification is not truthy: ignore pod annotation,
 //     use global default
 //  2. If namespace allows:
 //     - Pod annotation is "true"/"1"/"TRUE" etc: disable SIP verification
@@ -1805,7 +1805,7 @@ func (e *Endpoint) ApplySourceIPVerificationFromAnnotation(podAnnotations, nsAnn
 
 	// Check namespace permission gate first
 	nsAllowed := false
-	if nsValue, ok := nsAnnotations[annotation.AllowDisableSourceIPVerification]; ok {
+	if nsValue, ok := nsAnnotations[annotation.DelegateSourceIPVerification]; ok {
 		trimmedNsValue := strings.TrimSpace(nsValue)
 		if b, err := strconv.ParseBool(trimmedNsValue); err == nil && b {
 			nsAllowed = true
@@ -1832,7 +1832,7 @@ func (e *Endpoint) ApplySourceIPVerificationFromAnnotation(podAnnotations, nsAnn
 		// Pod has the annotation but namespace doesn't grant permission - log at Debug level
 		// to avoid noise in high-frequency reconciliation paths
 		e.getLogger().Debug(
-			"Pod DisableSourceIPVerification annotation ignored: namespace does not have AllowDisableSourceIPVerification=true")
+			"Pod config.cilium.io/disable-source-ip-verification annotation ignored: namespace does not have config.cilium.io/delegate-source-ip-verification=true")
 	}
 
 	e.unconditionalLock()
