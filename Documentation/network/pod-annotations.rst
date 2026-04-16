@@ -18,7 +18,7 @@ Use a Specific MAC Address for a Pod
 #####################################
 
 Some applications bind software licenses to network interface MAC addresses.
-Cilium provides the ability to specific MAC addresses for pods
+Cilium provides the ability to specify MAC addresses for pods
 at deploy time instead of letting the operating system allocate them.
 
 
@@ -41,7 +41,7 @@ For example:
     kind: Pod
     metadata:
       annotations:
-        cni.cilium.io/mac-address: e2:9c:30:38:52:61
+        cni.cilium.io/mac-address: "e2:9c:30:38:52:61"
       labels:
         app: busybox
       name: busybox
@@ -88,15 +88,17 @@ Namespace annotation (administrator-controlled):
   ``config.cilium.io/delegate-source-ip-verification``
 
   Delegates source IP verification control for pods in this namespace to the
-  namespace owner. This must be set to a truthy value (``"true"``, ``"1"``,
-  ``"t"``) by a cluster administrator before any pod annotation takes effect.
+  namespace owner. This must be set to a truthy value (``"1"``, ``"t"``, ``"T"``,
+  ``"TRUE"``, ``"true"``, ``"True"``) by a cluster administrator before any pod
+  annotation takes effect. Falsy values (``"0"``, ``"f"``, ``"F"``, ``"FALSE"``,
+  ``"false"``, ``"False"``) explicitly deny delegation.
 
 Pod annotation:
   ``config.cilium.io/disable-source-ip-verification``
 
   Disables source IP verification for the annotated pod. Only effective
   when the namespace annotation above is set to a truthy value. Accepts the
-  same truthy values as the namespace annotation.
+  same truthy and falsy values as the namespace annotation.
 
 When neither annotation is set, or when the namespace annotation is falsy,
 pods inherit the global daemon configuration.

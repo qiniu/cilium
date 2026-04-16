@@ -410,6 +410,7 @@ func (k *K8sPodWatcher) updateK8sPodV1(oldK8sPod, newK8sPod *slim_corev1.Pod) er
 			}
 
 			// Handle source IP verification annotation.
+			var sipRegenerated bool
 			if annoChangedDisableSIP {
 				// Get namespace annotations for permission check
 				nsAnno := k.getNamespaceAnnotations(newK8sPod.Namespace)
@@ -427,8 +428,15 @@ func (k *K8sPodWatcher) updateK8sPodV1(oldK8sPod, newK8sPod *slim_corev1.Pod) er
 					if regen, _ := podEP.SetRegenerateStateIfAlive(regenMetadata); regen {
 						podEP.Regenerate(regenMetadata)
 					}
+					sipRegenerated = true
 				}
-			} else {
+			}
+
+			// Regenerate policy and datapath if other datapath annotations changed.
+			// If SIP triggered a full RegenerateWithDatapath, it will pick up the
+			// bandwidth/notrack state changes already applied above. Only fire a
+			// separate regeneration if SIP did not already do so.
+			if !sipRegenerated && (annoChangedBandwidth || annoChangedPriority || annoChangedNoTrack) {
 				realizePodAnnotationUpdate(podEP)
 			}
 		}
@@ -440,7 +448,7 @@ func (k *K8sPodWatcher) updateK8sPodV1(oldK8sPod, newK8sPod *slim_corev1.Pod) er
 func realizePodAnnotationUpdate(podEP *endpoint.Endpoint) {
 	regenMetadata := &regeneration.ExternalRegenerationMetadata{
 		Reason:            "annotations updated",
-		RegenerationLevel: regeneration.RegenerateWithoutDatapath,
+		RegenerationLevel: regeneration.RegenerateWithDatapath,
 	}
 	// No need to log an error if the state transition didn't succeed,
 	// if it didn't succeed that means the endpoint is being deleted, or

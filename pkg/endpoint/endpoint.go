@@ -1832,7 +1832,7 @@ func (e *Endpoint) ApplySourceIPVerificationFromAnnotation(podAnnotations, nsAnn
 		// Pod has the annotation but namespace doesn't grant permission - log at Debug level
 		// to avoid noise in high-frequency reconciliation paths
 		e.getLogger().Debug(
-			"Pod DisableSourceIPVerification annotation ignored: namespace does not have DelegateSourceIPVerification=true")
+			"Pod config.cilium.io/disable-source-ip-verification annotation ignored: namespace does not have config.cilium.io/delegate-source-ip-verification=true")
 	}
 
 	e.unconditionalLock()
