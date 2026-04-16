@@ -14,6 +14,7 @@ permissions:
 
 jobs:
   build-and-push:
+    if: ${{ github.repository_owner == 'cilium' }}
     timeout-minutes: 45
     name: Build and Push Images
     environment:
