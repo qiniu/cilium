@@ -21,7 +21,6 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
-	"github.com/cilium/cilium/pkg/time"
 )
 
 func registerNamespaceUpdater(log *slog.Logger, jg job.Group, db *statedb.DB, namespaces statedb.Table[daemonk8s.Namespace], em EndpointManager) {
@@ -41,7 +40,7 @@ func registerNamespaceUpdater(log *slog.Logger, jg job.Group, db *statedb.DB, na
 
 type namespaceUpdater struct {
 	oldIdtyLabels   map[string]labels.Labels
-	oldSIPAllowAnno map[string]string // Track AllowDisableSourceIPVerification annotation per namespace
+	oldSIPAllowAnno map[string]string // Track DelegateSourceIPVerification annotation per namespace
 	endpointManager EndpointManager
 	log             *slog.Logger
 	db              *statedb.DB
@@ -94,8 +93,8 @@ func (u *namespaceUpdater) update(newNS daemonk8s.Namespace) error {
 	oldIdtyLabels := u.oldIdtyLabels[newNS.Name]
 	newIdtyLabels, _ := labelsfilter.Filter(newLabels)
 
-	// Check if the AllowDisableSourceIPVerification annotation changed
-	newSIPAllowAnno := newNS.Annotations[annotation.AllowDisableSourceIPVerification]
+	// Check if the DelegateSourceIPVerification annotation changed
+	newSIPAllowAnno := newNS.Annotations[annotation.DelegateSourceIPVerification]
 	oldSIPAllowAnno := u.oldSIPAllowAnno[newNS.Name]
 	sipAllowAnnoChanged := newSIPAllowAnno != oldSIPAllowAnno
 
@@ -106,56 +105,45 @@ func (u *namespaceUpdater) update(newNS daemonk8s.Namespace) error {
 		return nil
 	}
 
-	eps := u.endpointManager.GetEndpointsByNamespace(newNS.Name)
+	eps := u.endpointManager.GetEndpoints()
 	failed := false
 	ciliumIdentityMaxJitter := option.Config.CiliumIdentityMaxJitter
-	sipRegenMaxJitter := option.Config.CiliumIdentityMaxJitter
 	for _, ep := range eps {
-		// Handle identity label updates
-		if labelsChanged {
-			err := ep.ModifyIdentityLabels(labels.LabelSourceK8s, newIdtyLabels, oldIdtyLabels, ciliumIdentityMaxJitter)
-			if err != nil {
-				u.log.Warn("unable to update endpoint with new identity labels from namespace labels",
-					logfields.Error, err,
-					logfields.EndpointID, ep.ID)
-				failed = true
-			}
-		}
-
-		// Handle SIP permission annotation change - re-evaluate all endpoints in this namespace
-		if sipAllowAnnoChanged {
-			// Get pod annotations from the endpoint's cached pod
-			pod := ep.GetPod()
-			var podAnno map[string]string
-			podUID := ep.GetK8sUID()
-			if pod != nil {
-				podAnno = pod.Annotations
-				podUID = string(pod.UID)
-			}
-
-			// Re-apply SIP verification setting with new namespace annotations
-			if ep.ApplySourceIPVerificationFromAnnotation(podAnno, newNS.Annotations) {
-				u.log.Warn("Source IP verification security control modified via namespace annotation",
-					logfields.K8sNamespace, newNS.Name,
-					logfields.K8sPodName, ep.GetK8sPodName(),
-					logfields.K8sUID, podUID,
-					logfields.EndpointID, ep.ID,
-					logfields.Value, newSIPAllowAnno)
-
-				// Trigger datapath regeneration if the setting changed
-				regenMetadata := &regeneration.ExternalRegenerationMetadata{
-					Reason:            "namespace AllowDisableSourceIPVerification annotation changed",
-					RegenerationLevel: regeneration.RegenerateWithDatapath,
+		epNS := ep.GetK8sNamespace()
+		if newNS.Name == epNS {
+			// Handle identity label updates
+			if labelsChanged {
+				err := ep.ModifyIdentityLabels(labels.LabelSourceK8s, newIdtyLabels, oldIdtyLabels, ciliumIdentityMaxJitter)
+				if err != nil {
+					u.log.Warn("unable to update endpoint with new identity labels from namespace labels",
+						logfields.Error, err,
+						logfields.EndpointID, ep.ID)
+					failed = true
 				}
-				if regen, _ := ep.SetRegenerateStateIfAlive(regenMetadata); regen {
-					jitter := endpointRegenJitter(ep.ID, sipRegenMaxJitter)
-					if jitter > 0 {
-						epRef := ep
-						regenMetadataRef := regenMetadata
-						time.AfterFunc(jitter, func() {
-							epRef.Regenerate(regenMetadataRef)
-						})
-					} else {
+			}
+
+			// Handle SIP permission annotation change - re-evaluate all endpoints in this namespace
+			if sipAllowAnnoChanged {
+				// Get pod annotations from the endpoint's cached pod
+				pod := ep.GetPod()
+				var podAnno map[string]string
+				if pod != nil {
+					podAnno = pod.Annotations
+				}
+
+				// Re-apply SIP verification setting with new namespace annotations
+				if ep.ApplySourceIPVerificationFromAnnotation(podAnno, newNS.Annotations) {
+					u.log.Info("Namespace DelegateSourceIPVerification annotation changed, regenerating endpoint",
+						logfields.K8sNamespace, newNS.Name,
+						logfields.EndpointID, ep.ID,
+						logfields.Value, newSIPAllowAnno)
+
+					// Trigger datapath regeneration if the setting changed
+					regenMetadata := &regeneration.ExternalRegenerationMetadata{
+						Reason:            "namespace DelegateSourceIPVerification annotation changed",
+						RegenerationLevel: regeneration.RegenerateWithDatapath,
+					}
+					if regen, _ := ep.SetRegenerateStateIfAlive(regenMetadata); regen {
 						ep.Regenerate(regenMetadata)
 					}
 				}
@@ -168,14 +156,4 @@ func (u *namespaceUpdater) update(newNS daemonk8s.Namespace) error {
 	u.oldIdtyLabels[newNS.Name] = newIdtyLabels
 	u.oldSIPAllowAnno[newNS.Name] = newSIPAllowAnno
 	return nil
-}
-
-func endpointRegenJitter(epID uint16, maxJitter time.Duration) time.Duration {
-	if maxJitter <= 0 {
-		return 0
-	}
-
-	// Use multiplicative hashing to spread endpoint IDs across jitter window.
-	hash := uint64(epID) * 2654435761
-	return time.Duration(hash % uint64(maxJitter))
 }
