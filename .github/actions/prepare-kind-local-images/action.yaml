@@ -39,10 +39,11 @@ runs:
       env:
         INPUT_SHA: ${{ inputs.sha }}
       run: |
-        set -eo pipefail
-        make dev-docker-image DOCKER_IMAGE_TAG="$INPUT_SHA"
-        make dev-docker-operator-generic-image DOCKER_IMAGE_TAG="$INPUT_SHA"
-        make docker-hubble-relay-image DOCKER_IMAGE_TAG="$INPUT_SHA"
+        timeout 45m env INPUT_SHA="$INPUT_SHA" bash -eo pipefail -c '
+          make dev-docker-image DOCKER_IMAGE_TAG="$INPUT_SHA" DOCKER_DEV_ACCOUNT=cilium
+          make dev-docker-operator-generic-image DOCKER_IMAGE_TAG="$INPUT_SHA" DOCKER_DEV_ACCOUNT=cilium
+          make docker-hubble-relay-image DOCKER_IMAGE_TAG="$INPUT_SHA" DOCKER_DEV_ACCOUNT=cilium
+        '
 
     - name: Import local images into kind
       if: ${{ steps.mode.outputs.enabled == 'true' }}
@@ -69,7 +70,7 @@ runs:
         fi
 
         kind load docker-image \
-          quay.io/cilium/cilium-dev:${INPUT_SHA} \
-          quay.io/cilium/operator-generic:${INPUT_SHA} \
-          quay.io/cilium/hubble-relay:${INPUT_SHA} \
+          "quay.io/cilium/cilium-dev:${INPUT_SHA}" \
+          "quay.io/cilium/operator-generic:${INPUT_SHA}" \
+          "quay.io/cilium/hubble-relay:${INPUT_SHA}" \
           --name "$cluster_name"
