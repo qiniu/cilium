@@ -1,0 +1,76 @@
+name: Prepare kind local images
+description: Build Cilium test images locally and import them into kind for fork repositories where upstream CI images are not published.
+inputs:
+  sha:
+    description: Image tag to build and load
+    required: true
+  cluster-name:
+    description: Optional kind cluster name
+    required: false
+    default: ''
+outputs:
+  enabled:
+    description: Whether local image mode is enabled
+    value: ${{ steps.mode.outputs.enabled }}
+  cilium_install_overrides:
+    description: Helm overrides for local images
+    value: ${{ steps.mode.outputs.cilium_install_overrides }}
+runs:
+  using: composite
+  steps:
+    - name: Determine whether local image mode is needed
+      id: mode
+      shell: bash
+      env:
+        INPUT_SHA: ${{ inputs.sha }}
+      run: |
+        if [[ "${GITHUB_REPOSITORY_OWNER}" == "cilium" ]]; then
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          echo "cilium_install_overrides=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "enabled=true" >> "$GITHUB_OUTPUT"
+        echo "cilium_install_overrides=--helm-set=image.override=quay.io/cilium/cilium-dev:${INPUT_SHA} --helm-set=operator.image.override=quay.io/cilium/operator-generic:${INPUT_SHA} --helm-set=hubble.relay.image.override=quay.io/cilium/hubble-relay:${INPUT_SHA} --helm-set=hubble.relay.gops.enabled=false" >> "$GITHUB_OUTPUT"
+
+    - name: Build local CI images
+      if: ${{ steps.mode.outputs.enabled == 'true' }}
+      shell: bash
+      env:
+        INPUT_SHA: ${{ inputs.sha }}
+      run: |
+        timeout 45m env INPUT_SHA="$INPUT_SHA" bash -eo pipefail -c '
+          make dev-docker-image DOCKER_IMAGE_TAG="$INPUT_SHA" DOCKER_DEV_ACCOUNT=cilium
+          make dev-docker-operator-generic-image DOCKER_IMAGE_TAG="$INPUT_SHA" DOCKER_DEV_ACCOUNT=cilium
+          make docker-hubble-relay-image DOCKER_IMAGE_TAG="$INPUT_SHA" DOCKER_DEV_ACCOUNT=cilium
+        '
+
+    - name: Import local images into kind
+      if: ${{ steps.mode.outputs.enabled == 'true' }}
+      shell: bash
+      env:
+        INPUT_SHA: ${{ inputs.sha }}
+        INPUT_CLUSTER_NAME: ${{ inputs.cluster-name }}
+      run: |
+        cluster_name="$INPUT_CLUSTER_NAME"
+        if [[ -z "$cluster_name" ]]; then
+          mapfile -t clusters < <(kind get clusters)
+          if (( ${#clusters[@]} > 1 )); then
+            echo "Multiple kind clusters found; specify cluster-name explicitly." >&2
+            printf '%s\n' "${clusters[@]}" >&2
+            exit 1
+          fi
+          if (( ${#clusters[@]} == 1 )); then
+            cluster_name="${clusters[0]}"
+          fi
+        fi
+        if [[ -z "$cluster_name" ]]; then
+          echo "No kind cluster found to load local images into" >&2
+          exit 1
+        fi
+
+        kind load docker-image \
+          "quay.io/cilium/cilium-dev:${INPUT_SHA}" \
+          "quay.io/cilium/operator-generic:${INPUT_SHA}" \
+          "quay.io/cilium/hubble-relay:${INPUT_SHA}" \
+          --name "$cluster_name"
