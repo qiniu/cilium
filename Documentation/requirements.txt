@@ -30,7 +30,7 @@ click==8.3.2
 colorama==0.4.6
 deepmerge==2.0
 docutils==0.22.4
-idna==3.11
+idna==3.15
 imagesize==2.0.0
 Jinja2==3.1.6
 jsonschema==4.26.0
