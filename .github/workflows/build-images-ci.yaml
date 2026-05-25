@@ -2,12 +2,13 @@ name: Image CI Build
 
 # Any change in triggers needs to be reflected in the concurrency group.
 on:
-  push:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
     branches:
-      - v1.19
-      - ft/v1.19/**
-  merge_group:
-    types: [checks_requested]
+      - 7niu-v1.19
 
 permissions:
   # To be able to access the repository with `actions/checkout`
@@ -26,11 +27,10 @@ jobs:
     name: Wait for lint checks
     uses: ./.github/workflows/wait-for-status-check.yaml
     with:
-      # Only run this job if the event is pull_request_target and if the PR
+      # Only run this job if the event is pull_request and if the PR
       # is not opened from a fork.
-      # This is to avoid waiting for base images on push to main or merge_group
-      # events as the lint-images-base does not run on those events.
-      if: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.event.pull_request.base.repo.full_name }}
+      # This avoids waiting for base images when the PR comes from a fork.
+      if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.event.pull_request.base.repo.full_name }}
       sha: ${{ github.event.pull_request.head.sha || github.sha }}
       lint-workflows: "lint-images-base.yaml"
       timeout-minutes: 2
@@ -39,6 +39,7 @@ jobs:
   build-and-push-prs:
     timeout-minutes: 45
     name: Build and Push Images
+    if: github.repository_owner == 'cilium'
     runs-on: ${{ vars.GH_RUNNER_EXTRA_POWER_UBUNTU_LATEST || 'ubuntu-24.04' }}
     needs: wait-for-base-images
     outputs:
@@ -135,12 +136,16 @@ jobs:
             [worker.oci]
              gc=false
 
-      - name: Login to quay.io for CI
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
-        with:
-          registry: quay.io
-          username: ${{ secrets.QUAY_USERNAME_CI }}
-          password: ${{ secrets.QUAY_PASSWORD_CI }}
+      # Disabled for this fork branch: we currently do not push upstream images,
+      # and this login will be replaced when migrating to a private registry.
+      # - name: Login to quay.io for CI
+      #   # Disabled in fork workflows: push credentials are unavailable.
+      #   if: ${{ github.repository_owner == 'cilium' }}
+      #   uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+      #   with:
+      #     registry: quay.io
+      #     username: ${{ secrets.QUAY_USERNAME_CI }}
+      #     password: ${{ secrets.QUAY_PASSWORD_CI }}
 
       - name: Getting image tag
         id: tag
@@ -262,7 +267,7 @@ jobs:
           provenance: false
           context: .
           file: ${{ matrix.dockerfile }}
-          push: true
+          push: false
           platforms: ${{ matrix.platforms }}
           tags: ${{ steps.tag.outputs.normal_tag }}
           target: release
@@ -278,7 +283,7 @@ jobs:
           provenance: false
           context: .
           file: ${{ matrix.dockerfile }}
-          push: true
+          push: false
           platforms: linux/amd64
           tags: ${{ steps.tag.outputs.race_tag }}
           target: release
@@ -296,7 +301,7 @@ jobs:
           provenance: false
           context: .
           file: ${{ matrix.dockerfile }}
-          push: true
+          push: false
           platforms: linux/amd64
           tags: ${{ steps.tag.outputs.unstripped_tag }}
           target: release
