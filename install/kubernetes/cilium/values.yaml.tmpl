@@ -4475,3 +4475,14 @@ standaloneDnsProxy:
     digest: "${STANDALONE_DNS_PROXY_DIGEST}"
     useDigest: ${USE_DIGESTS}
     pullPolicy: "${PULL_POLICY}"
+
+# -- Native VPC mode configuration
+nativeVPC:
+  # -- Enable native VPC mode. When enabled, Cilium will use VNI+IP combination
+  # for endpoint conflict detection, allowing the same IP to exist in different VPCs.
+  enabled: false
+  # -- Pod annotation key that contains the VNI (Virtual Network Identifier) value.
+  # The annotation value must be a non-zero positive integer.
+  # This field is required when nativeVPC.enabled is true.
+  # Example: "your-cni.io/vni"
+  vniAnnotation: ""

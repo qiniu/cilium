@@ -306,6 +306,9 @@ message Endpoint {
     repeated string labels = 4;
     string pod_name = 5;
     repeated Workload workloads = 6;
+    // vni_id is the VNI (Virtual Network Identifier) for this endpoint in native-vpc mode.
+    // Used to distinguish endpoints with overlapping IP addresses in different VPCs.
+    uint64 vni_id = 8;
 }
 
 message Workload {
@@ -1009,7 +1012,7 @@ message Aggregate {
     // ingress_flow_count is the count of flows in the ingress direction
     uint32 ingress_flow_count = 1;
 
-    // egress_flow_count is the count of flows in the egress direction  
+    // egress_flow_count is the count of flows in the egress direction
     uint32 egress_flow_count = 2;
 
     // unknown_direction_flow_count is the count of flows with unknown traffic direction

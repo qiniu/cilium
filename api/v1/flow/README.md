@@ -225,6 +225,7 @@ Emitter identifies the source that emits a Hubble flow.
 | labels | [string](#string) | repeated | labels in `foo=bar` format. |
 | pod_name | [string](#string) |  |  |
 | workloads | [Workload](#flow-Workload) | repeated |  |
+| vni_id | [uint64](#uint64) |  | vni_id is the VNI (Virtual Network Identifier) for this endpoint in native-vpc mode. Used to distinguish endpoints with overlapping IP addresses in different VPCs. |
 
 
 
