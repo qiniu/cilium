@@ -97,6 +97,13 @@ jobs:
           - role: worker
           EOF
 
+      - name: Prepare local kind images
+        id: local_kind_images
+        uses: ./.github/actions/prepare-kind-local-images
+        with:
+          sha: ${{ github.event.pull_request.head.sha || github.sha }}
+          cluster-name: ${{ env.cluster_name }}
+
       - name: Workaround CoreDNS for IPv6 airgapped
         if: ${{ matrix.ipFamily == 'ipv6' }}
         run: |
@@ -141,6 +148,9 @@ jobs:
             --helm-set=kubeProxyReplacement=true \
             --helm-set=identityChangeGracePeriod=\"0s\" \
             --helm-set=sctp.enabled=true"
+          if [ "${{ steps.local_kind_images.outputs.enabled }}" = "true" ]; then
+            CILIUM_INSTALL_DEFAULTS="${CILIUM_INSTALL_DEFAULTS} ${{ steps.local_kind_images.outputs.cilium_install_overrides }}"
+          fi
           echo cilium_install_defaults=${CILIUM_INSTALL_DEFAULTS} >> $GITHUB_OUTPUT
           echo sha=${{ steps.default_vars.outputs.sha }} >> $GITHUB_OUTPUT
 
@@ -154,6 +164,7 @@ jobs:
           release-version: ${{ env.CILIUM_CLI_VERSION }}
 
       - name: Wait for images to be available
+        if: ${{ steps.local_kind_images.outputs.enabled != 'true' }}
         timeout-minutes: 30
         shell: bash
         run: |

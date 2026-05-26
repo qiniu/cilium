@@ -78,7 +78,7 @@ jobs:
     env:
       job_name: "Conformance Smoke Test"
     needs: check_changes
-    if: ${{ needs.check_changes.outputs.tested == 'true' && github.event_name != 'merge_group' }}
+    if: ${{ github.repository_owner == 'cilium' && needs.check_changes.outputs.tested == 'true' && github.event_name != 'merge_group' }}
     runs-on: ubuntu-24.04
     name: Installation and Conformance Test
     steps:
@@ -121,7 +121,14 @@ jobs:
           config: ${{ env.KIND_CONFIG }}
           wait: 0 # The control-plane never becomes ready, since no CNI is present
 
+      - name: Prepare local kind images
+        id: local_kind_images
+        uses: ./.github/actions/prepare-kind-local-images
+        with:
+          sha: ${{ github.event.pull_request.head.sha || github.sha }}
+
       - name: Wait for images to be available
+        if: ${{ steps.local_kind_images.outputs.enabled != 'true' }}
         timeout-minutes: 30
         shell: bash
         run: |
@@ -180,6 +187,10 @@ jobs:
              --helm-set hubble.enabled=true \
              --helm-set=hubble.metrics.enabled=\"{dns,drop,tcp,flow,port-distribution,icmp,http}\" \
              --helm-set ingressController.enabled=true"
+
+          if [ "${{ steps.local_kind_images.outputs.enabled }}" = "true" ]; then
+            CILIUM_INSTALL_DEFAULTS="${CILIUM_INSTALL_DEFAULTS} ${{ steps.local_kind_images.outputs.cilium_install_overrides }}"
+          fi
 
           echo cilium_install_defaults=${CILIUM_INSTALL_DEFAULTS} >> $GITHUB_OUTPUT
 

@@ -10,6 +10,7 @@ on:
 jobs:
   analyze:
     name: Analyze
+    if: ${{ github.repository_owner == 'cilium' }}
     runs-on: ubuntu-24.04
     permissions:
       actions: read

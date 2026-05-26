@@ -53,7 +53,7 @@ jobs:
   # should be unaffected otherwise.
   build-html:
     needs: check_changes
-    if: ${{ needs.check_changes.outputs.docs-tree == 'true' }}
+    if: ${{ github.repository_owner == 'cilium' && needs.check_changes.outputs.docs-tree == 'true' }}
     name: Validate & Build HTML
     runs-on: ubuntu-24.04
     steps:
@@ -71,7 +71,7 @@ jobs:
 
   check-generated-documentation:
     name: Check generated documentation
-    if: ${{ github.event_name != 'merge_group' }}
+    if: ${{ github.repository_owner == 'cilium' && github.event_name != 'merge_group' }}
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
