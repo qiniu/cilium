@@ -50,7 +50,7 @@ jobs:
     env:
       job_name: "Conformance Smoke Test with IPv6"
     needs: check_changes
-    if: ${{ needs.check_changes.outputs.tested == 'true' }}
+    if: ${{ github.repository_owner == 'cilium' && needs.check_changes.outputs.tested == 'true' }}
     runs-on: ubuntu-24.04
     name: Installation and Conformance Test (ipv6)
     steps:
@@ -104,7 +104,14 @@ jobs:
           config: ${{ env.KIND_CONFIG }}
           wait: 0 # The control-plane never becomes ready, since no CNI is present
 
+      - name: Prepare local kind images
+        id: local_kind_images
+        uses: ./.github/actions/prepare-kind-local-images
+        with:
+          sha: ${{ github.event.pull_request.head.sha || github.sha }}
+
       - name: Wait for images to be available
+        if: ${{ steps.local_kind_images.outputs.enabled != 'true' }}
         timeout-minutes: 30
         shell: bash
         run: |
@@ -127,6 +134,10 @@ jobs:
             --helm-set autoDirectNodeRoutes=true \
             --helm-set ipv6NativeRoutingCIDR=2001:db8:1::/64 \
             --helm-set ingressController.enabled=true"
+
+          if [ "${{ steps.local_kind_images.outputs.enabled }}" = "true" ]; then
+            CILIUM_INSTALL_DEFAULTS="${CILIUM_INSTALL_DEFAULTS} ${{ steps.local_kind_images.outputs.cilium_install_overrides }}"
+          fi
 
           echo cilium_install_defaults=${CILIUM_INSTALL_DEFAULTS} >> $GITHUB_OUTPUT
 

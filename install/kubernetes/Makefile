@@ -15,7 +15,7 @@ MIN_K8S_MINOR := 16
 MIN_K8S_VERSION := "v$(MIN_K8S_MAJOR).$(MIN_K8S_MINOR).0"
 
 CILIUM_CHARTS := $(ROOT_DIR)/$(RELATIVE_DIR)/cilium
-CHART_FILE := "$(CILIUM_CHARTS)/Chart.yaml"
+CHART_FILE := $(CILIUM_CHARTS)/Chart.yaml
 
 VALUES_TMPL_FILE_NAME ?= *values.yaml.tmpl
 
@@ -52,8 +52,8 @@ all: update-versions check-values-yaml docs lint
 update-chart: $(ROOT_DIR)/VERSION # Update chart versions to point to the current version.
 	$(ECHO_GEN)cilium/Chart.yaml
 	$(QUIET)grep -lR -e 'version:' -e 'appVersion:' $(CILIUM_CHARTS)/ \
-		| xargs -L 1 $(SED) -i -e 's/'$(CILIUM_CHART_REGEX)'/\1 '$(VERSION)'/g'
-	$(QUIET)$(SED) -i 's;icon:.*;icon: $(LOGO_BASE_URL)/cilium@main/$(LOGO_PATH);' $(CHART_FILE)
+		| xargs -L 1 -I {} sh -c '$(SED) -e '\''s/'$(CILIUM_CHART_REGEX)'/\1 '$(VERSION)'/g'\'' "$$1" > "$$1.tmp" && mv "$$1.tmp" "$$1"' _ {}
+	$(QUIET)$(SED) 's;icon:.*;icon: $(LOGO_BASE_URL)/cilium@main/$(LOGO_PATH);' $(CHART_FILE) > $(CHART_FILE).tmp && mv $(CHART_FILE).tmp $(CHART_FILE)
 
 check-values-yaml: cilium/values.schema.json
 	$(ECHO_CHECK) $@

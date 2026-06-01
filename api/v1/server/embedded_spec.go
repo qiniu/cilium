@@ -2707,6 +2707,12 @@ func init() {
         "sync-build-endpoint": {
           "description": "Whether to build an endpoint synchronously\n",
           "type": "boolean"
+        },
+        "vni-id": {
+          "description": "VNI (Virtual Network Identifier) for this endpoint in native-vpc mode. Used to distinguish endpoints with overlapping IP addresses in different VPCs/overlay networks. When set, IP conflict detection will consider both VNI and IP address together.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 16777215
         }
       }
     },
@@ -8099,6 +8105,12 @@ func init() {
         "sync-build-endpoint": {
           "description": "Whether to build an endpoint synchronously\n",
           "type": "boolean"
+        },
+        "vni-id": {
+          "description": "VNI (Virtual Network Identifier) for this endpoint in native-vpc mode. Used to distinguish endpoints with overlapping IP addresses in different VPCs/overlay networks. When set, IP conflict detection will consider both VNI and IP address together.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 16777215
         }
       }
     },

@@ -73,6 +73,12 @@ jobs:
           ipv6_external_target: ${{ steps.external_network.outputs.ipv6_external_target }}
           ipv6_other_external_target: ${{ steps.external_network.outputs.ipv6_other_external_target }}
 
+      - name: Prepare local kind images
+        id: local_kind_images
+        uses: ./.github/actions/prepare-kind-local-images
+        with:
+          sha: ${{ github.event.pull_request.head.sha || github.sha }}
+
       - name: Get connectivity test flags
         id: e2e_config
         uses: ./.github/actions/cli-test-config
@@ -104,6 +110,9 @@ jobs:
             --helm-set=envoy.enabled=false \
             --helm-set=ipv6.enabled=true \
             --wait=false"
+          if [ "${{ steps.local_kind_images.outputs.enabled }}" = "true" ]; then
+            CILIUM_INSTALL_DEFAULTS="${CILIUM_INSTALL_DEFAULTS} ${{ steps.local_kind_images.outputs.cilium_install_overrides }}"
+          fi
           CONNECTIVITY_TEST_DEFAULTS="${{ steps.e2e_config.outputs.test_flags }} \
             --external-target-ca-namespace=external-target-secrets --external-target-ca-name=custom-ca \
             --external-target-ipv6-capable"
@@ -122,6 +131,7 @@ jobs:
           release-version: ${{ env.CILIUM_CLI_VERSION }}
 
       - name: Wait for images to be available
+        if: ${{ steps.local_kind_images.outputs.enabled != 'true' }}
         timeout-minutes: 30
         shell: bash
         run: |

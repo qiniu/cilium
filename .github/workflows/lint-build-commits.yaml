@@ -87,6 +87,7 @@ jobs:
 
   build-commits-cilium:
     name: Check if cilium builds for every commit
+    if: ${{ github.repository_owner == 'cilium' }}
     runs-on: ${{ vars.GH_RUNNER_EXTRA_POWER_UBUNTU_LATEST || 'ubuntu-24.04' }}
     needs: [compute-vars]
     timeout-minutes: 180
@@ -173,6 +174,7 @@ jobs:
 
   build-commits-hubble-cli:
     name: Check if hubble-cli builds for every commit
+    if: ${{ github.repository_owner == 'cilium' }}
     runs-on: ${{ vars.GH_RUNNER_EXTRA_POWER_UBUNTU_LATEST || 'ubuntu-24.04' }}
     needs: [compute-vars]
     timeout-minutes: 180
@@ -268,7 +270,7 @@ jobs:
     runs-on: ${{ vars.GH_RUNNER_EXTRA_POWER_UBUNTU_LATEST || 'ubuntu-24.04' }}
     needs: [compute-vars]
     # Runs only if code under bpf/ is changed.
-    if: needs.compute-vars.outputs.build-bpf == 'true'
+    if: ${{ github.repository_owner == 'cilium' && needs.compute-vars.outputs.build-bpf == 'true' }}
     timeout-minutes: 180
     steps:
       - name: Collect Workflow Telemetry
@@ -361,7 +363,7 @@ jobs:
     runs-on: ${{ vars.GH_RUNNER_EXTRA_POWER_UBUNTU_LATEST || 'ubuntu-24.04' }}
     needs: [compute-vars]
     # Runs only if code under test/ is changed.
-    if: needs.compute-vars.outputs.build-test == 'true'
+    if: ${{ github.repository_owner == 'cilium' && needs.compute-vars.outputs.build-test == 'true' }}
     timeout-minutes: 180
     steps:
       - name: Collect Workflow Telemetry
