@@ -275,10 +275,17 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 	// Build checkIDs for IP conflict detection
 	// For native-vpc mode with VNI, use VNI-aware identifier (vni-ipv4:<vni>:<ip>)
 	// Otherwise, use original IP-only identifier (ipv4:<ip>)
+	//
+	// Gate on option.Config.EnableNativeVPC (not the local nativeVPCEnabled,
+	// which also requires the annotation key) so that the conflict-detection
+	// key matches the predicate used by NewEndpointFromChangeModel() and
+	// Identifiers(). Using different predicates would let the endpoint register
+	// under a VNI-aware key while conflict detection probed the plain IP, which
+	// reintroduces the VNI-based bypass.
 	var checkIDs []string
 
 	if ep.IPv4.IsValid() {
-		if ep.VNIID > 0 {
+		if option.Config.EnableNativeVPC && ep.VNIID > 0 {
 			checkIDs = append(checkIDs, endpointid.NewVNIIPPrefixID(ep.IPv4, ep.VNIID))
 		} else {
 			checkIDs = append(checkIDs, endpointid.NewIPPrefixID(ep.IPv4))
@@ -286,7 +293,7 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 	}
 
 	if ep.IPv6.IsValid() {
-		if ep.VNIID > 0 {
+		if option.Config.EnableNativeVPC && ep.VNIID > 0 {
 			checkIDs = append(checkIDs, endpointid.NewVNIIPPrefixID(ep.IPv6, ep.VNIID))
 		} else {
 			checkIDs = append(checkIDs, endpointid.NewIPPrefixID(ep.IPv6))

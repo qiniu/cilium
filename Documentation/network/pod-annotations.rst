@@ -96,12 +96,20 @@ Namespace annotation (administrator-controlled):
 Pod annotation:
   ``config.cilium.io/disable-source-ip-verification``
 
-  Disables source IP verification for the annotated pod. Only effective
+  Controls source IP verification for the annotated pod. Only effective
   when the namespace annotation above is set to a truthy value. Accepts the
-  same truthy and falsy values as the namespace annotation.
+  same truthy and falsy values as the namespace annotation:
 
-When neither annotation is set, or when the namespace annotation is falsy,
-pods inherit the global daemon configuration.
+  - A **truthy** value disables source IP verification for the pod.
+  - A **falsy** value explicitly enables source IP verification for the
+    pod, overriding a disabled global default. This lets a namespace owner
+    re-enable verification per pod even when it is disabled cluster-wide.
+  - Any other (invalid, non-empty) value is ignored and the pod inherits
+    the global daemon configuration.
+
+When neither annotation is set, when the namespace annotation is falsy, or
+when the pod annotation has an invalid value, pods inherit the global daemon
+configuration.
 
 .. warning::
 
