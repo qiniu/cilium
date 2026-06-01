@@ -18,6 +18,7 @@ import (
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/labelsfilter"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
 )
 
@@ -89,12 +90,27 @@ func (cemf *cachedEndpointMetadataFetcher) FetchK8sMetadataForEndpointFromPod(p 
 }
 
 func (cemf *cachedEndpointMetadataFetcher) fetchNamespace(nsName string) (daemonk8s.Namespace, error) {
-	// If network policies are disabled, labels are not needed, the namespace
-	// watcher is not running, and a namespace containing only the name is returned.
+	// When network policies are disabled the namespace labels are not required
+	// to compute the endpoint identity. The namespace annotations, however, are
+	// still needed for security controls that are evaluated per namespace, such
+	// as source IP verification delegation
+	// (config.cilium.io/delegate-source-ip-verification). The namespace
+	// reflector runs independently of the network policy setting (it is gated
+	// only on the k8s client being enabled), so resolve the namespace to expose
+	// its annotations. Fall back to a name-only namespace when it cannot be
+	// resolved so that endpoint creation is not blocked when policies are off.
 	if !option.NetworkPolicyEnabled(cemf.config) {
-		return daemonk8s.Namespace{
-			Name: nsName,
-		}, nil
+		ns, err := cemf.getNamespace(nsName)
+		if err != nil {
+			cemf.logger.Debug(
+				"Failed to resolve namespace while network policy is disabled; "+
+					"continuing without namespace annotations",
+				logfields.K8sNamespace, nsName,
+				logfields.Error, err,
+			)
+			return daemonk8s.Namespace{Name: nsName}, nil
+		}
+		return ns, nil
 	}
 	return cemf.getNamespace(nsName)
 }
