@@ -771,6 +771,16 @@ one flat key space - correct when the entries live in two different BPF maps.
 The Go and C key layouts are pinned by a test on the real invariant: the LPM
 static prefix must equal the bit offset of the IP inside the key data.
 
+The endpoint manager's identifier index follows the same rule from both ends.
+An endpoint in a VPC registers ``vni-ipv4:<vni>:<ip>`` and no bare-address
+identifier, so that index is the only way to resolve it by address. The set that was registered is kept, because recomputing the identifiers at
+removal time would derive them from an endpoint whose fields may have moved on. And the
+removal only drops a reference that still points at the endpoint being removed:
+a pod deleted and recreated on the same address in the same VPC produces a
+successor that registers the same identifier before the predecessor finishes
+being torn down, and removing it then would leave the running pod with no
+identifier at all.
+
 *Downstream* (forwarding -> policy/observability): the VNI-scoped lookup yields
 the peer identity that feeds the identity-keyed policy map, and the trace/drop
 events carry the endpoint id from which the observability plane derives the
@@ -1318,6 +1328,12 @@ look for when reviewing a change.
 |           | endpoint address, so the     | downstream is as ambiguous as the    |
 |           | endpoints sharing one pushed | address; refuse rather than let the  |
 |           | over each other              | last writer decide for all           |
++-----------+------------------------------+--------------------------------------+
+| control   | an endpoint removed its aux  | a key can belong to a successor by   |
+|           | identifiers by recomputing   | the time a predecessor is cleaned    |
+|           | them, and removed them even  | up: snapshot what was registered,    |
+|           | when a successor already     | and remove only what still points at |
+|           | owned the key                | the one being removed                |
 +-----------+------------------------------+--------------------------------------+
 | control   | the restore re-read adopted  | a value that other state is derived  |
 |           | a *different* VNI, moving    | from cannot be swapped in isolation; |

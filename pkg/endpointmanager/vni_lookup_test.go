@@ -191,3 +191,50 @@ func TestOverlappingIPsMetric(t *testing.T) {
 	require.Zero(t, count(), "the condition clears when the overlap is gone")
 	mgr.WaitEndpointRemoved(a)
 }
+
+// TestUnexposeRemovesOnlyItsOwnReferences covers what happens when an address
+// is handed to a new endpoint before the old one has finished being torn down.
+//
+// A pod that is deleted and recreated on the same address in the same VPC
+// produces exactly that: the new endpoint registers the (VNI, IP) identifier,
+// which is the only way this address can be resolved - endpoints in a VPC
+// deliberately register no bare-address identifier - and the old endpoint's
+// teardown runs afterwards. Removing the identifier because the old endpoint
+// once registered it would leave the running pod unresolvable, so the removal
+// only applies to references that still point at the endpoint being removed.
+func TestUnexposeRemovesOnlyItsOwnReferences(t *testing.T) {
+	s := setupEndpointManagerSuite(t)
+	logger := hivetest.Logger(t)
+	mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+
+	newEP := func(id int64, ip string, vni uint64) *endpoint.Endpoint {
+		model := newTestEndpointModel(int(id), endpoint.StateReady)
+		ep, err := endpoint.NewEndpointFromChangeModel(t.Context(), logger, nil, &endpoint.MockEndpointBuildQueue{}, nil, nil, nil, nil, nil, identitymanager.NewIDManager(logger), nil, nil, s.repo, testipcache.NewMockIPCache(), &endpoint.FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), ctmap.NewFakeGCRunner(), nil, model, fakeTypes.WireguardConfig{}, fakeTypes.IPsecConfig{}, nil, nil)
+		require.NoError(t, err)
+		ep.Start(uint16(model.ID))
+		t.Cleanup(ep.Stop)
+		ep.IPv4 = netip.MustParseAddr(ip)
+		ep.VNIID = vni
+		return ep
+	}
+
+	const ip = "10.99.0.11"
+	addr := netip.MustParseAddr(ip)
+
+	old := newEP(20, ip, 5)
+	require.NoError(t, mgr.expose(old))
+	require.Same(t, old, mgr.LookupIPWithVNI(addr, 5))
+
+	// The replacement takes the same address in the same VPC and is exposed
+	// while the previous endpoint is still being removed.
+	fresh := newEP(21, ip, 5)
+	require.NoError(t, mgr.expose(fresh))
+	require.Same(t, fresh, mgr.LookupIPWithVNI(addr, 5), "the newest endpoint owns the identifier")
+
+	mgr.unexpose(old)
+
+	require.Same(t, fresh, mgr.LookupIPWithVNI(addr, 5),
+		"the running endpoint must keep its identifier when its predecessor is removed")
+	require.Same(t, fresh, mgr.LookupIPUnambiguous(addr))
+	require.NotNil(t, mgr.LookupIPAnyVNI(addr), "the per-IP index must still know the address is in use")
+}

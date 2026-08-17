@@ -505,11 +505,11 @@ func (mgr *endpointManager) unexpose(ep *endpoint.Endpoint) {
 	}
 
 	if registered := mgr.registeredIdentifiers[ep.ID]; registered != nil {
-		mgr.removeReferencesLocked(registered)
+		mgr.removeReferencesLocked(ep, registered)
 		delete(mgr.registeredIdentifiers, ep.ID)
 	} else {
 		// Restoring endpoints may not have a registration snapshot yet.
-		mgr.removeReferencesLocked(ep.Identifiers())
+		mgr.removeReferencesLocked(ep, ep.Identifiers())
 	}
 }
 
@@ -763,7 +763,7 @@ func (mgr *endpointManager) UpdateReferences(ep *endpoint.Endpoint) error {
 
 	identifiers := ep.Identifiers()
 	if old := mgr.registeredIdentifiers[ep.ID]; old != nil {
-		mgr.removeReferencesLocked(old)
+		mgr.removeReferencesLocked(ep, old)
 	}
 	mgr.updateReferencesLocked(ep, identifiers)
 	mgr.registeredIdentifiers[ep.ID] = cloneIdentifiers(identifiers)
@@ -791,9 +791,22 @@ func (mgr *endpointManager) updateOverlappingIPsMetric() {
 }
 
 // removeReferencesLocked removes the mappings from the endpointmanager.
-func (mgr *endpointManager) removeReferencesLocked(identifiers endpointid.Identifiers) {
+// removeReferencesLocked drops the aux identifiers of an endpoint that is being
+// removed.
+//
+// An identifier may already belong to a different endpoint by the time this
+// runs: a pod that is deleted and recreated on the same address in the same VPC
+// produces a new endpoint that registers the same (VNI, IP) identifier before
+// the previous one has finished being torn down. Removing it then would leave
+// the running pod with no identifier at all - endpoints in a VPC deliberately
+// register no bare-address one - so only references that still point at this
+// endpoint are removed.
+func (mgr *endpointManager) removeReferencesLocked(ep *endpoint.Endpoint, identifiers endpointid.Identifiers) {
 	for prefix := range identifiers {
 		id := endpointid.NewID(prefix, identifiers[prefix])
+		if current, exists := mgr.endpointsAux[id]; exists && current != ep {
+			continue
+		}
 		delete(mgr.endpointsAux, id)
 
 		if ip, ok := bareIPOfVNIIdentifier(prefix, identifiers[prefix]); ok {
