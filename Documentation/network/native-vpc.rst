@@ -6,9 +6,9 @@
 
 .. _native_vpc:
 
-*************************
+**************************
 Native VPC Mode (kube-ovn)
-*************************
+**************************
 
 Cilium can run in native-vpc mode on top of a kube-ovn underlay that provides
 multiple VPCs and overlapping subnets. Cilium deliberately does **not** model
@@ -123,7 +123,7 @@ fallback sequence:
      overlapping IPs from different logical switches/VPCs coexist.
 
 Observability: the (VNI, IP) chain in Hubble
-===========================================
+============================================
 
 Every Hubble flow of a native-vpc endpoint carries its VNI, and every lookup
 Hubble performs to enrich a flow is scoped by (VNI, IP). The chain is:
@@ -450,7 +450,7 @@ Requirements
 Plane-by-plane verification
 ===========================
 
-The consumer checklist above is organised by data structure. This section is
+The consumer checklist above is organized by data structure. This section is
 the *process* view used to sign off the feature: the four planes are audited
 one by one, every file that reads or writes an IP-keyed structure in that plane
 is enumerated, and each item is answered with the same four questions.
@@ -501,7 +501,7 @@ axes: **completeness** (every read/write site of the plane is covered),
 restarts converge).
 
 +----+----------------------+---------------------------------------------------+
-| #  | Plane                | Sign-off                                          |
+| No | Plane                | Sign-off                                          |
 +====+======================+===================================================+
 | 1  | control              | complete; correct (creation and restore both fail |
 |    |                      | closed: a missing annotation rejects the endpoint |
@@ -527,7 +527,7 @@ restarts converge).
 +----+----------------------+---------------------------------------------------+
 | 5  | conntrack / NAT      | **incomplete by design** (the CT key has no VNI); |
 |    |                      | mitigated by scheduling; the precondition is      |
-|    |                      | exported as cilium_native_vpc_overlapping_ips;    |
+|    |                      | exported as ``cilium_native_vpc_overlapping_ips``;|
 |    |                      | NAT is inert because its features are rejected    |
 +----+----------------------+---------------------------------------------------+
 | 6  | service / LB         | rejected at startup (test-covered both ways) and  |
@@ -893,7 +893,7 @@ from them.
 The CT key is the bare 5-tuple (``struct ipv4_ct_tuple``: addresses, ports,
 protocol, direction flags); upstream only extends it with a *cluster* scope
 (``cilium_per_cluster_ct_*``, a statically sized map-of-maps for ClusterMesh),
-which does not generalise to hundreds of logical switches.
+which does not generalize to hundreds of logical switches.
 
 Failure mode
 ~~~~~~~~~~~~
@@ -989,7 +989,7 @@ address and is therefore ineffective (and would be unsafe) for VPC endpoints
 under the datapath rule above.
 
 Why ``kubeProxyReplacement: false`` is not enough
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 This is worth spelling out, because the natural assumption is that disabling
 kube-proxy replacement disables Cilium's service handling:
@@ -1152,65 +1152,65 @@ The plane-by-plane review found the following defects. They are listed because
 each one is a class of mistake that can recur: the pattern column says what to
 look for when reviewing a change.
 
-+-------+------------------------------+--------------------------------------+
-| Plane | Defect                       | Pattern                              |
-+=======+==============================+======================================+
-| assy  | the agent could not start:   | a hive constructor may only take     |
-|       | an unexported interface was  | types some cell provides; no         |
-|       | a constructor parameter      | package-level test catches this      |
-+-------+------------------------------+--------------------------------------+
-| cache | the full ipcache dump        | code that parses a *key* must strip  |
-|       | panicked on VNI keys, which  | the VNI suffix; the dump path is as  |
-|       | crashed the agent from       | important as the incremental one     |
-|       | ``cilium-dbg ip list``       |                                      |
-+-------+------------------------------+--------------------------------------+
-| ctrl  | remote endpoints silently    | an informer transform that drops     |
-|       | lost their VNI (the CEP      | metadata also drops the scope        |
-|       | informer transform dropped   |                                      |
-|       | annotations)                 |                                      |
-+-------+------------------------------+--------------------------------------+
-| svc   | ClusterIP was translated for | disabling a feature flag does not    |
-|       | VPC endpoints, redirecting a | necessarily disable its datapath:    |
-|       | tenant to another tenant's   | verify what is still reflected and   |
-|       | pod                          | still compiled in                    |
-+-------+------------------------------+--------------------------------------+
-| ctrl  | three annotation parsers     | one source of truth needs one        |
-|       | validated differently, so    | decision table, shared by every      |
-|       | the cache plane could hold a | plane that reads it                  |
-|       | scope no endpoint had        |                                      |
-+-------+------------------------------+--------------------------------------+
-| ctrl  | creation and restore fell    | on a missing scope, fail closed;     |
-|       | back to the plain scheme     | never merge into the shared scope    |
-|       | when the annotation was      |                                      |
-|       | unavailable                  |                                      |
-+-------+------------------------------+--------------------------------------+
-| fwd   | the VNI LPM key had its      | an LPM static prefix must equal the  |
-|       | padding after the IP, which  | bit offset of the address inside the |
-|       | inflated the static prefix   | key; assert that, not the constant   |
-+-------+------------------------------+--------------------------------------+
-| fwd   | endpoint teardown deleted    | a map keyed by bare IP needs         |
-|       | another VPC's cilium_lxc     | compare-and-delete when IPs overlap  |
-|       | entry                        |                                      |
-+-------+------------------------------+--------------------------------------+
-| pol   | operator-managed identities  | anything that recomputes identities  |
-|       | would drop the VNI label and | outside the agent does not know the  |
-|       | garbage collect the agent's  | annotation                           |
-|       | identities                   |                                      |
-+-------+------------------------------+--------------------------------------+
-| enc   | SRv6 and VTEP select by bare | enumerate *all* address-keyed        |
-|       | IP but were not rejected     | features, not the well known ones    |
-+-------+------------------------------+--------------------------------------+
-| enc   | the IPv4 fragment key had no | any map keyed by a tuple that        |
-|       | VPC scope                    | contains an address needs the scope  |
-+-------+------------------------------+--------------------------------------+
-| obs   | L7 flows had no VNI and no   | an enrichment path must consume the  |
-|       | pod metadata; L3/L4 flows    | scope from the event, not re-derive  |
-|       | never had a VNI context      | it from an address                   |
-+-------+------------------------------+--------------------------------------+
-| life  | a mode downgrade left        | state that outlives a mode switch    |
-|       | endpoints half configured    | must be re-evaluated against the     |
-|       |                              | mode, not restored blindly           |
-+-------+------------------------------+--------------------------------------+
++-----------+------------------------------+--------------------------------------+
+| Plane     | Defect                       | Pattern                              |
++===========+==============================+======================================+
+| assembly  | the agent could not start:   | a hive constructor may only take     |
+|           | an unexported interface was  | types some cell provides; no         |
+|           | a constructor parameter      | package-level test catches this      |
++-----------+------------------------------+--------------------------------------+
+| cache     | the full ipcache dump        | code that parses a *key* must strip  |
+|           | panicked on VNI keys, which  | the VNI suffix; the dump path is as  |
+|           | crashed the agent from       | important as the incremental one     |
+|           | ``cilium-dbg ip list``       |                                      |
++-----------+------------------------------+--------------------------------------+
+| control   | remote endpoints silently    | an informer transform that drops     |
+|           | lost their VNI (the CEP      | metadata also drops the scope        |
+|           | informer transform dropped   |                                      |
+|           | annotations)                 |                                      |
++-----------+------------------------------+--------------------------------------+
+| service   | ClusterIP was translated for | disabling a feature flag does not    |
+|           | VPC endpoints, redirecting a | necessarily disable its datapath:    |
+|           | tenant to another tenant's   | verify what is still reflected and   |
+|           | pod                          | still compiled in                    |
++-----------+------------------------------+--------------------------------------+
+| control   | three annotation parsers     | one source of truth needs one        |
+|           | validated differently, so    | decision table, shared by every      |
+|           | the cache plane could hold a | plane that reads it                  |
+|           | scope no endpoint had        |                                      |
++-----------+------------------------------+--------------------------------------+
+| control   | creation and restore fell    | on a missing scope, fail closed;     |
+|           | back to the plain scheme     | never merge into the shared scope    |
+|           | when the annotation was      |                                      |
+|           | unavailable                  |                                      |
++-----------+------------------------------+--------------------------------------+
+| forwarding| the VNI LPM key had its      | an LPM static prefix must equal the  |
+|           | padding after the IP, which  | bit offset of the address inside the |
+|           | inflated the static prefix   | key; assert that, not the constant   |
++-----------+------------------------------+--------------------------------------+
+| forwarding| endpoint teardown deleted    | a map keyed by bare IP needs         |
+|           | another VPC's cilium_lxc     | compare-and-delete when IPs overlap  |
+|           | entry                        |                                      |
++-----------+------------------------------+--------------------------------------+
+| policy    | operator-managed identities  | anything that recomputes identities  |
+|           | would drop the VNI label and | outside the agent does not know the  |
+|           | garbage collect the agent's  | annotation                           |
+|           | identities                   |                                      |
++-----------+------------------------------+--------------------------------------+
+| encryption| SRv6 and VTEP select by bare | enumerate *all* address-keyed        |
+|           | IP but were not rejected     | features, not the well known ones    |
++-----------+------------------------------+--------------------------------------+
+| encryption| the IPv4 fragment key had no | any map keyed by a tuple that        |
+|           | VPC scope                    | contains an address needs the scope  |
++-----------+------------------------------+--------------------------------------+
+| obs       | L7 flows had no VNI and no   | an enrichment path must consume the  |
+|           | pod metadata; L3/L4 flows    | scope from the event, not re-derive  |
+|           | never had a VNI context      | it from an address                   |
++-----------+------------------------------+--------------------------------------+
+| life      | a mode downgrade left        | state that outlives a mode switch    |
+|           | endpoints half configured    | must be re-evaluated against the     |
+|           |                              | mode, not restored blindly           |
++-----------+------------------------------+--------------------------------------+
 
 Two gaps remain by design and are documented with their mitigations: conntrack
 state (the CT key cannot express the scope; mitigated by scheduling and the
