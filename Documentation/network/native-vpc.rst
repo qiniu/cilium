@@ -1145,6 +1145,109 @@ backfills it) and then Cilium; the VNI is re-read on restore. A VNI change on a
 running endpoint is deliberately not hot-applied, and an annotation that
 disappears never downgrades a running endpoint to the plain scheme.
 
+Audit result ledger
+===================
+
+The plane-by-plane review found the following defects. They are listed because
+each one is a class of mistake that can recur: the pattern column says what to
+look for when reviewing a change.
+
++-------+------------------------------+--------------------------------------+
+| Plane | Defect                       | Pattern                              |
++=======+==============================+======================================+
+| assy  | the agent could not start:   | a hive constructor may only take     |
+|       | an unexported interface was  | types some cell provides; no         |
+|       | a constructor parameter      | package-level test catches this      |
++-------+------------------------------+--------------------------------------+
+| cache | the full ipcache dump        | code that parses a *key* must strip  |
+|       | panicked on VNI keys, which  | the VNI suffix; the dump path is as  |
+|       | crashed the agent from       | important as the incremental one     |
+|       | ``cilium-dbg ip list``       |                                      |
++-------+------------------------------+--------------------------------------+
+| ctrl  | remote endpoints silently    | an informer transform that drops     |
+|       | lost their VNI (the CEP      | metadata also drops the scope        |
+|       | informer transform dropped   |                                      |
+|       | annotations)                 |                                      |
++-------+------------------------------+--------------------------------------+
+| svc   | ClusterIP was translated for | disabling a feature flag does not    |
+|       | VPC endpoints, redirecting a | necessarily disable its datapath:    |
+|       | tenant to another tenant's   | verify what is still reflected and   |
+|       | pod                          | still compiled in                    |
++-------+------------------------------+--------------------------------------+
+| ctrl  | three annotation parsers     | one source of truth needs one        |
+|       | validated differently, so    | decision table, shared by every      |
+|       | the cache plane could hold a | plane that reads it                  |
+|       | scope no endpoint had        |                                      |
++-------+------------------------------+--------------------------------------+
+| ctrl  | creation and restore fell    | on a missing scope, fail closed;     |
+|       | back to the plain scheme     | never merge into the shared scope    |
+|       | when the annotation was      |                                      |
+|       | unavailable                  |                                      |
++-------+------------------------------+--------------------------------------+
+| fwd   | the VNI LPM key had its      | an LPM static prefix must equal the  |
+|       | padding after the IP, which  | bit offset of the address inside the |
+|       | inflated the static prefix   | key; assert that, not the constant   |
++-------+------------------------------+--------------------------------------+
+| fwd   | endpoint teardown deleted    | a map keyed by bare IP needs         |
+|       | another VPC's cilium_lxc     | compare-and-delete when IPs overlap  |
+|       | entry                        |                                      |
++-------+------------------------------+--------------------------------------+
+| pol   | operator-managed identities  | anything that recomputes identities  |
+|       | would drop the VNI label and | outside the agent does not know the  |
+|       | garbage collect the agent's  | annotation                           |
+|       | identities                   |                                      |
++-------+------------------------------+--------------------------------------+
+| enc   | SRv6 and VTEP select by bare | enumerate *all* address-keyed        |
+|       | IP but were not rejected     | features, not the well known ones    |
++-------+------------------------------+--------------------------------------+
+| enc   | the IPv4 fragment key had no | any map keyed by a tuple that        |
+|       | VPC scope                    | contains an address needs the scope  |
++-------+------------------------------+--------------------------------------+
+| obs   | L7 flows had no VNI and no   | an enrichment path must consume the  |
+|       | pod metadata; L3/L4 flows    | scope from the event, not re-derive  |
+|       | never had a VNI context      | it from an address                   |
++-------+------------------------------+--------------------------------------+
+| life  | a mode downgrade left        | state that outlives a mode switch    |
+|       | endpoints half configured    | must be re-evaluated against the     |
+|       |                              | mode, not restored blindly           |
++-------+------------------------------+--------------------------------------+
+
+Two gaps remain by design and are documented with their mitigations: conntrack
+state (the CT key cannot express the scope; mitigated by scheduling and the
+``cilium_native_vpc_overlapping_ips`` alert) and CIDR/FQDN identities plus the
+host-namespace L7 proxy.
+
+Pre-production acceptance
+=========================
+
+The unit tests prove the key construction; the following must be checked on a
+real cluster with two VPCs that share a subnet, because they exercise the
+interaction of all planes:
+
+#. **Isolation.** Two pods with the same IP in different VPCs, each with a
+   policy selecting ``sg=web``: traffic inside each VPC is allowed, and the
+   identities reported by ``cilium-dbg endpoint list`` differ.
+#. **Service.** A pod of a custom VPC connects to a ClusterIP: verify with
+   ``cilium-dbg monitor --type trace`` that the destination is *not* rewritten
+   by Cilium, and that kube-ovn resolves it.
+#. **Observability.** ``hubble observe --from-label
+   'vni:io-cilium-native-vpc-vni=<vni>'`` returns only that VPC's flows, and
+   both L3/L4 and L7 (DNS) flows carry ``vni_id``.
+#. **Restart convergence.** Restart the agent: endpoints keep their VNI (state
+   file), the VNI-scoped ipcache is repopulated
+   (``cilium-dbg bpf ipcache list | grep '@vni:'``), and identities are
+   unchanged.
+#. **Repair.** Remove the annotation from a running pod: the endpoint keeps its
+   VNI and an error is logged; restore it and confirm nothing changed.
+#. **Conntrack precondition.** Schedule two overlapping-IP pods on one node and
+   confirm ``cilium_native_vpc_overlapping_ips`` becomes non-zero; the
+   supported configuration keeps them on disjoint nodes.
+#. **Fragments.** Send a fragmented datagram between overlapping-IP pods in two
+   VPCs simultaneously and confirm both are classified correctly.
+#. **Mode switch.** Disable native-vpc and restart: endpoints return to the
+   plain scheme, ``cilium_ipcache_vni`` is removed, and the fragment map is
+   recreated with the upstream key size.
+
 Review and verification gates
 =============================
 
