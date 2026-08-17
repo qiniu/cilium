@@ -6,6 +6,9 @@ package cmd
 import (
 	"testing"
 
+	cmcommon "github.com/cilium/cilium/pkg/clustermesh/common"
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
+
 	"github.com/stretchr/testify/require"
 
 	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
@@ -61,6 +64,21 @@ func TestNativeVPCRejectsBareIPKeyedFeatures(t *testing.T) {
 			name:    "vtep",
 			mutate:  func(p *daemonConfigParams) { p.DaemonConfig.EnableVTEP = true },
 			wantErr: "VTEP",
+		},
+		{
+			// A VNI names a VPC of this cluster's OVN, so a remote cluster's
+			// addresses can carry no scope that means anything here.
+			name: "cluster mesh",
+			mutate: func(p *daemonConfigParams) {
+				p.ClusterInfo = cmtypes.ClusterInfo{ID: 3}
+				p.ClusterMesh = cmcommon.Config{ClusterMeshConfig: "/var/lib/cilium/clustermesh"}
+			},
+			wantErr: "cluster mesh",
+		},
+		{
+			// One half alone is not cluster mesh.
+			name:   "cluster id without a mesh config",
+			mutate: func(p *daemonConfigParams) { p.ClusterInfo = cmtypes.ClusterInfo{ID: 3} },
 		},
 		{
 			name:    "bpf masquerade",

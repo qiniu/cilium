@@ -106,6 +106,35 @@ done
 
 VICTIM=vpc-b
 VICTIM_VNI=${VNI[$VICTIM]}
+
+make_victim_server() {
+  kubectl apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: server
+  namespace: ${VICTIM}
+  labels: {app: server, vni-test: "true"}
+  annotations:
+    ovn.kubernetes.io/ip_address: "${SERVER_IP}"
+    ovn.kubernetes.io/logical_switch: subnet-${VICTIM}
+spec:
+  containers:
+  - name: c
+    image: docker.io/library/busybox:1.36
+    imagePullPolicy: IfNotPresent
+    command: ["sh","-c"]
+    args:
+    - |
+      mkdir -p /www && echo "hello from ${VICTIM}" > /www/index.html
+      httpd -p ${PORT_ALLOWED} -h /www
+      httpd -p ${PORT_DENIED} -h /www
+      sleep infinity
+YAML
+  kubectl -n "$VICTIM" wait --for=condition=Ready pod/server --timeout=120s >/dev/null 2>&1
+  sleep 8
+}
+
 log "deleting ${VICTIM}/server removes its resources and only its own"
 
 before_cache=$(cache_keys "$SERVER_IP" | grep -c .)
@@ -139,31 +168,7 @@ res=$(try_connect vpc-c client "$SERVER_IP" "$PORT_ALLOWED")
 assert_eq "open" "$res" "vpc-c still reaches its own server on ${SERVER_IP}"
 
 log "recreating it restores exactly one key, in its own VPC"
-kubectl apply -f - >/dev/null <<YAML
-apiVersion: v1
-kind: Pod
-metadata:
-  name: server
-  namespace: ${VICTIM}
-  labels: {app: server, vni-test: "true"}
-  annotations:
-    ovn.kubernetes.io/ip_address: "${SERVER_IP}"
-    ovn.kubernetes.io/logical_switch: subnet-${VICTIM}
-spec:
-  containers:
-  - name: c
-    image: docker.io/library/busybox:1.36
-    imagePullPolicy: IfNotPresent
-    command: ["sh","-c"]
-    args:
-    - |
-      mkdir -p /www && echo "hello from ${VICTIM}" > /www/index.html
-      httpd -p ${PORT_ALLOWED} -h /www
-      httpd -p ${PORT_DENIED} -h /www
-      sleep infinity
-YAML
-kubectl -n "$VICTIM" wait --for=condition=Ready pod/server --timeout=120s >/dev/null 2>&1
-sleep 8
+make_victim_server
 
 restored=$(cache_keys "$SERVER_IP")
 assert_eq "3" "$(echo "$restored" | grep -c .)" "three keys again"
@@ -171,6 +176,50 @@ echo "$restored" | grep -q "@vni:${VICTIM_VNI}$" \
   && pass "${VICTIM} owns ${SERVER_IP}@vni:${VICTIM_VNI} again" \
   || fail "${VICTIM} did not get its key back"
 assert_eq "0" "$(endpoint_map_rows "$SERVER_IP")" "still no entry in the endpoint map"
+
+log "a CNI DEL that happens while the agent is down is still reconciled"
+# The agent is the only thing that removes an entry, so the interesting case is
+# the one where it is not running when the pod goes away: on startup it must end
+# up with the keys of the pods that exist, which means removing the one that
+# does not - and only that one, while two other VPCs still use the address.
+agent_stop() {
+  kubectl -n "$CILIUM_NS" patch ds cilium --type=merge \
+    -p '{"spec":{"template":{"spec":{"nodeSelector":{"native-vpc-e2e/absent":"true"}}}}}' >/dev/null 2>&1
+  for _ in $(seq 60); do
+    [[ "$(kubectl -n "$CILIUM_NS" get pods -l k8s-app=cilium --no-headers 2>/dev/null | wc -l)" == "0" ]] && return 0
+    sleep 2
+  done
+  return 1
+}
+agent_start() {
+  kubectl -n "$CILIUM_NS" patch ds cilium --type=json \
+    -p '[{"op":"remove","path":"/spec/template/spec/nodeSelector/native-vpc-e2e~1absent"}]' >/dev/null 2>&1
+  kubectl -n "$CILIUM_NS" rollout status ds/cilium --timeout=300s >/dev/null 2>&1
+  sleep 15
+}
+
+if agent_stop; then
+  pass "the agent is stopped"
+  kubectl -n "$VICTIM" delete pod server --wait=true --timeout=120s >/dev/null 2>&1
+  info "deleted ${VICTIM}/server with no agent running"
+  agent_start
+
+  after_down=$(fwd_keys "$SERVER_IP")
+  echo "$after_down" | grep -q "@vni:${VICTIM_VNI}$" \
+    && fail "the key of the pod deleted during the outage survived the restart" \
+    || pass "the key of the pod deleted during the outage is gone"
+  for vpc in vpc-a vpc-c; do
+    echo "$after_down" | grep -q "@vni:${VNI[$vpc]}$" \
+      && pass "${vpc} kept ${SERVER_IP}@vni:${VNI[$vpc]} across the outage" \
+      || fail "${vpc} lost its key across the outage"
+  done
+  assert_eq "0" "$(endpoint_map_rows "$SERVER_IP")" "still nothing in the endpoint map"
+
+  make_victim_server
+  assert_eq "3" "$(cache_keys "$SERVER_IP" | grep -c .)" "the fixture is whole again"
+else
+  fail "could not stop the agent for the outage check"
+fi
 
 log "the host stack holds no resource keyed by a shared address"
 # A per-endpoint route is a kernel route to the address, and the routing table

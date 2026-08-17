@@ -54,6 +54,13 @@ func nativeVPCDatapathCompatibility(params daemonConfigParams) error {
 		return errors.New("native-vpc mode is incompatible with BPF masquerade: kube-ovn owns SNAT, and the NAT maps are keyed by the bare tuple")
 	case params.IPSecConfig.Enabled(), params.WireguardConfig.Enabled():
 		return errors.New("native-vpc mode is incompatible with Cilium encryption (IPsec/WireGuard): peer selection is keyed by the bare IP")
+	case params.ClusterInfo.ID != 0 && params.ClusterMesh.ClusterMeshConfig != "":
+		// A VNI is a tunnel key of this cluster's OVN, so it says nothing about
+		// another cluster. Remote addresses therefore arrive either without a
+		// scope - landing in the unscoped ipcache, which is what the local
+		// datapath falls back to and which must hold no address that a VPC also
+		// uses - or with a number that means something else where it came from.
+		return errors.New("native-vpc mode is incompatible with cluster mesh: a VNI identifies a VPC of this cluster only, so remote addresses cannot be scoped and would be resolved from the unscoped ipcache")
 	}
 	return nil
 }

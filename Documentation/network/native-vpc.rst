@@ -847,6 +847,13 @@ proxy.
   identities unused and garbage collect them - silently merging all VPCs into
   one identity. native-vpc therefore requires the default (agent-managed)
   mode and refuses to start otherwise.
+* **Cluster mesh (rejected at startup).** A VNI is a tunnel key of this
+  cluster's OVN, so it says nothing about another cluster. Remote addresses
+  would therefore arrive either without a scope - landing in the unscoped
+  ipcache, which is what the local datapath falls back to and which must hold
+  no address that a VPC also uses - or carrying a number that means something
+  else where it came from. The check is on the pair that turns cluster mesh on:
+  a cluster ID together with a mesh configuration.
 * **Per-endpoint routes (rejected at startup).** ``enable-endpoint-routes``
   installs a kernel route to each endpoint's address, and the routing table has
   no notion of a VPC: the endpoints sharing an address would install one route
