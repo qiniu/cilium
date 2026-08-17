@@ -673,7 +673,9 @@ func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPo
 				if slices.Contains(newKeys, oldKey) {
 					continue
 				}
-				npc := k.ipcache.Delete(oldKey, source.Kubernetes)
+				// Match on the pod as well: the address may already have been
+				// handed to another pod, whose entry must not be removed here.
+				npc := k.ipcache.DeleteOnMetadataMatch(oldKey, source.Kubernetes, newPod.Namespace, newPod.Name)
 				if npc {
 					namedPortsChanged = true
 				}

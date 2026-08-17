@@ -48,7 +48,7 @@ func TestIPIdentitySynchronizerLocalFallbackVNI(t *testing.T) {
 	require.Equal(t, source.Local, ipc.upserts[0].id.Source)
 
 	// Delete must remove the same VNI-encoded key.
-	err = sync.Delete(t.Context(), "192.168.1.2", 36)
+	err = sync.Delete(t.Context(), "192.168.1.2", 36, "ns", "pod")
 	require.NoError(t, err)
 	require.Len(t, ipc.deletes, 1)
 	require.Equal(t, KeyWithVNI("192.168.1.2", 36), ipc.deletes[0])
@@ -86,12 +86,12 @@ func TestIPIdentitySynchronizerKVStoreVNI(t *testing.T) {
 	require.Equal(t, uint64(36), pair.Vni)
 
 	// Deleting with the wrong VNI must not remove the entry (same IP, other VPC).
-	require.NoError(t, sync.Delete(t.Context(), "192.168.1.2", 17))
+	require.NoError(t, sync.Delete(t.Context(), "192.168.1.2", 17, "ns", "pod"))
 	_, ok = client.store[ipKey]
 	require.True(t, ok, "entry of VPC 36 must survive deletion of VPC 17")
 
 	// Deleting with the right VNI removes it.
-	require.NoError(t, sync.Delete(t.Context(), "192.168.1.2", 36))
+	require.NoError(t, sync.Delete(t.Context(), "192.168.1.2", 36, "ns", "pod"))
 	_, ok = client.store[ipKey]
 	require.False(t, ok, "entry of VPC 36 must be removed by its own deletion")
 }
@@ -124,6 +124,9 @@ type localIPCacheSpy struct {
 		id  Identity
 	}
 	deletes []string
+	// owner is the pod the spy pretends each entry describes, so that a
+	// metadata-matched delete can be told apart from an unconditional one.
+	owner map[string]string
 }
 
 func newLocalIPCacheSpy() *localIPCacheSpy { return &localIPCacheSpy{} }
@@ -136,7 +139,17 @@ func (s *localIPCacheSpy) Upsert(ip string, hostIP net.IP, hostKey uint8, k8sMet
 	return false, nil
 }
 
+// Delete satisfies IPCacher for the watcher tests, which exercise the remote
+// path where the entry carries no pod metadata.
 func (s *localIPCacheSpy) Delete(IP string, src source.Source) bool {
+	s.deletes = append(s.deletes, IP)
+	return true
+}
+
+func (s *localIPCacheSpy) DeleteOnMetadataMatch(IP string, src source.Source, namespace, name string) bool {
+	if want, tracked := s.owner[IP]; tracked && want != namespace+"/"+name {
+		return false
+	}
 	s.deletes = append(s.deletes, IP)
 	return true
 }
@@ -179,4 +192,26 @@ func TestIPIdentityWatcherVNIKeyOrdering(t *testing.T) {
 			require.Equal(t, tc.vni > 0, strings.HasSuffix(pair.GetKeyName(), "@vni:"+strconv.FormatUint(tc.vni, 10)))
 		})
 	}
+}
+
+// TestSynchronizerDeleteLeavesTheNewOwnerAlone covers an address being reused.
+//
+// An address outlives the pod it was given to: once released, kube-ovn can hand
+// it to another pod, whose endpoint registers the very same (VNI, IP) key. The
+// teardown of the previous endpoint runs on its own schedule, so it can arrive
+// after that. Removing the entry then would take the running pod's entry away,
+// and for an endpoint in a VPC there is no bare-address entry left to fall back
+// on.
+func TestSynchronizerDeleteLeavesTheNewOwnerAlone(t *testing.T) {
+	spy := newLocalIPCacheSpy()
+	spy.owner = map[string]string{"192.168.1.2@vni:36": "ns/successor"}
+	sync := newIPIdentitySynchronizer(hivetest.Logger(t), kvstore.SetupDummy(t, kvstore.DisabledBackendName), spy)
+
+	// The predecessor tears down after the address has been handed on.
+	require.NoError(t, sync.Delete(t.Context(), "192.168.1.2", 36, "ns", "predecessor"))
+	require.Empty(t, spy.deletes, "the entry of the pod holding the address must survive")
+
+	// The owner removing its own entry still works.
+	require.NoError(t, sync.Delete(t.Context(), "192.168.1.2", 36, "ns", "successor"))
+	require.Equal(t, []string{"192.168.1.2@vni:36"}, spy.deletes)
 }

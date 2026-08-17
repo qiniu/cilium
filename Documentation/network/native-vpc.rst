@@ -771,6 +771,15 @@ one flat key space - correct when the entries live in two different BPF maps.
 The Go and C key layouts are pinned by a test on the real invariant: the LPM
 static prefix must equal the bit offset of the IP inside the key data.
 
+An address outlives the pod that used it. Once released it can be given to
+another pod, whose endpoint registers the same (VNI, IP) key, while the
+previous endpoint is still being torn down on its own schedule. Every removal
+therefore names the owner as well as the key: the CiliumEndpoint and pod
+watchers already matched on the pod, and the local identity synchronizer now
+does the same, so a late teardown cannot take the entry of whoever holds the
+address now. For an endpoint in a VPC that matters more than elsewhere, because
+losing the scoped entry leaves no bare-address entry to fall back on.
+
 The endpoint manager's identifier index follows the same rule from both ends.
 An endpoint in a VPC registers ``vni-ipv4:<vni>:<ip>`` and no bare-address
 identifier, so that index is the only way to resolve it by address. The set that was registered is kept, because recomputing the identifiers at
@@ -1328,6 +1337,11 @@ look for when reviewing a change.
 |           | endpoint address, so the     | downstream is as ambiguous as the    |
 |           | endpoints sharing one pushed | address; refuse rather than let the  |
 |           | over each other              | last writer decide for all           |
++-----------+------------------------------+--------------------------------------+
+| cache     | teardown removed the ipcache | the same, one layer down: a delete   |
+|           | entry of whichever pod holds | that names only the key removes      |
+|           | the address now, not of the  | whatever holds it now - name the     |
+|           | pod it was created for       | owner as well                        |
 +-----------+------------------------------+--------------------------------------+
 | control   | an endpoint removed its aux  | a key can belong to a successor by   |
 |           | identifiers by recomputing   | the time a predecessor is cleaned    |

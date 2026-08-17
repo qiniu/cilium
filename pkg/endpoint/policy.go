@@ -1093,7 +1093,11 @@ func (e *Endpoint) runIPIdentitySync(endpointIP netip.Addr) {
 			},
 			StopFunc: func(ctx context.Context) error {
 				ip := endpointIP.String()
-				if err := e.kvstoreSyncher.Delete(ctx, ip, vni); err != nil {
+				// The address outlives this endpoint: once it is free another
+				// pod can be given it, and that pod's endpoint registers the
+				// same (VNI, IP). Name the pod this entry belongs to so the
+				// removal cannot take the new owner's entry with it.
+				if err := e.kvstoreSyncher.Delete(ctx, ip, vni, e.K8sNamespace, e.K8sPodName); err != nil {
 					return fmt.Errorf("unable to delete endpoint IP '%s' from ipcache: %w", ip, err)
 				}
 				return nil

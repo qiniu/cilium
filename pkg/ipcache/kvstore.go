@@ -61,7 +61,10 @@ type kvstoreClient interface {
 // with "missing type: ipcache.localIPCache".
 type LocalIPCache interface {
 	Upsert(ip string, hostIP net.IP, hostKey uint8, k8sMeta *K8sMetadata, newIdentity Identity) (namedPortsChanged bool, err error)
-	Delete(IP string, source source.Source) (namedPortsChanged bool)
+	// DeleteOnMetadataMatch removes the entry only while it still describes the
+	// given pod. An address is reusable, so an unconditional delete could take
+	// away the entry of whichever pod holds it now.
+	DeleteOnMetadataMatch(IP string, source source.Source, namespace, name string) (namedPortsChanged bool)
 }
 
 // IPIdentitySynchronizer handles the synchronization of ipcache entries into the kvstore.
@@ -208,13 +211,19 @@ func (s *IPIdentitySynchronizer) upsertLocal(params *UpsertParams) error {
 // different VPCs (even on the same node) delete the correct entry. Passing the
 // VNI explicitly (rather than remembering it in a map keyed by IP) avoids a
 // same-IP-different-VPC overwrite.
-func (s *IPIdentitySynchronizer) Delete(ctx context.Context, ip string, vni uint64) error {
+//
+// namespace and podName name the pod this entry was created for. An address is
+// reusable: kube-ovn hands it to another pod once it is free, and that pod's
+// endpoint registers the same (VNI, IP) key. Removing the entry then would
+// take the new owner's entry away, so the removal only applies while the entry
+// still describes the pod it was created for.
+func (s *IPIdentitySynchronizer) Delete(ctx context.Context, ip string, vni uint64, namespace, podName string) error {
 	ipKey := path.Join(IPIdentitiesPath, AddressSpace, KeyWithVNI(ip, uint32(vni)))
 	s.tracker.Delete(ipKey)
 
 	if !s.client.IsEnabled() {
 		if s.ipc != nil {
-			s.ipc.Delete(KeyWithVNI(ip, uint32(vni)), source.Local)
+			s.ipc.DeleteOnMetadataMatch(KeyWithVNI(ip, uint32(vni)), source.Local, namespace, podName)
 		}
 		return nil
 	}
