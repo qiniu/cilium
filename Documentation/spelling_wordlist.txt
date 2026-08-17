@@ -890,6 +890,7 @@ unmigrated
 unpaginated
 unparsable
 unpinned
+unscoped
 unselect
 unsettable
 untriaged

@@ -847,6 +847,13 @@ proxy.
   identities unused and garbage collect them - silently merging all VPCs into
   one identity. native-vpc therefore requires the default (agent-managed)
   mode and refuses to start otherwise.
+* **Per-endpoint routes (rejected at startup).** ``enable-endpoint-routes``
+  installs a kernel route to each endpoint's address, and the routing table has
+  no notion of a VPC: the endpoints sharing an address would install one route
+  between them, so the last one to regenerate would receive the traffic of all
+  of them and the first CNI DEL would remove the route the others still need.
+  kube-ovn owns routing in this deployment, so the mode is refused rather than
+  quietly producing a shared route.
 * **L7 proxy (enforced).** A redirected connection is proxied from the host
   network namespace to the original destination address, and the policy the
   proxy applies is found again by the endpoint's address. With overlapping VPC
@@ -1190,6 +1197,23 @@ annotation in that window would publish exactly the scope the endpoint is about
 to refuse. Pods on other nodes keep using the annotation, which is the only
 signal available there, and the CiliumEndpoint entry - written from the remote
 endpoint's real VNI - takes precedence over it.
+
+Operator interface
+==================
+
+``cilium bpf ipcache delete`` and ``cilium bpf ipcache update`` act on one key.
+With native-vpc there are two key spaces - the unscoped ipcache holds the
+addresses that are in no VPC (the host, the world, CIDR and FQDN entries), the
+scoped one holds the endpoints - so a command that defaulted to the unscoped map
+would report a deletion that removed nothing, and an update would place a pod
+address into the space the datapath falls back to when a scoped lookup misses,
+which is the one thing that space must never contain.
+
+Both commands therefore take ``--vni``, and when the scoped map exists on the
+node they refuse to run without it, naming the two choices: ``--vni <n>`` for a
+VPC, ``--vni 0`` for the addresses that are in none. The refusal is what makes
+the two spaces visible to whoever is debugging; the listing commands already
+render the scope as part of the address.
 
 Audit result ledger
 ===================

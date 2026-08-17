@@ -128,15 +128,26 @@ log "kube-ovn is not complaining about the overlapping subnets"
 # its VPC router is ready; it retries and settles. Anything else would be worth
 # looking at, e.g. a complaint about the overlapping CIDRs.
 kovn=$(kubectl -n kube-system logs -l app=kube-ovn-controller --tail=500 2>/dev/null | grep -iE '\berror\b' || true)
-# Transient reconcile races while a VPC/subnet is being created or deleted:
-# the controller requeues and settles. They say nothing about the CIDR overlap.
-transient=$(echo "$kovn" | grep -cE "not standby yet|not found, requeuing|v4 using ip range is empty" || true)
-rest=$(echo "$kovn" | grep -vE "not standby yet|not found, requeuing|v4 using ip range is empty" | grep -c . || true)
+# Transient reconcile races while a VPC/subnet is being created or deleted: the
+# controller requeues and settles. They say nothing about the CIDR overlap.
+# "datapath binding not found" is the window between creating a logical switch
+# and OVN binding it, during which the switch has no tunnel key yet - the very
+# value this feature reads. It is asserted below to have settled.
+TRANSIENT="not standby yet|not found, requeuing|v4 using ip range is empty|datapath binding not found"
+transient=$(echo "$kovn" | grep -cE "$TRANSIENT" || true)
+rest=$(echo "$kovn" | grep -vE "$TRANSIENT" | grep -c . || true)
 info "kube-ovn-controller: ${transient} transient requeues, ${rest} other errors"
 assert_eq "0" "${rest:-x}" "kube-ovn reports no error about the overlapping subnets"
 for vpc in "${VPCS[@]}"; do
   ready=$(kubectl get subnet "subnet-${vpc}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
   assert_eq "True" "${ready:-?}" "subnet-${vpc} is Ready now"
+  # The tunnel key is what this feature is built on, so "the controller could
+  # not read one yet" is only acceptable if it can now. Read it from the subnet
+  # rather than from a pod: earlier scripts delete pods on purpose.
+  key=$(kubectl get subnet "subnet-${vpc}" -o jsonpath='{.status.tunnelKey}' 2>/dev/null)
+  [[ -n "$key" && "$key" != "0" ]] \
+    && pass "subnet-${vpc} has settled on a tunnel key (${key})" \
+    || fail "subnet-${vpc} still has no usable tunnel key"
 done
 [[ "${rest:-0}" != "0" ]] && echo "$kovn" | grep -v "not standby yet" | tail -3 | cut -c1-160 | sed 's/^/    /'
 true

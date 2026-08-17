@@ -23,6 +23,7 @@ func init() {
 	bpfIPCacheUpdateCmd.PersistentFlags().Uint8("encryptkey", 0, "Encrypt key")
 	bpfIPCacheUpdateCmd.PersistentFlags().Bool("skiptunnel", false, "Skip tunnel")
 	bpfIPCacheUpdateCmd.PersistentFlags().Uint16("clusterid", 0, "Cluster ID")
+	bpfIPCacheUpdateCmd.PersistentFlags().Uint32("vni", 0, "native-vpc VNI of the entry (0 = the unscoped ipcache)")
 }
 
 var bpfIPCacheUpdateCmd = &cobra.Command{
@@ -75,13 +76,13 @@ var bpfIPCacheUpdateCmd = &cobra.Command{
 
 		ip := net.IP(prefix.Addr().AsSlice())
 		mask := net.CIDRMask(prefix.Bits(), 32)
-		key := ipcache.NewKey(ip, mask, clusterID)
+		m, key := ipcacheScope(cmd, ip, mask, clusterID)
 		value := ipcache.NewValue(identity, tunnelEndpoint, encryptKey, flags)
-		if err := ipcache.IPCacheMap(nil).Update(&key, &value); err != nil {
+		if err := m.Update(key, &value); err != nil {
 			fmt.Fprintf(os.Stderr, "Error updating entry %s: %v\n", key, err)
 			os.Exit(1)
 		}
 
-		fmt.Printf("Updated entry %s => %s\n", &key, &value)
+		fmt.Printf("Updated entry %s => %s\n", key, &value)
 	},
 }

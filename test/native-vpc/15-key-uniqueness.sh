@@ -172,4 +172,49 @@ echo "$restored" | grep -q "@vni:${VICTIM_VNI}$" \
   || fail "${VICTIM} did not get its key back"
 assert_eq "0" "$(endpoint_map_rows "$SERVER_IP")" "still no entry in the endpoint map"
 
+log "the host stack holds no resource keyed by a shared address"
+# A per-endpoint route is a kernel route to the address, and the routing table
+# has no notion of a VPC: the pods sharing an address would install one route
+# between them. The mode that installs those routes is refused at startup, and
+# this is what that refusal is worth on the node.
+for ip in "$CLIENT_IP" "$SERVER_IP"; do
+  n=$(ip route show 2>/dev/null | grep -cE "^${ip} |^${ip}/32 ")
+  assert_eq "0" "${n:-x}" "${ip}: no host route to the shared address"
+done
+epr=$(kubectl -n "$CILIUM_NS" get cm cilium-config -o jsonpath='{.data.enable-endpoint-routes}' 2>/dev/null)
+assert_eq "" "${epr}" "per-endpoint routes are not enabled (the agent would refuse to start)"
+
+log "the operator interface acts on the scope it is given, and nothing else"
+# "cilium bpf ipcache delete <addr>" used to act on the unscoped map only: it
+# reported success while removing nothing, and its update twin would have put a
+# pod address into the space the datapath falls back to when a scoped lookup
+# misses. Both now require the scope to be stated.
+#
+# The check runs against a VPC the fixture does not use, so it can create and
+# remove an entry for an address that three real endpoints share without ever
+# touching what those endpoints own.
+SPARE_VNI=4094
+before=$(fwd_keys "$SERVER_IP" | grep -c "@vni:")
+before_ids=$(identities_for "$SERVER_IP")
+
+unscoped=$(kubectl -n "$CILIUM_NS" exec "$(cilium_pod)" -c cilium-agent -- \
+  cilium-dbg bpf ipcache delete "${SERVER_IP}/32" 2>&1; true)
+echo "$unscoped" | grep -qi "state the scope" \
+  && pass "an unscoped delete is refused and says what to do instead" \
+  || fail "an unscoped delete was accepted: ${unscoped}"
+
+cilium_exec cilium-dbg bpf ipcache update "${SERVER_IP}/32" --vni "$SPARE_VNI" --identity 4242 --tunnelendpoint 0.0.0.0 >/dev/null 2>&1
+sleep 1
+assert_eq "$((before + 1))" "$(fwd_keys "$SERVER_IP" | grep -c '@vni:')" \
+  "a scoped create adds exactly one entry"
+assert_eq "$before_ids" "$(identities_for "$SERVER_IP" | sed "s/4242//" | xargs)" \
+  "the entries of the real VPCs are untouched"
+
+cilium_exec cilium-dbg bpf ipcache delete "${SERVER_IP}/32" --vni "$SPARE_VNI" >/dev/null 2>&1
+sleep 1
+assert_eq "0" "$(fwd_keys "$SERVER_IP" | grep -c "@vni:${SPARE_VNI}$")" \
+  "a scoped delete removes exactly that entry"
+assert_eq "$before" "$(fwd_keys "$SERVER_IP" | grep -c '@vni:')" "the fixture is back as it was"
+assert_eq "$before_ids" "$(identities_for "$SERVER_IP")" "with the same identities"
+
 summary

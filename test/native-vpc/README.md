@@ -156,7 +156,7 @@ documented rather than ignored:
 | `Couldn't find state, ignoring endpoint` for `<id>_next`    | upstream: leftover regeneration directories are skipped on restore        |
 | `UNSUPPORTED_L2/L3_PROTOCOL` drops                          | the cluster runs with `enable-ipv6=false` while the pods still emit IPv6 link-local traffic |
 | `STALE_OR_UNROUTABLE_IP` (a few packets)                    | stragglers from pods that were deleted during the run                     |
-| kube-ovn `not standby yet` / `not found, requeuing` / `v4 using ip range is empty` | reconcile races while a VPC or subnet is created or deleted; they settle   |
+| kube-ovn `not standby yet` / `not found, requeuing` / `v4 using ip range is empty` / `datapath binding not found` | reconcile races while a VPC or subnet is created or deleted; the last one is the window before OVN binds the switch and the tunnel key exists. The suite asserts each subnet has settled on a key |
 
 Everything else - any `level=error`, any other warning, any other drop reason,
 any invalid CiliumNetworkPolicy - fails the run.

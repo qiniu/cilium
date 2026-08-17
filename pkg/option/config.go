@@ -2278,6 +2278,14 @@ func (c *DaemonConfig) validateNativeVPC() error {
 		// across nodes.
 		return fmt.Errorf("native-vpc mode is incompatible with --%s: CiliumEndpointSlice cannot carry the per-endpoint VNI", EnableCiliumEndpointSlice)
 	}
+	if c.EnableEndpointRoutes {
+		// A per-endpoint route is a kernel route to the address, and the
+		// routing table has no notion of a VPC: the endpoints sharing an
+		// address would install one route between them, so the last one to
+		// regenerate would receive the traffic of all of them and the first
+		// CNI DEL would remove the route the others still need.
+		return fmt.Errorf("native-vpc mode is incompatible with --%s: a per-endpoint route is keyed by address alone, which overlapping VPC subnets make ambiguous", EnableEndpointRoutes)
+	}
 	return nil
 }
 

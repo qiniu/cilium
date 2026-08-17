@@ -43,6 +43,18 @@ func TestValidateNativeVPC(t *testing.T) {
 			wantErr: "enable-cilium-endpoint-slice",
 		},
 		{
+			// A per-endpoint route is a kernel route to the address, and the
+			// routing table cannot express which VPC that address belongs to.
+			name: "per-endpoint routes rejected",
+			config: DaemonConfig{
+				EnableNativeVPC:        true,
+				NativeVPCVNIAnnotation: "ovn.kubernetes.io/tunnel_key",
+				RoutingMode:            RoutingModeNative,
+				EnableEndpointRoutes:   true,
+			},
+			wantErr: "enable-endpoint-routes",
+		},
+		{
 			name: "native routing accepted",
 			config: DaemonConfig{
 				EnableNativeVPC:        true,
