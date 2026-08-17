@@ -624,21 +624,32 @@ func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPo
 
 	ipSliceEqual := oldPodIPs != nil && oldPodIPs.DeepEqual(&newPodIPs)
 
+	// An entry is identified by its (VNI, IP) key, so an unchanged address set
+	// does not imply an unchanged set of entries: a pod that moves to another
+	// VPC keeps its address, and the entry of the VPC it left has to go. The
+	// keys are therefore compared, and the old ones are rebuilt with the VNI
+	// they were written under - deleting them with the new VNI would target an
+	// entry that never existed and leave the real one behind.
+	oldVNI := podVNI(oldPod)
+	newKeys := make([]string, 0, len(newPodIPs))
+	for _, podIP := range newPodIPs {
+		newKeys = append(newKeys, ipcache.KeyWithVNI(podIP, vni))
+	}
+	keySliceEqual := ipSliceEqual && oldVNI == vni
+
 	defer func() {
-		if !ipSliceEqual {
-			// delete all IPs that were not added regardless if the insertion of the
+		if !keySliceEqual {
+			// delete all keys that were not added regardless if the insertion of the
 			// entry in the ipcache map was successful or not because we will not
 			// receive any other event with these old IP addresses.
 			for _, oldPodIP := range oldPodIPs {
-				var found bool
-				if slices.Contains(newPodIPs, oldPodIP) {
-					found = true
+				oldKey := ipcache.KeyWithVNI(oldPodIP, oldVNI)
+				if slices.Contains(newKeys, oldKey) {
+					continue
 				}
-				if !found {
-					npc := k.ipcache.Delete(ipcache.KeyWithVNI(oldPodIP, vni), source.Kubernetes)
-					if npc {
-						namedPortsChanged = true
-					}
+				npc := k.ipcache.Delete(oldKey, source.Kubernetes)
+				if npc {
+					namedPortsChanged = true
 				}
 			}
 		}
@@ -652,9 +663,10 @@ func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPo
 	specEqual := oldPod != nil && newPod.Spec.DeepEqual(&oldPod.Spec)
 	hostIPEqual := oldPod != nil && newPod.Status.HostIP == oldPod.Status.HostIP
 
-	// if spec, host IPs, and pod IPs are the same there no need to perform the remaining
-	// operations
-	if specEqual && hostIPEqual && ipSliceEqual {
+	// if spec, host IPs, and pod keys are the same there no need to perform the
+	// remaining operations. A VPC change makes the keys differ even when every
+	// address is unchanged, and the new key still has to be written.
+	if specEqual && hostIPEqual && keySliceEqual {
 		return nil
 	}
 

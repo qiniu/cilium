@@ -732,6 +732,17 @@ IP). An entry never "moves" between the two maps, because the VNI is part of
 the ipcache key: a scope change is a delete of one key plus an upsert of
 another.
 
+That property has a consequence for every writer: whether an old entry is
+still needed cannot be decided by looking at the address. Both watchers used
+to compare bare addresses when reconciling an update, which is correct only
+while the address is the whole key. Under a scope change the address is
+unchanged and the key is not, so the entry of the abandoned scope survived -
+and, in the pod watcher, the entry of the new scope was never written and the
+deletion targeted a key that had never existed. The rule is that the old keys
+are rebuilt with the VNI they were written under and compared against the keys
+actually written, which is also what makes the code identical to the upstream
+one when the mode is off, ``KeyWithVNI`` being the identity function there.
+
 The shadow/revive relationship between an endpoint IP and an equally-sized CIDR
 entry is resolved *within* one VNI scope (the lookup uses
 ``KeyWithVNI(prefix, keyVNI)``), which is what keeps that logic - designed for
@@ -1210,6 +1221,16 @@ look for when reviewing a change.
 | life      | a mode downgrade left        | state that outlives a mode switch    |
 |           | endpoints half configured    | must be re-evaluated against the     |
 |           |                              | mode, not restored blindly           |
++-----------+------------------------------+--------------------------------------+
+| control   | both watchers decided        | "does this entry still exist?" is a  |
+|           | whether an old entry         | question about the key, and the key  |
+|           | survived by comparing bare   | is the (VNI, IP) pair; an unchanged  |
+|           | addresses, so a pod that     | address proves nothing               |
+|           | changed VPC kept its old     |                                      |
+|           | entry (and the pod watcher   |                                      |
+|           | also skipped the new one     |                                      |
+|           | and deleted with the wrong   |                                      |
+|           | VNI)                         |                                      |
 +-----------+------------------------------+--------------------------------------+
 
 Two gaps remain by design and are documented with their mitigations: conntrack
