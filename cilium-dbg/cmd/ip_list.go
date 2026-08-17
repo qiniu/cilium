@@ -82,6 +82,20 @@ func getLabels(ni identity.NumericIdentity) []string {
 	return labels.NewLabelsFromModel(id.Payload.Labels).GetPrintableModel()
 }
 
+// cidrOf renders the address of an entry. In native-vpc mode the same address
+// can be present once per VPC, so the VNI scope is appended - without it the
+// listing shows several identical rows that cannot be told apart.
+func cidrOf(entry *models.IPListEntry) string {
+	cidr := ""
+	if entry.Cidr != nil {
+		cidr = *entry.Cidr
+	}
+	if entry.VniID != nil && *entry.VniID > 0 {
+		return fmt.Sprintf("%s@vni:%d", cidr, *entry.VniID)
+	}
+	return cidr
+}
+
 func printEntry(w *tabwriter.Writer, entry *models.IPListEntry) {
 	var src string
 	if entry.Metadata != nil {
@@ -100,9 +114,9 @@ func printEntry(w *tabwriter.Writer, entry *models.IPListEntry) {
 	for _, lbl := range labels {
 		if first {
 			if verbose {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\n", *entry.Cidr, lbl, src, entry.HostIP, entry.EncryptKey)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\n", cidrOf(entry), lbl, src, entry.HostIP, entry.EncryptKey)
 			} else {
-				fmt.Fprintf(w, "%s\t%s\t%s\n", *entry.Cidr, lbl, src)
+				fmt.Fprintf(w, "%s\t%s\t%s\n", cidrOf(entry), lbl, src)
 			}
 			first = false
 		} else {
