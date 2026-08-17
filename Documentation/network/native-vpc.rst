@@ -696,6 +696,17 @@ Forwarding plane
 
 Scope: BPF maps and programs.
 
+Not writing VPC endpoints into the endpoint map also settles the bare-address
+lookups elsewhere in the datapath. ``bpf_host`` and ``bpf_overlay`` look an
+address up in that map to deliver it locally, with no scope to offer; whether
+they are on the path at all depends on the deployment (``devices`` and whether
+Cilium's own tunnel is in use). The question no longer has to be answered per
+deployment: the map holds no VPC endpoint, so those lookups cannot find one and
+fall through to the stack, which is where kube-ovn expects the traffic. The
+identity lookups on the same paths read the unscoped ipcache, which holds no
+VPC address either, so they resolve to the world identity rather than to
+another VPC's pod.
+
 The endpoint map (``cilium_lxc``) is the one place where the address is the
 whole key, with no room for a scope. Endpoints in a VPC therefore have no entry
 in it: three pods sharing an address would be one entry, so it could only ever
@@ -861,6 +872,15 @@ proxy.
   of them and the first CNI DEL would remove the route the others still need.
   kube-ovn owns routing in this deployment, so the mode is refused rather than
   quietly producing a shared route.
+* **DNS proxy (fails closed, and says so).** The DNS proxy is reached from the
+  host namespace and has only the address of the connection to attribute it to
+  an endpoint. That is enough while an address belongs to one endpoint, and
+  stops being enough the moment several VPCs use it, so the lookup refuses to
+  answer rather than applying another VPC's rules and the query is dropped. The
+  refusal used to be indistinguishable from an unknown address; it now names
+  the reason, because the two call for opposite reactions - one is a missing
+  endpoint, the other is DNS policy that cannot be applied to that address at
+  all. Rules themselves are held per endpoint ID, so they are never mixed up.
 * **L7 proxy (enforced).** A redirected connection is proxied from the host
   network namespace to the original destination address, and the policy the
   proxy applies is found again by the endpoint's address. With overlapping VPC

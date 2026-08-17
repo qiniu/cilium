@@ -14,6 +14,7 @@ import (
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/node"
+	"github.com/cilium/cilium/pkg/option"
 )
 
 type ProxyLookupHandler interface {
@@ -61,7 +62,26 @@ func (p *proxyLookupHandler) LookupRegisteredEndpoint(endpointAddr netip.Addr) (
 		}
 	}
 
-	return nil, false, fmt.Errorf("cannot find endpoint with IP %s", endpointAddr.String())
+	return nil, false, endpointLookupError(p.endpointManager, endpointAddr)
+}
+
+// endpointLookupError explains why an address could not be attributed to an
+// endpoint.
+//
+// The proxy is reached from the host namespace and has only the address of the
+// connection to work with. That is enough while an address belongs to one
+// endpoint, and it stops being enough the moment several VPCs use it: the
+// lookup then refuses to answer rather than picking one of them, and the query
+// is dropped. Saying which of the two situations it is turns a stream of
+// "cannot find endpoint" failures into something an operator can act on -
+// either the address really is unknown, or DNS policy cannot be applied to this
+// address at all.
+func endpointLookupError(mgr endpointmanager.EndpointManager, addr netip.Addr) error {
+	if option.Config.EnableNativeVPC && endpointmanager.LookupIPAnyVNI(mgr, addr) != nil {
+		return fmt.Errorf("cannot attribute IP %s to an endpoint: it is used by endpoints in more than one VPC, "+
+			"and the proxy sees only the address", addr)
+	}
+	return fmt.Errorf("cannot find endpoint with IP %s", addr)
 }
 
 func (p *proxyLookupHandler) LookupSecIDByIP(ip netip.Addr) (secID ipcache.Identity, exists bool) {
