@@ -276,6 +276,10 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 		}
 	}
 
+	if err := requireVNI(nativeVPCEnabled, ep.VNIID, ep.IsHost(), ep.K8sNamespaceAndPodNameIsSet(), pod); err != nil {
+		return invalidDataError(ep, fmt.Errorf("native-vpc endpoint %s/%s: %w", ep.K8sNamespace, ep.K8sPodName, err))
+	}
+
 	// Build checkIDs for IP conflict detection
 	// For native-vpc mode with VNI, use VNI-aware identifier (vni-ipv4:<vni>:<ip>)
 	// Otherwise, use original IP-only identifier (ipv4:<ip>)
@@ -573,6 +577,37 @@ func (m *endpointAPIManager) ModifyEndpointIdentityLabelsFromAPI(id string, add,
 }
 
 const unsetVNI = int64(-1)
+
+// requireVNI enforces the native-vpc control-plane invariant: every endpoint
+// of a non-hostNetwork Kubernetes pod must have a VNI by the time it is
+// created.
+//
+// The VNI can only be read from the pod annotation. If the pod store and the
+// apiserver were both unavailable, the Kubernetes block of CreateEndpoint is
+// skipped with a warning, and the endpoint would otherwise be created on the
+// plain-IP scheme: registered under the bare "ipv4:" identifier (colliding
+// with the same IP in another VPC), without the VNI identity label, with
+// CONFIG(native_vpc_vni)=0 in bpf_lxc and without any VNI-scoped ipcache
+// entry. That is exactly the non-deterministic "partially reachable" state
+// this mode exists to prevent, so the endpoint is rejected instead and the CNI
+// ADD is retried by the kubelet.
+//
+// Endpoints that are not Kubernetes pods (host endpoint, ingress endpoint,
+// non-k8s workloads) are not in any VPC and keep VNI 0.
+func requireVNI(nativeVPCEnabled bool, vni uint64, isHostEndpoint, isK8sPod bool, pod *slim_corev1.Pod) error {
+	if !nativeVPCEnabled || vni > 0 || isHostEndpoint || !isK8sPod {
+		return nil
+	}
+	if pod != nil && pod.Spec.HostNetwork {
+		// hostNetwork pods use the host stack and are not in any VPC.
+		return nil
+	}
+	if pod == nil {
+		return fmt.Errorf("no VNI: pod metadata is unavailable, so the annotation %q could not be read",
+			option.Config.NativeVPCVNIAnnotation)
+	}
+	return fmt.Errorf("no VNI: the annotation %q was not applied", option.Config.NativeVPCVNIAnnotation)
+}
 
 // maxVNI mirrors endpoint.MaxVNI: the VNI space is 24 bits.
 const maxVNI = int64(endpoint.MaxVNI)

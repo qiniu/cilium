@@ -261,6 +261,31 @@ func (m *lxcMap) WriteEndpoint(f EndpointFrontend) error {
 	return nil
 }
 
+// ownsEntry reports whether the entry currently stored under key belongs to
+// the given endpoint id (or does not exist at all).
+//
+// cilium_lxc is keyed by the bare IP. In native-vpc mode two endpoints of
+// different VPCs may legitimately share an IP on the same node, in which case
+// the last writer wins. Deleting such a key unconditionally on endpoint
+// teardown would remove the *other* VPC's entry, so deletion is made
+// compare-and-delete. The map is not authoritative for the native-vpc pod
+// datapath (bpf_lxc skips the endpoint-map fast path when the endpoint has a
+// VNI, and kube-ovn owns the host and tunnel datapath); it is kept for
+// diagnostics and for the non-overlapping majority of entries.
+func (m *lxcMap) ownsEntry(key *EndpointKey, id uint16) bool {
+	value, err := m.bpfMap.Lookup(key)
+	if err != nil {
+		// Missing (or unreadable) entry: nothing of another endpoint can be
+		// destroyed by proceeding.
+		return true
+	}
+	info, ok := value.(*EndpointInfo)
+	if !ok {
+		return true
+	}
+	return info.LxcID == id
+}
+
 // addHostEntry adds a special endpoint which represents the local host
 func (m *lxcMap) addHostEntry(addr netip.Addr) error {
 	key := newEndpointKey(addr)
@@ -286,7 +311,17 @@ func (m *lxcMap) DeleteEntry(addr netip.Addr) error {
 
 func (m *lxcMap) DeleteElement(logger *slog.Logger, f EndpointFrontend) []error {
 	var errors []error
+	id := uint16(f.GetID())
 	for _, k := range m.getBPFKeys(f) {
+		// Native-vpc: never delete an entry that a different endpoint (an
+		// overlapping IP in another VPC) currently owns.
+		if option.Config.EnableNativeVPC && !m.ownsEntry(k, id) {
+			logger.Debug("skipping endpoint map deletion of an entry owned by another endpoint",
+				"key", k.String(),
+				"endpointID", id,
+			)
+			continue
+		}
 		if err := m.bpfMap.Delete(k); err != nil {
 			errors = append(errors, fmt.Errorf("unable to delete key %v from %s: %w", k, bpf.MapPath(logger, mapName), err))
 		}

@@ -19,6 +19,7 @@ import (
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	"github.com/cilium/cilium/pkg/labelsfilter"
+	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -257,6 +258,52 @@ func TestParseVNIFromPod(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.expectedVNI, vni)
 			}
+		})
+	}
+}
+
+// TestRequireVNI pins the native-vpc control-plane invariant: an endpoint of a
+// non-hostNetwork Kubernetes pod must never be created without a VNI, in
+// particular when the pod metadata could not be fetched (that path only logs a
+// warning and would otherwise fall back to the plain-IP scheme).
+func TestRequireVNI(t *testing.T) {
+	prev := option.Config.NativeVPCVNIAnnotation
+	option.Config.NativeVPCVNIAnnotation = "ovn.kubernetes.io/tunnel_key"
+	t.Cleanup(func() { option.Config.NativeVPCVNIAnnotation = prev })
+
+	hostNetworkPod := &slim_corev1.Pod{Spec: slim_corev1.PodSpec{HostNetwork: true}}
+	pod := &slim_corev1.Pod{}
+
+	for _, tc := range []struct {
+		name      string
+		nativeVPC bool
+		vni       uint64
+		isHost    bool
+		isK8sPod  bool
+		pod       *slim_corev1.Pod
+		wantErr   string
+	}{
+		{name: "native-vpc disabled", isK8sPod: true, pod: pod},
+		{name: "vni resolved", nativeVPC: true, vni: 36, isK8sPod: true, pod: pod},
+		{name: "host endpoint", nativeVPC: true, isHost: true},
+		{name: "not a k8s pod", nativeVPC: true},
+		{name: "hostNetwork pod", nativeVPC: true, isK8sPod: true, pod: hostNetworkPod},
+		{
+			name: "pod metadata unavailable", nativeVPC: true, isK8sPod: true, pod: nil,
+			wantErr: "pod metadata is unavailable",
+		},
+		{
+			name: "pod without annotation", nativeVPC: true, isK8sPod: true, pod: pod,
+			wantErr: "was not applied",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := requireVNI(tc.nativeVPC, tc.vni, tc.isHost, tc.isK8sPod, tc.pod)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
 		})
 	}
 }

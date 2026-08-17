@@ -4,6 +4,7 @@
 package ipcache
 
 import (
+	"fmt"
 	"net"
 	"net/netip"
 	"testing"
@@ -280,4 +281,71 @@ func TestLookupSecIDByIPForVNI(t *testing.T) {
 	// A zero VNI is not a VPC scope.
 	_, ok = s.IPIdentityCache.LookupSecIDByIPForVNI(addr, 0)
 	require.False(t, ok)
+}
+
+// TestDumpToListenerVNI is a regression test for the full-dump path: the
+// ipcache API handler and the BPF listener registration both dump every entry,
+// and native-vpc keys ("<ip>@vni:<vni>") are not parsable as a prefix. The
+// dump must not panic, must report the plain prefix, and must carry the VNI in
+// the identity so listeners route the entry to the VNI-scoped map.
+func TestDumpToListenerVNI(t *testing.T) {
+	s := setupIPCacheTestSuite(t)
+
+	_, err := s.IPIdentityCache.Upsert(KeyWithVNI("192.168.1.2", 36), nil, 0, nil, Identity{
+		ID: identity.NumericIdentity(21929), Source: source.CustomResource, Vni: 36,
+	})
+	require.NoError(t, err)
+	_, err = s.IPIdentityCache.Upsert(KeyWithVNI("192.168.1.2", 17), nil, 0, nil, Identity{
+		ID: identity.NumericIdentity(21930), Source: source.CustomResource, Vni: 17,
+	})
+	require.NoError(t, err)
+	_, err = s.IPIdentityCache.Upsert("10.0.0.1", nil, 0, nil, Identity{
+		ID: identity.NumericIdentity(21931), Source: source.KubeAPIServer,
+	})
+	require.NoError(t, err)
+
+	l := &dumpCollector{}
+	require.NotPanics(t, func() { s.IPIdentityCache.DumpToListener(l) })
+
+	require.Equal(t, map[string]uint32{
+		"192.168.1.2/32@36": 36,
+		"192.168.1.2/32@17": 17,
+		"10.0.0.1/32@0":     0,
+	}, l.seen)
+}
+
+type dumpCollector struct {
+	seen map[string]uint32
+}
+
+func (d *dumpCollector) OnIPIdentityCacheChange(_ CacheModification, cidr cmtypes.PrefixCluster,
+	_, _ net.IP, _ *Identity, newID Identity, _ uint8, _ *K8sMetadata, _ uint8,
+) {
+	if d.seen == nil {
+		d.seen = map[string]uint32{}
+	}
+	d.seen[fmt.Sprintf("%s@%d", cidr.String(), newID.Vni)] = newID.Vni
+}
+
+// TestLookupByIdentityAndHostStripVNI verifies that the two ipcache readers
+// which return raw key strings (DNS rule restoration and the WireGuard
+// AllowedIPs list) never leak the internal "<ip>@vni:<vni>" key: their
+// consumers parse the result as an address and would drop the entry.
+func TestLookupByIdentityAndHostStripVNI(t *testing.T) {
+	s := setupIPCacheTestSuite(t)
+	id := identity.NumericIdentity(21929)
+	hostIP := net.ParseIP("10.58.55.23")
+
+	_, err := s.IPIdentityCache.Upsert(KeyWithVNI("192.168.1.2", 36), hostIP, 0, nil, Identity{
+		ID: id, Source: source.CustomResource, Vni: 36,
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, []string{"192.168.1.2"}, s.IPIdentityCache.LookupByIdentity(id))
+
+	s.IPIdentityCache.mutex.RLock()
+	cidrs := s.IPIdentityCache.LookupByHostRLocked(hostIP, nil)
+	s.IPIdentityCache.mutex.RUnlock()
+	require.Len(t, cidrs, 1)
+	require.Equal(t, "192.168.1.2/32", cidrs[0].String())
 }

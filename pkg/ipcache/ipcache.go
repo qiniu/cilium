@@ -812,9 +812,30 @@ func (ipc *IPCache) dumpToListenerLocked(listener IPIdentityMappingListener) {
 		hostIP, encryptKey := ipc.getHostIPCacheRLocked(ip)
 		k8sMeta := ipc.getK8sMetadata(ip)
 		endpointFlags := ipc.getEndpointFlagsRLocked(ip)
-		cidrCluster, err := cmtypes.ParsePrefixCluster(ip)
+
+		// Native-vpc entries are keyed "<ip>@vni:<vni>", which is not a
+		// parsable prefix/AddrCluster. Strip the suffix and carry the VNI in
+		// the identity (as the incremental Upsert path does), so that
+		// listeners see the same (prefix, Identity.Vni) pair on a full dump as
+		// on an incremental update.
+		plainIP, keyVNI := splitVNIKey(ip)
+		if identity.Vni == 0 {
+			identity.Vni = keyVNI
+		}
+
+		cidrCluster, err := cmtypes.ParsePrefixCluster(plainIP)
 		if err != nil {
-			addrCluster := cmtypes.MustParseAddrCluster(ip)
+			addrCluster, addrErr := cmtypes.ParseAddrCluster(plainIP)
+			if addrErr != nil {
+				// Never panic on a malformed key: this function backs the
+				// ipcache API dump and the BPF listener registration.
+				ipc.logger.Error(
+					"unable to parse ipcache key, skipping entry in dump",
+					logfields.Error, addrErr,
+					logfields.IPAddr, ip,
+				)
+				continue
+			}
 			cidrCluster = addrCluster.AsPrefixCluster()
 		}
 		listener.OnIPIdentityCacheChange(Upsert, cidrCluster, nil, hostIP, nil, identity, encryptKey, k8sMeta, endpointFlags)
@@ -1071,6 +1092,11 @@ func (ipc *IPCache) LookupSecIDByIP(ip netip.Addr) (id Identity, ok bool) {
 
 // LookupByIdentity returns the set of IPs (endpoint or CIDR prefix) that have
 // security identity ID, or nil if the entry does not exist.
+//
+// Native-vpc entries are stored under "<ip>@vni:<vni>" keys; they are returned
+// as plain IPs here because every consumer (DNS rule restoration) matches
+// packets by address. This does not mix VPCs: the selection is by identity,
+// and identities are VNI-distinct in native-vpc mode.
 func (ipc *IPCache) LookupByIdentity(id identity.NumericIdentity) (ips []string) {
 	ipc.mutex.RLock()
 	defer ipc.mutex.RUnlock()
@@ -1080,7 +1106,8 @@ func (ipc *IPCache) LookupByIdentity(id identity.NumericIdentity) (ips []string)
 	if length > 0 {
 		ips = make([]string, 0, length)
 		for ip := range ipc.identityToIPCache[id] {
-			ips = append(ips, ip)
+			plainIP, _ := splitVNIKey(ip)
+			ips = append(ips, plainIP)
 		}
 	}
 	return ips
@@ -1092,9 +1119,22 @@ func (ipc *IPCache) LookupByIdentity(id identity.NumericIdentity) (ips []string)
 func (ipc *IPCache) LookupByHostRLocked(hostIPv4, hostIPv6 net.IP) (cidrs []net.IPNet) {
 	for ip, host := range ipc.ipToHostIPCache {
 		if hostIPv4 != nil && host.IP.Equal(hostIPv4) || hostIPv6 != nil && host.IP.Equal(hostIPv6) {
-			_, cidr, err := net.ParseCIDR(ip)
+			// Native-vpc keys carry an "@vni:<vni>" suffix which is not
+			// parsable; the caller (WireGuard AllowedIPs) works on plain
+			// prefixes.
+			plainIP, _ := splitVNIKey(ip)
+			_, cidr, err := net.ParseCIDR(plainIP)
 			if err != nil {
-				endpointIP := net.ParseIP(ip)
+				endpointIP := net.ParseIP(plainIP)
+				if endpointIP == nil {
+					// Never append a zero-value prefix for a key we
+					// cannot parse.
+					ipc.logger.Error(
+						"unable to parse ipcache key, skipping entry",
+						logfields.IPAddr, ip,
+					)
+					continue
+				}
 				cidr = iputil.IPToPrefix(endpointIP)
 			}
 			cidrs = append(cidrs, *cidr)

@@ -225,162 +225,162 @@ entry?
 Writers (key construction)
 --------------------------
 
-+--------------------------------------+-----------+------------------------------------------+
-| Consumer                             | VNI-aware | Notes                                    |
-+======================================+===========+==========================================+
-| endpoint create (parseVNIFromPod)    | yes       | reads tunnel_key into ``VNIID``          |
-+--------------------------------------+-----------+------------------------------------------+
-| pod watcher register                  | yes       | ``ip@vni:N`` key                         |
-+--------------------------------------+-----------+------------------------------------------+
-| pod watcher delete                    | yes       | key from the current annotation VNI      |
-+--------------------------------------+-----------+------------------------------------------+
-| pod watcher old-IP delete             | yes*      | uses the NEW pod's VNI (VNI immutable    |
-|                                      |           | per kube-ovn, so old==new in practice)   |
-+--------------------------------------+-----------+------------------------------------------+
-| CiliumEndpoint watcher register       | yes       | ``ip@vni:N`` key                         |
-+--------------------------------------+-----------+------------------------------------------+
-| CEP VNI annotation (write)            | yes       | ``native-vpc.cilium.io/vni`` written at   |
-|                                      |           | CEP create and backfilled by an escaped  |
-|                                      |           | JSON-Patch (RFC 6901) on existing CEPs   |
-+--------------------------------------+-----------+------------------------------------------+
-| CEP informer transform                | yes       | keeps *only* that annotation; dropping   |
-|                                      |           | it would leave every remote endpoint     |
-|                                      |           | without a VNI (CES is rejected at start) |
-+--------------------------------------+-----------+------------------------------------------+
-| CiliumEndpoint watcher old-IP delete  | yes       | uses the OLD CEP's VNI                   |
-+--------------------------------------+-----------+------------------------------------------+
-| CiliumEndpoint watcher delete         | yes       | key from the deleted CEP's VNI           |
-+--------------------------------------+-----------+------------------------------------------+
-| local identity sync (upsertLocal)     | yes       | ``ip@vni:N`` key; VNI=0 rejected in      |
-|                                      |           | native-vpc (documented constraint)       |
-+--------------------------------------+-----------+------------------------------------------+
-| kvstore identity sync (Upsert)        | yes       | ``IPIdentityPair.Vni`` + scoped key      |
-+--------------------------------------+-----------+------------------------------------------+
-| kvstore watcher (OnUpdate/OnDelete)   | yes       | key rebuilt from ``pair.Vni``            |
-+--------------------------------------+-----------+------------------------------------------+
-| ipcache BPF listener                  | yes       | routes to cilium_ipcache_vni by Vni      |
-+--------------------------------------+-----------+------------------------------------------+
-| node/policy/apiserver UpsertMetadata  | n/a       | node IPs, CIDRs, kube-apiserver (non-VPC)|
-+--------------------------------------+-----------+------------------------------------------+
-| local identity restorer (dump)        | n/a*      | dumps only the plain map; VNI entries    |
-|                                      |           | are rebuilt by the endpoint identity sync|
-+--------------------------------------+-----------+------------------------------------------+
++--------------------------------------+-----------+-------------------------------------------+
+| Consumer                             | VNI-aware | Notes                                     |
++======================================+===========+===========================================+
+| endpoint create (parseVNIFromPod)    | yes       | reads tunnel_key into ``VNIID``           |
++--------------------------------------+-----------+-------------------------------------------+
+| pod watcher register                 | yes       | ``ip@vni:N`` key                          |
++--------------------------------------+-----------+-------------------------------------------+
+| pod watcher delete                   | yes       | key from the current annotation VNI       |
++--------------------------------------+-----------+-------------------------------------------+
+| pod watcher old-IP delete            | yes*      | uses the NEW pod's VNI (VNI immutable     |
+|                                      |           | per kube-ovn, so old==new in practice)    |
++--------------------------------------+-----------+-------------------------------------------+
+| CiliumEndpoint watcher register      | yes       | ``ip@vni:N`` key                          |
++--------------------------------------+-----------+-------------------------------------------+
+| CEP VNI annotation (write)           | yes       | ``native-vpc.cilium.io/vni`` written at   |
+|                                      |           | CEP create and backfilled by an escaped   |
+|                                      |           | JSON-Patch (RFC 6901) on existing CEPs    |
++--------------------------------------+-----------+-------------------------------------------+
+| CEP informer transform               | yes       | keeps *only* that annotation; dropping    |
+|                                      |           | it would leave every remote endpoint      |
+|                                      |           | without a VNI (CES is rejected at start)  |
++--------------------------------------+-----------+-------------------------------------------+
+| CiliumEndpoint watcher old-IP delete | yes       | uses the OLD CEP's VNI                    |
++--------------------------------------+-----------+-------------------------------------------+
+| CiliumEndpoint watcher delete        | yes       | key from the deleted CEP's VNI            |
++--------------------------------------+-----------+-------------------------------------------+
+| local identity sync (upsertLocal)    | yes       | ``ip@vni:N`` key; VNI=0 rejected in       |
+|                                      |           | native-vpc (documented constraint)        |
++--------------------------------------+-----------+-------------------------------------------+
+| kvstore identity sync (Upsert)       | yes       | ``IPIdentityPair.Vni`` + scoped key       |
++--------------------------------------+-----------+-------------------------------------------+
+| kvstore watcher (OnUpdate/OnDelete)  | yes       | key rebuilt from ``pair.Vni``             |
++--------------------------------------+-----------+-------------------------------------------+
+| ipcache BPF listener                 | yes       | routes to cilium_ipcache_vni by Vni       |
++--------------------------------------+-----------+-------------------------------------------+
+| node/policy/apiserver UpsertMetadata | n/a       | node IPs, CIDRs, kube-apiserver (non-VPC  |
++--------------------------------------+-----------+-------------------------------------------+
+| local identity restorer (dump)       | n/a*      | dumps only the plain map; VNI entries     |
+|                                      |           | are rebuilt by the endpoint identity sync |
++--------------------------------------+-----------+-------------------------------------------+
 
 Readers (lookup)
 -----------------
 
-+--------------------------------------+-----------+------------------------------------------+
-| Consumer                             | VNI-aware | Notes                                    |
-+======================================+===========+==========================================+
-| datapath egress (bpf_lxc from_lxc)   | yes       | VNI map first, plain fallback            |
-+--------------------------------------+-----------+------------------------------------------+
-| datapath ingress (bpf_lxc tail_*)    | yes       | VNI map first, plain fallback            |
-+--------------------------------------+-----------+------------------------------------------+
-| datapath bpf_host                    | deploy    | plain lookups; must not be on the         |
-|                                      |           | VNI-scoped pod data path (kube-ovn owns  |
-|                                      |           | the host datapath)                        |
-+--------------------------------------+-----------+------------------------------------------+
-| datapath bpf_overlay                 | deploy    | plain lookups; only if Cilium tunneling   |
-|                                      |           | is enabled (native-vpc uses kube-ovn      |
-|                                      |           | Geneve, whose VNI scopes a logical switch)|
-+--------------------------------------+-----------+------------------------------------------+
-| policy computation (CIDR shadow)     | yes       | shadow checks use ``KeyWithVNI``         |
-+--------------------------------------+-----------+------------------------------------------+
-| fromEndpoints/toEndpoints selectors  | yes       | identities carry the internal VNI label; |
-|                                      |           | selectors keep normal label semantics    |
-+--------------------------------------+-----------+------------------------------------------+
-| endpointmanager index (writer)       | yes       | ``vni-ipv4/6:<vni>:<ip>`` aux keys;      |
-|                                      |           | native-vpc endpoints are *not* under the |
-|                                      |           | bare ``ipv4:/ipv6:`` keys                |
-+--------------------------------------+-----------+------------------------------------------+
-| endpointmanager LookupIP* (readers:  | yes*      | bare-IP lookups fall back to the per-IP  |
-| DNS proxy source EP, Hubble local,   |           | VNI key index when exactly one VNI uses  |
-| L7 accesslog, fqdn service, ipam API)|           | the IP on the node; overlapping IPs stay |
-|                                      |           | a deliberate miss (fail closed)          |
-+--------------------------------------+-----------+------------------------------------------+
-| DNS proxy restored endpoints         | yes*      | per-IP *list* of restored endpoints; the |
-| (restart window)                     |           | bare-IP fallback resolves only when the  |
-|                                      |           | list has exactly one entry, so restored  |
-|                                      |           | DNS rules never leak across VNIs         |
-+--------------------------------------+-----------+------------------------------------------+
-| Hubble VNI context (L3/L4)            | yes       | the emitting endpoint's VNI is read from |
-|                                      |           | the event's endpoint id, exactly like    |
-|                                      |           | bpf_lxc uses CONFIG(native_vpc_vni)      |
-+--------------------------------------+-----------+------------------------------------------+
-| Hubble local endpoint                | yes       | exact (VNI, IP) lookup; falls back only  |
-|                                      |           | to the key-exact plain scope for non-VPC |
-|                                      |           | peers, never to a bare-IP guess          |
-+--------------------------------------+-----------+------------------------------------------+
-| Hubble remote endpoint               | yes       | key-exact (VNI, IP) ipcache identity +   |
-|                                      |           | metadata when the flow has VNI context;  |
-|                                      |           | otherwise VNI from the identity label    |
-+--------------------------------------+-----------+------------------------------------------+
-| Hubble sock parser (socketLB)        | yes       | VNI from the exact cgroup -> pod ->      |
-|                                      |           | endpoint context of the event            |
-+--------------------------------------+-----------+------------------------------------------+
-| Hubble debug events                  | yes       | endpoint resolved by id, VNI reported    |
-+--------------------------------------+-----------+------------------------------------------+
-| Hubble policy correlation            | yes       | keyed by endpoint id + remote identity,  |
-|                                      |           | both VNI-exact (never by IP)             |
-+--------------------------------------+-----------+------------------------------------------+
-| Hubble DNS names (SourceNames)       | yes       | per-endpoint DNS cache, keyed by the     |
-|                                      |           | resolved endpoint id                     |
-+--------------------------------------+-----------+------------------------------------------+
-| Hubble flowlog export                 | deploy    | ``fieldMask``/``fieldAggregate`` must    |
-|                                      |           | include ``source.vni_id`` and            |
-|                                      |           | ``destination.vni_id``                   |
-+--------------------------------------+-----------+------------------------------------------+
-| Hubble service enrichment            | n/a       | service VIPs are cluster-scoped, not in  |
-|                                      |           | the VPC address space                    |
-+--------------------------------------+-----------+------------------------------------------+
-| Hubble metrics context               | yes       | ``vni`` context identifier and           |
-|                                      |           | ``source_vni``/``destination_vni``       |
-|                                      |           | labelsContext values                     |
-+--------------------------------------+-----------+------------------------------------------+
-| Hubble flow filters                  | yes       | ``vni_id`` is filterable via the CEL     |
-|                                      |           | filter and via the VNI identity label    |
-+--------------------------------------+-----------+------------------------------------------+
-| L7 proxy accesslog (epinfo)          | yes       | records the endpoint's VNI on the log    |
-|                                      |           | record (endpoint VNI, else the           |
-|                                      |           | unambiguous ipcache entry's VNI)         |
-+--------------------------------------+-----------+------------------------------------------+
-| Hubble L7 parser (DNS/HTTP flows)    | yes       | resolves pod metadata/workload with the  |
-|                                      |           | recorded (VNI, IP) and sets ``vni_id``   |
-|                                      |           | on both flow endpoints                   |
-+--------------------------------------+-----------+------------------------------------------+
-| ipam API delete ("IP in use")        | yes       | VNI-agnostic in-use check (fails open on |
-|                                      |           | overlap on purpose: it is a guard, not   |
-|                                      |           | an identity lookup)                      |
-+--------------------------------------+-----------+------------------------------------------+
-| DNS proxy (fqdn)                     | yes       | same unambiguous bare-IP resolution      |
-+--------------------------------------+-----------+------------------------------------------+
-| monitor events (IPCacheNotification) | yes       | carries the VNI (agent JSON + hubble     |
-|                                      |           | flowpb field 9)                          |
-+--------------------------------------+-----------+------------------------------------------+
-| cilium-dbg bpf ipcache list          | yes       | dumps both the plain and VNI-scoped maps |
-+--------------------------------------+-----------+------------------------------------------+
-| ipcache API / list handler           | yes       | IPListEntry carries ``vniID``             |
-+--------------------------------------+-----------+------------------------------------------+
-| envoy NPHDS (L7)                     | yes       | host lists are organized per identity     |
-|                                      |           | (VNI-distinct); envoy matches by the      |
-|                                      |           | packet's identity, not by bare IP         |
-+--------------------------------------+-----------+------------------------------------------+
-| WireGuard agent                      | yes       | only consumes hostIP (peer routing) and   |
-|                                      |           | bare-IP AllowedIPs (idempotent)           |
-+--------------------------------------+-----------+------------------------------------------+
-| FQDN identity-to-IP table (service)  | no*       | bare prefixes; overlapping IPs appear     |
-|                                      |           | under every VNI identity; fix requires    |
-|                                      |           | the DNS-client protocol to carry VNI      |
-+--------------------------------------+-----------+------------------------------------------+
-| ipcache metadata machinery           | n/a       | node/CIDR prefixes (non-VPC)             |
-+--------------------------------------+-----------+------------------------------------------+
-| clustermesh kvstoremesh reflector    | deploy    | VNI-scoped keys are reflected to remote   |
-|                                      |           | clusters; native-vpc must NOT be combined |
-|                                      |           | with clustermesh (VPC != ClusterMesh)     |
-+--------------------------------------+-----------+------------------------------------------+
-| ipsec datapath                       | deploy    | kube-ovn underlay does not use Cilium     |
-|                                      |           | ipsec; not a supported combination        |
-+--------------------------------------+-----------+------------------------------------------+
++---------------------------------------+-----------+-------------------------------------------+
+| Consumer                              | VNI-aware | Notes                                     |
++=======================================+===========+===========================================+
+| datapath egress (bpf_lxc from_lxc)    | yes       | VNI map first, plain fallback             |
++---------------------------------------+-----------+-------------------------------------------+
+| datapath ingress (bpf_lxc tail_*)     | yes       | VNI map first, plain fallback             |
++---------------------------------------+-----------+-------------------------------------------+
+| datapath bpf_host                     | deploy    | plain lookups; must not be on the         |
+|                                       |           | VNI-scoped pod data path (kube-ovn owns   |
+|                                       |           | the host datapath)                        |
++---------------------------------------+-----------+-------------------------------------------+
+| datapath bpf_overlay                  | deploy    | plain lookups; only if Cilium tunneling   |
+|                                       |           | is enabled (native-vpc uses kube-ovn      |
+|                                       |           | Geneve, whose VNI scopes a logical switch |
++---------------------------------------+-----------+-------------------------------------------+
+| policy computation (CIDR shadow)      | yes       | shadow checks use ``KeyWithVNI``          |
++---------------------------------------+-----------+-------------------------------------------+
+| fromEndpoints/toEndpoints selectors   | yes       | identities carry the internal VNI label;  |
+|                                       |           | selectors keep normal label semantics     |
++---------------------------------------+-----------+-------------------------------------------+
+| endpointmanager index (writer)        | yes       | ``vni-ipv4/6:<vni>:<ip>`` aux keys;       |
+|                                       |           | native-vpc endpoints are *not* under the  |
+|                                       |           | bare ``ipv4:/ipv6:`` keys                 |
++---------------------------------------+-----------+-------------------------------------------+
+| endpointmanager LookupIP* (readers:   | yes*      | bare-IP lookups fall back to the per-IP   |
+| DNS proxy source EP, Hubble local,    |           | VNI key index when exactly one VNI uses   |
+| L7 accesslog, fqdn service, ipam API) |           | the IP on the node; overlapping IPs stay  |
+|                                       |           | a deliberate miss (fail closed)           |
++---------------------------------------+-----------+-------------------------------------------+
+| DNS proxy restored endpoints          | yes*      | per-IP *list* of restored endpoints; the  |
+| (restart window)                      |           | bare-IP fallback resolves only when the   |
+|                                       |           | list has exactly one entry, so restored   |
+|                                       |           | DNS rules never leak across VNIs          |
++---------------------------------------+-----------+-------------------------------------------+
+| Hubble VNI context (L3/L4)            | yes       | the emitting endpoint's VNI is read from  |
+|                                       |           | the event's endpoint id, exactly like     |
+|                                       |           | bpf_lxc uses CONFIG(native_vpc_vni)       |
++---------------------------------------+-----------+-------------------------------------------+
+| Hubble local endpoint                 | yes       | exact (VNI, IP) lookup; falls back only   |
+|                                       |           | to the key-exact plain scope for non-VPC  |
+|                                       |           | peers, never to a bare-IP guess           |
++---------------------------------------+-----------+-------------------------------------------+
+| Hubble remote endpoint                | yes       | key-exact (VNI, IP) ipcache identity +    |
+|                                       |           | metadata when the flow has VNI context;   |
+|                                       |           | otherwise VNI from the identity label     |
++---------------------------------------+-----------+-------------------------------------------+
+| Hubble sock parser (socketLB)         | yes       | VNI from the exact cgroup -> pod ->       |
+|                                       |           | endpoint context of the event             |
++---------------------------------------+-----------+-------------------------------------------+
+| Hubble debug events                   | yes       | endpoint resolved by id, VNI reported     |
++---------------------------------------+-----------+-------------------------------------------+
+| Hubble policy correlation             | yes       | keyed by endpoint id + remote identity,   |
+|                                       |           | both VNI-exact (never by IP)              |
++---------------------------------------+-----------+-------------------------------------------+
+| Hubble DNS names (SourceNames)        | yes       | per-endpoint DNS cache, keyed by the      |
+|                                       |           | resolved endpoint id                      |
++---------------------------------------+-----------+-------------------------------------------+
+| Hubble flowlog export                 | deploy    | ``fieldMask``/``fieldAggregate`` must     |
+|                                       |           | include ``source.vni_id`` and             |
+|                                       |           | ``destination.vni_id``                    |
++---------------------------------------+-----------+-------------------------------------------+
+| Hubble service enrichment             | n/a       | service VIPs are cluster-scoped, not in   |
+|                                       |           | the VPC address space                     |
++---------------------------------------+-----------+-------------------------------------------+
+| Hubble metrics context                | yes       | ``vni`` context identifier and            |
+|                                       |           | ``source_vni``/``destination_vni``        |
+|                                       |           | labelsContext values                      |
++---------------------------------------+-----------+-------------------------------------------+
+| Hubble flow filters                   | yes       | ``vni_id`` is filterable via the CEL      |
+|                                       |           | filter and via the VNI identity label     |
++---------------------------------------+-----------+-------------------------------------------+
+| L7 proxy accesslog (epinfo)           | yes       | records the endpoint's VNI on the log     |
+|                                       |           | record (endpoint VNI, else the            |
+|                                       |           | unambiguous ipcache entry's VNI)          |
++---------------------------------------+-----------+-------------------------------------------+
+| Hubble L7 parser (DNS/HTTP flows)     | yes       | resolves pod metadata/workload with the   |
+|                                       |           | recorded (VNI, IP) and sets ``vni_id``    |
+|                                       |           | on both flow endpoints                    |
++---------------------------------------+-----------+-------------------------------------------+
+| ipam API delete ("IP in use")         | yes       | VNI-agnostic in-use check (fails open on  |
+|                                       |           | overlap on purpose: it is a guard, not    |
+|                                       |           | an identity lookup)                       |
++---------------------------------------+-----------+-------------------------------------------+
+| DNS proxy (fqdn)                      | yes       | same unambiguous bare-IP resolution       |
++---------------------------------------+-----------+-------------------------------------------+
+| monitor events (IPCacheNotification)  | yes       | carries the VNI (agent JSON + hubble      |
+|                                       |           | flowpb field 9)                           |
++---------------------------------------+-----------+-------------------------------------------+
+| cilium-dbg bpf ipcache list           | yes       | dumps both the plain and VNI-scoped maps  |
++---------------------------------------+-----------+-------------------------------------------+
+| ipcache API / list handler            | yes       | IPListEntry carries ``vniID``             |
++---------------------------------------+-----------+-------------------------------------------+
+| envoy NPHDS (L7)                      | yes       | host lists are organized per identity     |
+|                                       |           | (VNI-distinct); envoy matches by the      |
+|                                       |           | packet's identity, not by bare IP         |
++---------------------------------------+-----------+-------------------------------------------+
+| WireGuard agent                       | yes       | only consumes hostIP (peer routing) and   |
+|                                       |           | bare-IP AllowedIPs (idempotent)           |
++---------------------------------------+-----------+-------------------------------------------+
+| FQDN identity-to-IP table (service)   | no*       | bare prefixes; overlapping IPs appear     |
+|                                       |           | under every VNI identity; fix requires    |
+|                                       |           | the DNS-client protocol to carry VNI      |
++---------------------------------------+-----------+-------------------------------------------+
+| ipcache metadata machinery            | n/a       | node/CIDR prefixes (non-VPC)              |
++---------------------------------------+-----------+-------------------------------------------+
+| clustermesh kvstoremesh reflector     | deploy    | VNI-scoped keys are reflected to remote   |
+|                                       |           | clusters; native-vpc must NOT be combined |
+|                                       |           | with clustermesh (VPC != ClusterMesh)     |
++---------------------------------------+-----------+-------------------------------------------+
+| ipsec datapath                        | deploy    | kube-ovn underlay does not use Cilium     |
+|                                       |           | ipsec; not a supported combination        |
++---------------------------------------+-----------+-------------------------------------------+
 
 ``yes*`` / ``no*`` mark items that are correct or acceptable under the
 kube-ovn guarantee (annotation/VNI immutable per pod), or that are mitigated
@@ -433,6 +433,173 @@ Requirements
   ``--native-vpc-vni-annotation``. ``nativeVPC.enabled`` requires
   ``nativeVPC.vniAnnotation`` to be non-empty (the agent fails to start
   otherwise).
+
+Plane-by-plane verification
+===========================
+
+The consumer checklist above is organised by data structure. This section is
+the *process* view used to sign off the feature: the four planes are audited
+one by one, every file that reads or writes an IP-keyed structure in that plane
+is enumerated, and each item is answered with the same four questions.
+
+Method
+------
+
+For every item in a plane:
+
+1. **Write key** - does the writer include the VNI in the key?
+2. **Read key** - does the reader include the VNI in the key?
+3. **Delete key** - is the delete key identical to the write key (no leak, no
+   deletion of a foreign VPC's entry)?
+4. **Fallback** - can a plain/bare-IP fallback path return an entry that
+   belongs to a different VPC? If yes it must fail closed instead.
+
+Plus, per plane, the boundary cases: VNI absent (0), VNI invalid or out of
+range (> 16777215), VNI unavailable at the moment of the decision (pod store
+down), agent restart, and mixed VPC/non-VPC entities.
+
+Control plane
+-------------
+
+Scope: turning the ``tunnel_key`` annotation into an endpoint property, an
+identity label, a CiliumEndpoint annotation, and endpoint-manager identifiers.
+
++-----------------------------------------------+--------------------------------------------------+
+| File                                          | Result                                           |
++===============================================+==================================================+
+| ``pkg/annotation/k8s.go``                     | annotation keys (pod ``tunnel_key`` is           |
+|                                               | configurable, CEP ``native-vpc.cilium.io/vni``   |
+|                                               | is fixed)                                        |
++-----------------------------------------------+--------------------------------------------------+
+| ``pkg/endpoint/api/endpoint_api_manager.go``  | reads the annotation before conflict detection;  |
+|                                               | rejects missing/0/unparsable/out-of-range;       |
+|                                               | conflict detection keyed by (VNI, IP);           |
+|                                               | ``requireVNI`` fails closed when the pod         |
+|                                               | metadata is unavailable                          |
++-----------------------------------------------+--------------------------------------------------+
+| ``pkg/endpoint/endpoint.go``                  | ``VNIID``, ``SyncVNIFromPodAnnotation`` decision |
+|                                               | table, VNI identity label add/remove             |
++-----------------------------------------------+--------------------------------------------------+
+| ``pkg/endpoint/identifiers.go``,              | ``vni-ipv4/6:<vni>:<ip>`` identifiers, mutually  |
+| ``pkg/endpoint/id/id.go``                     | exclusive with the bare ``ipv4:/ipv6:`` ones     |
++-----------------------------------------------+--------------------------------------------------+
+| ``pkg/endpoint/restore.go``,                  | VNI re-read from the annotation on restore       |
+| ``daemon/cmd/endpoint_restore.go``            | before the endpoint is exposed                   |
++-----------------------------------------------+--------------------------------------------------+
+| ``pkg/endpointmanager/manager.go``            | aux identifier index + per-IP VNI index for the  |
+|                                               | explicit bare-IP fallback; compile-time          |
+|                                               | assertion that the VNI lookups are implemented   |
++-----------------------------------------------+--------------------------------------------------+
+| ``pkg/endpointmanager/endpointsynchronizer``  | writes the CEP VNI annotation at create and      |
+|                                               | backfills it with an RFC 6901 escaped patch      |
++-----------------------------------------------+--------------------------------------------------+
+| ``pkg/k8s/factory_functions.go``              | CEP informer transform keeps the VNI annotation  |
++-----------------------------------------------+--------------------------------------------------+
+| ``pkg/k8s/watchers/{pod,cilium_endpoint}.go`` | VNI-scoped ipcache registration/deletion         |
++-----------------------------------------------+--------------------------------------------------+
+| ``pkg/labels``, ``pkg/labelsfilter``,         | ``vni:io-cilium-native-vpc-vni`` is an identity  |
+| ``pkg/identity``                              | label and cannot be filtered out                 |
++-----------------------------------------------+--------------------------------------------------+
+| ``pkg/option/config.go``                      | startup validation: annotation key required,     |
+|                                               | native routing required, CES rejected            |
++-----------------------------------------------+--------------------------------------------------+
+
+Defects found and fixed during this audit: the CEP informer transform dropped
+the annotation (remote endpoints silently lost their VNI); the CEP backfill
+patch used an unescaped JSON Pointer (the whole patch, including the status
+update, failed); endpoint creation fell back to the plain-IP scheme when the
+pod metadata was unavailable instead of failing closed.
+
+Cache plane
+-----------
+
+Scope: the userspace ipcache, the endpoint-manager indexes and the kvstore
+representation.
+
++----------------------------------------------+--------------------------------------------------+
+| File                                         | Result                                           |
++==============================================+==================================================+
+| ``pkg/ipcache/ipcache.go``                   | ``<ip>@vni:<vni>`` keys, per-IP VNI index,       |
+|                                              | key-exact lookups, unambiguous fallback,         |
+|                                              | shadowing checks keyed by (VNI, prefix)          |
++----------------------------------------------+--------------------------------------------------+
+| ``pkg/ipcache/ipcache.go`` (dump)            | full dump strips the VNI suffix and carries the  |
+|                                              | VNI in the identity; never panics on a key       |
++----------------------------------------------+--------------------------------------------------+
+| ``pkg/ipcache/ipcache.go`` (raw-key readers) | ``LookupByIdentity`` (DNS rule restoration) and  |
+|                                              | ``LookupByHostRLocked`` (WireGuard) return plain |
+|                                              | addresses, never internal keys                   |
++----------------------------------------------+--------------------------------------------------+
+| ``pkg/ipcache/metadata.go``                  | metadata layer is keyed by ``PrefixCluster`` and |
+|                                              | only holds non-VPC prefixes (nodes, CIDRs,       |
+|                                              | kube-apiserver); VNI keys never reach it         |
++----------------------------------------------+--------------------------------------------------+
+| ``pkg/ipcache/kvstore.go``                   | ``IPIdentityPair.Vni`` + scoped physical key     |
++----------------------------------------------+--------------------------------------------------+
+| ``pkg/ipcache/restore``                      | dumps only the plain map; VNI entries are        |
+|                                              | rebuilt by the endpoint identity sync            |
++----------------------------------------------+--------------------------------------------------+
+| ``pkg/fqdn/dnsproxy/proxy.go``               | restored endpoints are a per-IP list; resolves   |
+|                                              | only when a single endpoint uses the IP          |
++----------------------------------------------+--------------------------------------------------+
+
+Defects found and fixed during this audit: the full ipcache dump panicked on
+VNI keys (``MustParseAddrCluster``), which crashed the agent on ``cilium-dbg ip
+list`` / any listener registration; two readers returned raw ``<ip>@vni:<vni>``
+strings to consumers that parse them as addresses (DNS rule restoration lost
+every VPC IP, WireGuard could append a zero-value prefix).
+
+Named ports remain a cluster-wide aggregate (as they are across namespaces
+today); this is unchanged by native-vpc.
+
+Forwarding plane
+----------------
+
+Scope: BPF maps and programs.
+
++--------------------------------------+--------------------------------------------------+
+| File                                 | Result                                           |
++======================================+==================================================+
+| ``bpf/lib/eps.h``,                   | ``cilium_ipcache_vni`` LPM keyed by (VNI, IP),   |
+| ``pkg/maps/ipcache/ipcache.go``      | layout pinned by a Go/C size test                |
++--------------------------------------+--------------------------------------------------+
+| ``bpf/bpf_lxc.c``                    | egress and ingress resolve the peer in the VNI   |
+|                                      | map first; the endpoint-map fast path is skipped |
+|                                      | when the endpoint has a VNI                      |
++--------------------------------------+--------------------------------------------------+
+| ``bpf/include/bpf/config/lxc.h``,    | per-endpoint load-time ``native_vpc_vni``; one   |
+| ``pkg/datapath/{config,loader}``     | template serves all VNIs, endpoint hash includes |
+|                                      | the VNI                                          |
++--------------------------------------+--------------------------------------------------+
+| ``pkg/datapath/ipcache/listener.go`` | routes upserts/deletes to the VNI map by         |
+|                                      | ``Identity.Vni``; same key for both              |
++--------------------------------------+--------------------------------------------------+
+| ``pkg/ipcache/cell/cell.go``         | the VNI map is recreated at startup in           |
+|                                      | native-vpc mode and repopulated by the full dump |
++--------------------------------------+--------------------------------------------------+
+| ``pkg/maps/lxcmap/lxcmap.go``        | ``cilium_lxc`` is keyed by the bare IP: it is    |
+|                                      | not authoritative for native-vpc pods (bpf_lxc   |
+|                                      | skips it) and deletion is compare-and-delete so  |
+|                                      | one VPC cannot remove another VPC's entry        |
++--------------------------------------+--------------------------------------------------+
+
+Defect found and fixed during this audit: endpoint teardown deleted the
+``cilium_lxc`` entry of an overlapping IP owned by another VPC's endpoint.
+
+Observability plane
+-------------------
+
+See `Observability: the (VNI, IP) chain in Hubble`_ for the narrative; the
+files are ``pkg/hubble/parser/{threefour,seven,sock,debug,agent,common}``,
+``pkg/hubble/parser/cell``, ``pkg/hubble/metrics/api/context.go``,
+``pkg/monitor/api/types.go``, ``pkg/proxy/accesslog``, ``api/v1/flow`` and
+``cilium-dbg/cmd/bpf_ipcache_{list,get}.go``.
+
+Defects found and fixed during this audit: L7 flows had no VNI and lost all pod
+metadata; L3/L4 flows never had a VNI context (the only source was a tunnel
+header Cilium never sees under kube-ovn); socket-level flows had no VNI and
+could be enriched with a foreign VPC's pod; debug events did not report the
+VNI; ``cilium-dbg bpf ipcache get`` could not see VNI entries.
 
 Review and verification gates
 =============================
