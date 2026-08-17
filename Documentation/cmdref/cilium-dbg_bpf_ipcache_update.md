@@ -23,6 +23,7 @@ cilium bpf ipcache update 10.244.3.110/32 --tunnelendpoint 172.21.0.2 --identity
       --identity uint32         Identity
       --skiptunnel              Skip tunnel
       --tunnelendpoint string   Tunnel endpoint
+      --vni uint32              native-vpc VNI of the entry (0 = the unscoped ipcache)
 ```
 
 ### Options inherited from parent commands
