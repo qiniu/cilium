@@ -16,8 +16,15 @@ import (
 )
 
 // EndpointLookup is any type which maps from IP to the endpoint owning that IP.
+//
+// LookupCiliumID is part of the contract because the proxy usually already
+// knows the endpoint id: resolving by id is exact, while a bare-IP lookup is
+// ambiguous in native-vpc mode. Declaring it here rather than type-asserting
+// it at the call site means a rename cannot silently degrade the access log to
+// the bare-IP path.
 type EndpointLookup interface {
 	LookupIP(ip netip.Addr) (ep *endpoint.Endpoint)
+	LookupCiliumID(id uint16) *endpoint.Endpoint
 }
 
 // endpointInfoRegistry provides a default implementation of the logger.EndpointInfoRegistry interface.
@@ -60,13 +67,11 @@ func (r *endpointInfoRegistry) FillEndpointInfo(ctx context.Context, info *acces
 		if ep != nil {
 			info.ID = ep.GetID()
 		}
-	} else if lookupByID, ok := r.endpointManager.(interface {
-		LookupCiliumID(id uint16) *endpoint.Endpoint
-	}); ok {
+	} else {
 		// The proxy already knows the local endpoint: resolve it by ID (never
 		// by bare IP, which is ambiguous with overlapping VPC subnets) so that
 		// the native-vpc VNI below is exact.
-		ep = lookupByID.LookupCiliumID(uint16(info.ID))
+		ep = r.endpointManager.LookupCiliumID(uint16(info.ID))
 	}
 
 	// Native-vpc: record the (VNI, IP) scope of the endpoint so that the

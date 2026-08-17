@@ -128,6 +128,28 @@ func newIdentityAllocator(params identityAllocatorParams) identityAllocatorOut {
 		logger:          params.Log,
 	}
 
+	// Native-vpc: the identity of an endpoint carries its VNI label, which is
+	// derived from the pod's tunnel_key annotation by the *agent*. The
+	// operator's CiliumIdentity controller computes identities from pod and
+	// namespace labels only, so with operator-managed CIDs it would create
+	// identities without the VNI label, consider the agent's VNI-scoped
+	// identities unused and garbage collect them - merging all VPCs into one
+	// identity. Refuse to start instead.
+	//
+	// Checked unconditionally: the combination is invalid regardless of
+	// whether this agent currently enforces network policy, and the operator
+	// would act on the identities either way.
+	if err := nativeVPCIdentityModeError(params.Config.IdentityManagementMode); err != nil {
+		params.Log.Error(
+			"native-vpc mode requires agent-managed CiliumIdentities",
+			logfields.Error, err,
+			logfields.Value, params.Config.IdentityManagementMode,
+		)
+		params.Lifecycle.Append(cell.Hook{
+			OnStart: func(cell.HookContext) error { return err },
+		})
+	}
+
 	var idAlloc CachingIdentityAllocator
 
 	if option.NetworkPolicyEnabled(option.Config) {
@@ -135,24 +157,6 @@ func newIdentityAllocator(params identityAllocatorParams) identityAllocatorOut {
 			params.Config.IdentityManagementMode == option.IdentityManagementModeOperator,
 			params.Config.IdentityManagementMode == option.IdentityManagementModeBoth,
 		)
-
-		// Native-vpc: the identity of an endpoint carries its VNI label, which
-		// is derived from the pod's tunnel_key annotation by the *agent*. The
-		// operator's CiliumIdentity controller computes identities from pod and
-		// namespace labels only, so with operator-managed CIDs it would create
-		// identities without the VNI label, consider the agent's VNI-scoped
-		// identities unused and garbage collect them - merging all VPCs into
-		// one identity. Refuse to start instead.
-		if err := nativeVPCIdentityModeError(params.Config.IdentityManagementMode); err != nil {
-			params.Log.Error(
-				"native-vpc mode requires agent-managed CiliumIdentities",
-				logfields.Error, err,
-				logfields.Value, params.Config.IdentityManagementMode,
-			)
-			params.Lifecycle.Append(cell.Hook{
-				OnStart: func(cell.HookContext) error { return err },
-			})
-		}
 
 		allocatorConfig := cache.AllocatorConfig{
 			EnableOperatorManageCIDs: isOperatorManageCIDsEnabled,

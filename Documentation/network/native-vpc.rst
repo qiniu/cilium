@@ -840,16 +840,25 @@ Assembly (hive) plane
 
 Scope: the object graph itself. Native-vpc adds dependencies between cells
 (the identity synchronizer needs the local ipcache, the Hubble parsers need the
-VNI-aware getters), and there are two failure modes that no package-level test
-catches:
+VNI-aware getters), and there are three failure modes that no package-level
+test catches:
 
 * a constructor parameter type that no cell provides makes the **entire agent**
   fail to start (``missing type: ...``). This happened with the local-ipcache
-  interface of the identity synchronizer and is now covered by
-  ``go test ./daemon/cmd/ -run TestAgentCell``;
+  interface of the identity synchronizer. The graph is now verified in both
+  modes: ``go test ./daemon/cmd/ -run TestAgentCell`` builds it with the
+  defaults and with native-vpc enabled, because the mode adds providers and
+  consumers;
 * an *optional* interface that the production type stops implementing silently
-  degrades the consumer to a bare-IP path. All of them now have compile-time
-  assertions (``pkg/hubble/parser/cell``, ``pkg/endpointmanager``).
+  degrades the consumer to a bare-IP path. Every one of them is now guarded:
+  the VNI-aware endpoint and ipcache getters by compile-time assertions
+  (``pkg/hubble/parser/cell``, ``pkg/endpointmanager``), and the exact
+  endpoint-by-id lookup of the L7 access log by declaring it in the consumer's
+  own interface instead of asserting it at the call site;
+* a guard placed inside a conditional branch can be skipped. The
+  identity-management-mode check is therefore evaluated unconditionally rather
+  than only when this agent enforces network policy: the combination is invalid
+  either way, since it is the operator that acts on the identities.
 
 Seams
 ~~~~~
