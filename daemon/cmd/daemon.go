@@ -46,6 +46,10 @@ func nativeVPCDatapathCompatibility(params daemonConfigParams) error {
 		return errors.New("native-vpc mode is incompatible with socket LB (--bpf-lb-sock): socket-level translation happens before the VPC scope is known")
 	case params.DaemonConfig.EnableEgressGateway:
 		return errors.New("native-vpc mode is incompatible with the egress gateway: its policies select traffic by the bare source IP")
+	case params.DaemonConfig.EnableSRv6:
+		return errors.New("native-vpc mode is incompatible with SRv6: the VRF mapping selects traffic by the bare source IP")
+	case params.DaemonConfig.EnableVTEP:
+		return errors.New("native-vpc mode is incompatible with the VTEP integration: its mappings are keyed by bare CIDRs")
 	case params.DaemonConfig.EnableBPFMasquerade:
 		return errors.New("native-vpc mode is incompatible with BPF masquerade: kube-ovn owns SNAT, and the NAT maps are keyed by the bare tuple")
 	case params.IPSecConfig.Enabled(), params.WireguardConfig.Enabled():

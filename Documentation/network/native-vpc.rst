@@ -985,14 +985,16 @@ Operators can verify the state on a node with:
     # untranslated (kube-ovn / kube-proxy resolves it):
     $ cilium-dbg monitor --type trace | grep <clusterIP>
 
-Encryption, egress gateway and masquerade plane
------------------------------------------------
+Encryption, egress gateway, masquerade and other address-keyed features
+-----------------------------------------------------------------------
 
 All of these select traffic or peers by the bare IP:
 
 * the egress gateway matches the source IP of a pod,
 * BPF masquerade and the NAT maps work on the bare tuple,
-* IPsec and WireGuard select the peer by node/endpoint IP.
+* IPsec and WireGuard select the peer by node/endpoint IP,
+* SRv6 maps a **source IP** to a VRF (``cilium_srv6_vrf_v4``),
+* the VTEP integration maps bare CIDRs to tunnel endpoints.
 
 They are rejected at startup together with the LB features above, so that an
 unsupported combination fails immediately and deterministically instead of
@@ -1002,6 +1004,46 @@ mixing two VPCs at runtime:
 
     $ cilium-agent --enable-native-vpc ... --kube-proxy-replacement
     level=fatal msg="native-vpc mode is incompatible with kube-proxy replacement: ..."
+
+Verified as *not* address-keyed, and therefore unaffected: the bandwidth
+manager (``cilium_throttle`` is keyed by endpoint id and direction) and the
+policy map (keyed by identity).
+
+IPv4 fragment tracking
+~~~~~~~~~~~~~~~~~~~~~~
+
+``cilium_ipv4_frag_datagrams`` records the L4 ports of a fragmented datagram so
+that non-first fragments can still be classified. Its key is
+``{daddr, saddr, id, proto}`` - **no VNI** - and fragment tracking is enabled by
+default (``--enable-ipv4-fragment-tracking``).
+
+This is the same collision class as conntrack: two pods that share a source IP
+in different VPCs, sending fragmented datagrams to the same destination and
+protocol, can collide on the 16-bit IP identifier, and the later first-fragment
+overwrites the entry. The non-first fragments of the other datagram are then
+classified with the wrong ports, which feeds the wrong ports into the policy
+and conntrack lookups.
+
+Two properties bound the exposure, and both mitigations of the conntrack plane
+apply unchanged:
+
+* the map is an LRU map holding only datagrams that are currently being
+  reassembled, so the collision window is short - unlike a conntrack entry,
+  which lives for the duration of a connection;
+* the map is per node, so keeping overlapping IPs of different VPCs on disjoint
+  node sets removes the failure mode, and
+  ``cilium_native_vpc_overlapping_ips`` already exposes the precondition.
+
+An operator that does not need fragmented traffic can additionally set
+``--enable-ipv4-fragment-tracking=false``, which trades the collision for
+dropping non-first fragments (``DROP_FRAG_NOSUPPORT``) - a fail-closed choice.
+
+The bounded fix is to add a VNI field to ``struct ipv4_frag_id`` (and to
+``pkg/maps/fragmap.FragmentKey4``) under a node-level ``ENABLE_NATIVE_VPC``
+define, mirroring how ``VniKey`` extends the ipcache key: the field is only
+compiled in when the mode is enabled, so non-native-vpc deployments keep a
+byte-identical map. It is a follow-up rather than part of this change because
+it alters a map shared by five BPF programs and needs datapath validation.
 
 Lifecycle plane
 ---------------

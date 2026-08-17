@@ -53,6 +53,16 @@ func TestNativeVPCRejectsBareIPKeyedFeatures(t *testing.T) {
 			wantErr: "egress gateway",
 		},
 		{
+			name:    "srv6",
+			mutate:  func(p *daemonConfigParams) { p.DaemonConfig.EnableSRv6 = true },
+			wantErr: "SRv6",
+		},
+		{
+			name:    "vtep",
+			mutate:  func(p *daemonConfigParams) { p.DaemonConfig.EnableVTEP = true },
+			wantErr: "VTEP",
+		},
+		{
 			name:    "bpf masquerade",
 			mutate:  func(p *daemonConfigParams) { p.DaemonConfig.EnableBPFMasquerade = true },
 			wantErr: "BPF masquerade",
