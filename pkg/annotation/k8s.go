@@ -30,6 +30,14 @@ const (
 	// different VPCs).
 	NativeVPCVNIPrefix = "native-vpc.cilium.io"
 
+	// CiliumEndpointNativeVPCVNI is the CiliumEndpoint annotation that carries
+	// the native-vpc VNI of the endpoint. It is written by the agent owning the
+	// endpoint (endpointsynchronizer) and read by the CiliumEndpoint watchers of
+	// the other nodes. It must be preserved by the CiliumEndpoint informer
+	// transform (see k8s.TransformToCiliumEndpoint), otherwise remote endpoints
+	// would be registered without a VNI.
+	CiliumEndpointNativeVPCVNI = NativeVPCVNIPrefix + "/vni"
+
 	// PolicyPrefix is the common prefix for policy related annotations.
 	PolicyPrefix = "policy.cilium.io"
 

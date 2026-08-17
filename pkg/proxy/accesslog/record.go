@@ -84,6 +84,13 @@ type EndpointInfo struct {
 	// Identity is the security identity of the endpoint
 	Identity uint64
 
+	// VNIID is the native-vpc VNI (kube-ovn tunnel_key) scoping the endpoint
+	// IP. Zero means the endpoint is not in a VPC scope. It is required to
+	// resolve (VNI, IP) in the observability plane: in native-vpc mode the
+	// same IP may exist in several VPCs, so a bare-IP lookup on the Hubble
+	// side is ambiguous.
+	VNIID uint64
+
 	// Labels is the list of security relevant labels of the endpoint.
 	// Shared, do not mutate!
 	Labels labels.LabelArray

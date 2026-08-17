@@ -186,6 +186,14 @@ Writers (key construction)
 +--------------------------------------+-----------+------------------------------------------+
 | CiliumEndpoint watcher register       | yes       | ``ip@vni:N`` key                         |
 +--------------------------------------+-----------+------------------------------------------+
+| CEP VNI annotation (write)            | yes       | ``native-vpc.cilium.io/vni`` written at   |
+|                                      |           | CEP create and backfilled by an escaped  |
+|                                      |           | JSON-Patch (RFC 6901) on existing CEPs   |
++--------------------------------------+-----------+------------------------------------------+
+| CEP informer transform                | yes       | keeps *only* that annotation; dropping   |
+|                                      |           | it would leave every remote endpoint     |
+|                                      |           | without a VNI (CES is rejected at start) |
++--------------------------------------+-----------+------------------------------------------+
 | CiliumEndpoint watcher old-IP delete  | yes       | uses the OLD CEP's VNI                   |
 +--------------------------------------+-----------+------------------------------------------+
 | CiliumEndpoint watcher delete         | yes       | key from the deleted CEP's VNI           |
@@ -248,9 +256,17 @@ Readers (lookup)
 +--------------------------------------+-----------+------------------------------------------+
 | Hubble remote endpoint               | yes       | VNI derived from the identity VNI label  |
 +--------------------------------------+-----------+------------------------------------------+
-| L7 proxy accesslog (epinfo)          | yes*      | identity/labels resolve for a single-VNI |
-|                                      |           | entry; overlapping IPs stay ambiguous    |
-|                                      |           | and the local endpoint ID is best-effort |
+| L7 proxy accesslog (epinfo)          | yes       | records the endpoint's VNI on the log    |
+|                                      |           | record (endpoint VNI, else the           |
+|                                      |           | unambiguous ipcache entry's VNI)         |
++--------------------------------------+-----------+------------------------------------------+
+| Hubble L7 parser (DNS/HTTP flows)    | yes       | resolves pod metadata/workload with the  |
+|                                      |           | recorded (VNI, IP) and sets ``vni_id``   |
+|                                      |           | on both flow endpoints                   |
++--------------------------------------+-----------+------------------------------------------+
+| ipam API delete ("IP in use")        | yes       | VNI-agnostic in-use check (fails open on |
+|                                      |           | overlap on purpose: it is a guard, not   |
+|                                      |           | an identity lookup)                      |
 +--------------------------------------+-----------+------------------------------------------+
 | DNS proxy (fqdn)                     | yes       | same unambiguous bare-IP resolution      |
 +--------------------------------------+-----------+------------------------------------------+
@@ -307,6 +323,12 @@ Requirements
   does not match key"). Mixed-version native-vpc operation is unsupported.
   Clustermesh peers must not consume this VPC-scoped address space (VPC is not
   ClusterMesh; see the consumer checklist).
+* CiliumEndpoint CRD mode is required and **CiliumEndpointSlice must stay
+  disabled** (``--enable-cilium-endpoint-slice=false``, the default). A CES
+  packs endpoints as ``CoreCiliumEndpoint``, which carries no object metadata
+  and therefore cannot transport the per-endpoint VNI annotation; the agent
+  refuses to start with both enabled instead of silently registering remote
+  endpoints without a VNI.
 * Cilium must run as a **chained** CNI plugin behind kube-ovn (the primary
   CNI): ``--cni-chaining-mode=generic-veth`` with
   ``--cni-chaining-target`` pointing at the kube-ovn network, so that the

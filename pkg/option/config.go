@@ -2270,6 +2270,14 @@ func (c *DaemonConfig) validateNativeVPC() error {
 	if c.TunnelingEnabled() {
 		return fmt.Errorf("native-vpc mode requires --%s=%s: kube-ovn owns the host/tunnel datapath and Cilium bpf_overlay uses a plain-IP ipcache", RoutingMode, RoutingModeNative)
 	}
+	if c.EnableCiliumEndpointSlice {
+		// CiliumEndpointSlice packs endpoints as CoreCiliumEndpoint, which
+		// carries no object metadata and therefore cannot transport the
+		// native-vpc VNI annotation. Remote endpoints would silently be
+		// registered without a VNI (or skipped), breaking identity resolution
+		// across nodes.
+		return fmt.Errorf("native-vpc mode is incompatible with --%s: CiliumEndpointSlice cannot carry the per-endpoint VNI", EnableCiliumEndpointSlice)
+	}
 	return nil
 }
 

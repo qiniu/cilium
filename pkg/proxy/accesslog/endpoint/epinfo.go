@@ -60,6 +60,26 @@ func (r *endpointInfoRegistry) FillEndpointInfo(ctx context.Context, info *acces
 		if ep != nil {
 			info.ID = ep.GetID()
 		}
+	} else if lookupByID, ok := r.endpointManager.(interface {
+		LookupCiliumID(id uint16) *endpoint.Endpoint
+	}); ok {
+		// The proxy already knows the local endpoint: resolve it by ID (never
+		// by bare IP, which is ambiguous with overlapping VPC subnets) so that
+		// the native-vpc VNI below is exact.
+		ep = lookupByID.LookupCiliumID(uint16(info.ID))
+	}
+
+	// Native-vpc: record the (VNI, IP) scope of the endpoint so that the
+	// observability plane (Hubble L7 flows) can resolve pod metadata with the
+	// exact VNI-scoped key instead of a bare IP.
+	if info.VNIID == 0 {
+		if ep != nil {
+			info.VNIID = ep.GetVNIID()
+		} else if addr.IsValid() {
+			if id, exists := r.ipcache.LookupSecIDByIPUnambiguous(addr); exists {
+				info.VNIID = uint64(id.Vni)
+			}
+		}
 	}
 
 	// Only resolve the security identity if not passed in, as it may have changed since

@@ -33,6 +33,16 @@ func TestValidateNativeVPC(t *testing.T) {
 			wantErr: "routing-mode=native",
 		},
 		{
+			name: "cilium endpoint slice rejected",
+			config: DaemonConfig{
+				EnableNativeVPC:           true,
+				NativeVPCVNIAnnotation:    "ovn.kubernetes.io/tunnel_key",
+				RoutingMode:               RoutingModeNative,
+				EnableCiliumEndpointSlice: true,
+			},
+			wantErr: "enable-cilium-endpoint-slice",
+		},
+		{
 			name: "native routing accepted",
 			config: DaemonConfig{
 				EnableNativeVPC:        true,

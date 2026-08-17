@@ -20,8 +20,8 @@ import (
 
 // TestLookupIPVNIEndpoints verifies the endpointmanager side of the native-vpc
 // identity resolution chain: endpoints with a VNI register only VNI-scoped aux
-// identifiers (vni-ipv4:<vni>:<ip>), and the bare-IP lookups used by the DNS
-// proxy / Hubble / L7 accesslog resolve them when exactly one VNI uses the IP
+// identifiers (vni-ipv4:<vni>:<ip>), and the bare-IP fallback used by the DNS
+// proxy / Hubble / L7 accesslog resolves them when exactly one VNI uses the IP
 // on this node, while overlapping IPs (several VNIs) stay a deliberate miss.
 func TestLookupIPVNIEndpoints(t *testing.T) {
 	s := setupEndpointManagerSuite(t)
@@ -42,12 +42,12 @@ func TestLookupIPVNIEndpoints(t *testing.T) {
 	ip := "192.168.1.2"
 	addr := netip.MustParseAddr(ip)
 
-	// Generic and bare-IP fallback lookups remain key-exact for VPC endpoints.
-	// Only an explicit VNI context can resolve the endpoint.
+	// Generic (key-exact) lookups never resolve a VPC endpoint from a bare IP.
+	// The explicit fallback does, as long as the IP is used by a single VNI.
 	epA := newEP(10, ip, 36)
 	require.NoError(t, mgr.expose(epA))
 	require.Nil(t, mgr.LookupIPv4(ip), "generic bare-IP lookup must remain key-exact")
-	require.Nil(t, mgr.LookupIPUnambiguous(addr))
+	require.Same(t, epA, mgr.LookupIPUnambiguous(addr), "single-VNI IP must resolve for bare-IP consumers")
 	require.Same(t, epA, mgr.LookupIPWithVNI(addr, 36))
 
 	// Second endpoint, same IP, different VNI: the bare-IP lookup is now
@@ -55,6 +55,8 @@ func TestLookupIPVNIEndpoints(t *testing.T) {
 	epB := newEP(11, ip, 17)
 	require.NoError(t, mgr.expose(epB))
 	require.Nil(t, mgr.LookupIPv4(ip), "overlapping IP across VNIs must not resolve")
+	require.Nil(t, mgr.LookupIPUnambiguous(addr), "overlapping IP must fail closed")
+	require.NotNil(t, mgr.LookupIPAnyVNI(addr), "in-use checks must still see the IP")
 
 	// The VNI-scoped identifier lookups stay exact.
 	gotA, err := mgr.Lookup("vni-ipv4:36:" + ip)
@@ -64,14 +66,16 @@ func TestLookupIPVNIEndpoints(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, epB, gotB)
 
-	// Removing one endpoint does not make a VPC endpoint resolvable without VNI.
+	// Removing one endpoint makes the IP unambiguous again.
 	mgr.WaitEndpointRemoved(epA)
-	require.Nil(t, mgr.LookupIPUnambiguous(addr))
+	require.Same(t, epB, mgr.LookupIPUnambiguous(addr))
 	require.Same(t, epB, mgr.LookupIPWithVNI(addr, 17))
 
 	// Removing the last one cleans the index entirely.
 	mgr.WaitEndpointRemoved(epB)
 	require.Nil(t, mgr.LookupIPv4(ip))
+	require.Nil(t, mgr.LookupIPUnambiguous(addr))
+	require.Nil(t, mgr.LookupIPAnyVNI(addr))
 	require.Nil(t, mgr.LookupIPWithVNI(addr, 17))
 }
 
@@ -100,11 +104,11 @@ func TestLookupIPVNIAndPlainMixed(t *testing.T) {
 	require.NoError(t, mgr.expose(plain))
 	require.NoError(t, mgr.expose(vpc))
 
-	require.Equal(t, plain, mgr.LookupIPUnambiguous(addr), "plain fallback is valid for the non-VPC endpoint")
+	require.Equal(t, plain, mgr.LookupIPUnambiguous(addr), "the plain entry wins over the VNI fallback")
 	require.Same(t, vpc, mgr.LookupIPWithVNI(addr, 36), "the VNI endpoint requires explicit VNI context")
 
 	mgr.WaitEndpointRemoved(plain)
-	require.Nil(t, mgr.LookupIPUnambiguous(addr), "bare-IP readers must not resolve VNI endpoints")
+	require.Same(t, vpc, mgr.LookupIPUnambiguous(addr), "single remaining VNI endpoint resolves")
 	require.Same(t, vpc, mgr.LookupIPWithVNI(addr, 36))
 	mgr.WaitEndpointRemoved(vpc)
 }

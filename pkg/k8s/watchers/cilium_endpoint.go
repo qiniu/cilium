@@ -145,7 +145,7 @@ func ciliumEndpointVNI(endpoint *types.CiliumEndpoint) uint32 {
 	if endpoint == nil || endpoint.Annotations == nil {
 		return 0
 	}
-	vniStr, ok := endpoint.Annotations[annotation.NativeVPCVNIPrefix+"/vni"]
+	vniStr, ok := endpoint.Annotations[annotation.CiliumEndpointNativeVPCVNI]
 	if !ok || vniStr == "" {
 		return 0
 	}

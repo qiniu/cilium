@@ -54,6 +54,23 @@ var Cell = cell.Module(
 type EndpointsLookupVNI interface {
 	LookupIPWithVNI(ip netip.Addr, vni uint64) *endpoint.Endpoint
 	LookupIPUnambiguous(ip netip.Addr) *endpoint.Endpoint
+	// LookupIPAnyVNI returns any endpoint using the given IP, regardless of
+	// its VNI scope. It must only be used by "is this IP in use" safety
+	// checks, never for identity/metadata resolution.
+	LookupIPAnyVNI(ip netip.Addr) *endpoint.Endpoint
+}
+
+// LookupIPAnyVNI reports any endpoint using the given IP in any VNI scope.
+// Unlike LookupIPUnambiguous it deliberately fails *open* on overlapping IPs
+// (it returns one of them), because its only purpose is to answer "is this IP
+// still in use on this node" (e.g. before releasing an IPAM address).
+func LookupIPAnyVNI(lookup interface {
+	LookupIP(netip.Addr) *endpoint.Endpoint
+}, ip netip.Addr) *endpoint.Endpoint {
+	if vniLookup, ok := lookup.(EndpointsLookupVNI); ok {
+		return vniLookup.LookupIPAnyVNI(ip)
+	}
+	return lookup.LookupIP(ip)
 }
 
 // LookupIPUnambiguous uses the explicit best-effort VNI-aware API when the

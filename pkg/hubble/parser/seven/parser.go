@@ -17,6 +17,7 @@ import (
 	"github.com/cilium/cilium/pkg/hubble/parser/errors"
 	"github.com/cilium/cilium/pkg/hubble/parser/getters"
 	"github.com/cilium/cilium/pkg/hubble/parser/options"
+	"github.com/cilium/cilium/pkg/ipcache"
 	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	"github.com/cilium/cilium/pkg/k8s/utils"
 	"github.com/cilium/cilium/pkg/monitor/api"
@@ -115,10 +116,15 @@ func (p *Parser) Decode(r *accesslog.LogRecord, decoded *flowpb.Flow) error {
 		destinationNames = p.dnsGetter.GetNamesOf(uint32(r.SourceEndpoint.ID), destinationIP)
 	}
 	if p.ipGetter != nil {
-		if meta := p.ipGetter.GetK8sMetadata(sourceIP); meta != nil {
+		// Native-vpc: resolve pod metadata with the exact (VNI, IP) key when
+		// the proxy recorded a VNI for the address. VNI-scoped ipcache
+		// entries live under "<ip>@vni:<vni>" and are invisible to the plain
+		// bare-IP lookup, which would otherwise leave every OVN pod without
+		// namespace/pod name in L7 flows.
+		if meta := p.k8sMetadata(sourceIP, r.SourceEndpoint.VNIID); meta != nil {
 			sourceNamespace, sourcePod = meta.Namespace, meta.PodName
 		}
-		if meta := p.ipGetter.GetK8sMetadata(destinationIP); meta != nil {
+		if meta := p.k8sMetadata(destinationIP, r.DestinationEndpoint.VNIID); meta != nil {
 			destinationNamespace, destinationPod = meta.Namespace, meta.PodName
 		}
 	}
@@ -126,8 +132,8 @@ func (p *Parser) Decode(r *accesslog.LogRecord, decoded *flowpb.Flow) error {
 	dstEndpoint := decodeEndpoint(r.DestinationEndpoint, destinationNamespace, destinationPod)
 
 	if p.endpointGetter != nil {
-		p.updateEndpointWorkloads(sourceIP, srcEndpoint)
-		p.updateEndpointWorkloads(destinationIP, dstEndpoint)
+		p.updateEndpointWorkloads(sourceIP, r.SourceEndpoint.VNIID, srcEndpoint)
+		p.updateEndpointWorkloads(destinationIP, r.DestinationEndpoint.VNIID, dstEndpoint)
 	}
 
 	l4, sourcePort, destinationPort := decodeLayer4(r.TransportProtocol, r.SourceEndpoint, r.DestinationEndpoint)
@@ -223,15 +229,49 @@ func (p *Parser) computeResponseTime(r *accesslog.LogRecord, timestamp time.Time
 	return 0
 }
 
-func (p *Parser) updateEndpointWorkloads(ip netip.Addr, endpoint *flowpb.Endpoint) {
-	if ep, ok := p.endpointGetter.GetEndpointInfo(ip); ok {
-		if pod := ep.GetPod(); pod != nil {
-			workload, workloadTypeMeta, ok := utils.GetWorkloadMetaFromPod(pod)
-			if ok {
-				endpoint.Workloads = []*flowpb.Workload{{Kind: workloadTypeMeta.Kind, Name: workload.Name}}
-			}
+// k8sMetadata resolves the Kubernetes metadata of an address, preferring the
+// native-vpc (VNI, IP) scoped entry when the L7 record carries a VNI. The
+// plain bare-IP lookup is only used as a fallback for non-VPC entities (nodes,
+// world, non-OVN pods), which never have a VNI-scoped entry.
+func (p *Parser) k8sMetadata(ip netip.Addr, vni uint64) *ipcache.K8sMetadata {
+	if p.ipGetter == nil || !ip.IsValid() {
+		return nil
+	}
+	if vni > 0 {
+		if meta := p.ipGetter.GetK8sMetadataForVNI(ip, uint32(vni)); meta != nil {
+			return meta
 		}
 	}
+	return p.ipGetter.GetK8sMetadata(ip)
+}
+
+func (p *Parser) updateEndpointWorkloads(ip netip.Addr, vni uint64, endpoint *flowpb.Endpoint) {
+	ep, ok := p.lookupEndpoint(ip, vni)
+	if !ok {
+		return
+	}
+	if pod := ep.GetPod(); pod != nil {
+		workload, workloadTypeMeta, ok := utils.GetWorkloadMetaFromPod(pod)
+		if ok {
+			endpoint.Workloads = []*flowpb.Workload{{Kind: workloadTypeMeta.Kind, Name: workload.Name}}
+		}
+	}
+}
+
+// lookupEndpoint resolves a local endpoint, using the exact (VNI, IP) lookup
+// when the L7 record carries a native-vpc VNI. The bare-IP lookup is only used
+// for non-VPC endpoints; it resolves a VNI-scoped endpoint only when exactly
+// one VPC uses the IP on this node (see endpointmanager.LookupIPUnambiguous).
+func (p *Parser) lookupEndpoint(ip netip.Addr, vni uint64) (getters.EndpointInfo, bool) {
+	if vni > 0 {
+		if vniGetter, supported := p.endpointGetter.(getters.EndpointGetterVNI); supported {
+			if ep, ok := vniGetter.GetEndpointInfoForVNI(ip, uint32(vni)); ok {
+				return ep, true
+			}
+			return nil, false
+		}
+	}
+	return p.endpointGetter.GetEndpointInfo(ip)
 }
 
 func decodeTime(timestamp string) (goTime time.Time, pbTime *timestamppb.Timestamp, err error) {
@@ -334,6 +374,8 @@ func decodeEndpoint(endpoint accesslog.EndpointInfo, namespace, podName string) 
 		Namespace:   namespace,
 		Labels:      labels,
 		PodName:     podName,
+		// Native-vpc: L7 flows carry the same (VNI, IP) scope as L3/L4 flows.
+		VniId: endpoint.VNIID,
 	}
 }
 

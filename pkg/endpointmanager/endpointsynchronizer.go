@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 
 	"github.com/blang/semver/v4"
 	"github.com/cilium/hive/cell"
@@ -39,7 +40,15 @@ import (
 // ciliumEndpointVNIAnnotation is the annotation written on CiliumEndpoints to
 // carry the native-vpc VNI of the endpoint, so that CiliumEndpoint watchers on
 // other nodes can register the endpoint IP in the VNI-scoped ipcache.
-const ciliumEndpointVNIAnnotation = annotation.NativeVPCVNIPrefix + "/vni"
+const ciliumEndpointVNIAnnotation = annotation.CiliumEndpointNativeVPCVNI
+
+// jsonPointerEscape escapes a JSON Patch path token per RFC 6901. The VNI
+// annotation key contains a '/' ("native-vpc.cilium.io/vni"), which would
+// otherwise be interpreted as a path separator and make the whole patch
+// (including the status replace) fail.
+func jsonPointerEscape(token string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(token, "~", "~0"), "/", "~1")
+}
 
 const (
 	// subsysEndpointSync is the value for logfields.LogSubsys
@@ -384,11 +393,22 @@ func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoin
 				}
 				// Backfill the native-vpc VNI annotation on pre-existing CEPs.
 				if vniAnnots := ciliumEndpointVNIAnnotations(e); len(vniAnnots) > 0 {
-					if localCEP == nil || localCEP.Annotations[ciliumEndpointVNIAnnotation] != vniAnnots[ciliumEndpointVNIAnnotation] {
+					vniValue := vniAnnots[ciliumEndpointVNIAnnotation]
+					switch {
+					case localCEP == nil || localCEP.Annotations == nil:
+						// The annotations object does not exist (or is unknown):
+						// "add" on a missing parent member fails, so create the
+						// whole map. Nothing can be clobbered as it is empty.
 						replaceCEPStatus = append(replaceCEPStatus, k8s.JSONPatch{
 							OP:    "add",
-							Path:  "/metadata/annotations/" + ciliumEndpointVNIAnnotation,
-							Value: vniAnnots[ciliumEndpointVNIAnnotation],
+							Path:  "/metadata/annotations",
+							Value: vniAnnots,
+						})
+					case localCEP.Annotations[ciliumEndpointVNIAnnotation] != vniValue:
+						replaceCEPStatus = append(replaceCEPStatus, k8s.JSONPatch{
+							OP:    "add",
+							Path:  "/metadata/annotations/" + jsonPointerEscape(ciliumEndpointVNIAnnotation),
+							Value: vniValue,
 						})
 					}
 				}

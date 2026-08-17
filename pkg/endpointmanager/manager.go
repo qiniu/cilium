@@ -63,6 +63,15 @@ type endpointManager struct {
 	endpoints    map[uint16]*endpoint.Endpoint
 	endpointsAux map[string]*endpoint.Endpoint
 
+	// ipToVNIAuxKeys maps a bare IP string to the set of native-vpc
+	// VNI-scoped aux keys ("vni-ipv4:<vni>:<ip>") currently registered for
+	// it. Native-vpc endpoints are deliberately not registered under the bare
+	// "ipv4:/ipv6:" keys (overlapping IPs would overwrite each other), so this
+	// index is what allows the explicit bare-IP fallback
+	// (LookupIPUnambiguous) to resolve an endpoint when exactly one VNI uses
+	// the IP on this node. It is never used to guess between overlapping IPs.
+	ipToVNIAuxKeys map[string]map[string]struct{}
+
 	// registeredIdentifiers is the exact identifier snapshot installed for
 	// each exposed endpoint. Endpoint identifiers (notably VNI/IP) can change
 	// while an endpoint object is alive, so cleanup must use the snapshot that
@@ -124,6 +133,7 @@ func New(logger *slog.Logger, registry *metrics.Registry, epSynchronizer Endpoin
 		health:                       health,
 		endpoints:                    make(map[uint16]*endpoint.Endpoint),
 		endpointsAux:                 make(map[string]*endpoint.Endpoint),
+		ipToVNIAuxKeys:               make(map[string]map[string]struct{}),
 		registeredIdentifiers:        make(map[uint16]endpointid.Identifiers),
 		mcastManager:                 mcastmanager.New(logger, option.Config.IPv6MCastDevice),
 		EndpointResourceSynchronizer: epSynchronizer,
@@ -596,19 +606,65 @@ func (mgr *endpointManager) LookupIPWithVNI(ip netip.Addr, vni uint64) *endpoint
 	return nil
 }
 
-// LookupIPUnambiguous is the explicit bare-IP fallback for non-VPC entities.
-// It never returns a VNI-scoped endpoint. Callers without VNI context must
-// fail closed for VPC endpoints; use LookupIPWithVNI for VPC endpoints.
+// LookupIPUnambiguous is the explicit bare-IP fallback for consumers that only
+// have an IP (DNS proxy source endpoint, Hubble local endpoint, L7 accesslog,
+// ipam API). It first resolves the plain (non-VPC) key, then - only if exactly
+// one native-vpc endpoint on this node uses the IP - the corresponding
+// VNI-scoped endpoint. When several VPCs overlap on the IP it deliberately
+// reports a miss (fail closed) instead of guessing a VPC; those callers must
+// use LookupIPWithVNI with a real (VNI, IP) context.
 func (mgr *endpointManager) LookupIPUnambiguous(ip netip.Addr) *endpoint.Endpoint {
 	if !ip.IsValid() {
 		return nil
 	}
+	ipStr := ip.Unmap().String()
 	mgr.mutex.RLock()
 	defer mgr.mutex.RUnlock()
+	var ep *endpoint.Endpoint
 	if ip.Is4() {
-		return mgr.lookupIPv4(ip.Unmap().String())
+		ep = mgr.lookupIPv4(ipStr)
+	} else {
+		ep = mgr.lookupIPv6(ipStr)
 	}
-	return mgr.lookupIPv6(ip.Unmap().String())
+	if ep != nil {
+		return ep
+	}
+	keys := mgr.ipToVNIAuxKeys[ipStr]
+	if len(keys) != 1 {
+		return nil
+	}
+	for key := range keys {
+		if ep, ok := mgr.endpointsAux[key]; ok && mgr.endpoints[ep.ID] == ep {
+			return ep
+		}
+	}
+	return nil
+}
+
+// LookupIPAnyVNI returns any endpoint using the given IP, regardless of its
+// VNI scope (see the interface documentation in cell.go).
+func (mgr *endpointManager) LookupIPAnyVNI(ip netip.Addr) *endpoint.Endpoint {
+	if !ip.IsValid() {
+		return nil
+	}
+	ipStr := ip.Unmap().String()
+	mgr.mutex.RLock()
+	defer mgr.mutex.RUnlock()
+	var ep *endpoint.Endpoint
+	if ip.Is4() {
+		ep = mgr.lookupIPv4(ipStr)
+	} else {
+		ep = mgr.lookupIPv6(ipStr)
+	}
+	if ep != nil {
+		return ep
+	}
+	for key := range mgr.ipToVNIAuxKeys[ipStr] {
+		if ep, ok := mgr.endpointsAux[key]; ok && mgr.endpoints[ep.ID] == ep {
+			return ep
+		}
+	}
+	return nil
 }
 
 // lookupVNIIPv4 looks up an endpoint by VNI-aware IPv4 identifier.
@@ -665,7 +721,27 @@ func (mgr *endpointManager) updateReferencesLocked(ep *endpoint.Endpoint, identi
 		id := endpointid.NewID(k, identifiers[k])
 		mgr.endpointsAux[id] = ep
 
+		// Keep the per-IP index of VNI-scoped keys in sync so that the
+		// explicit bare-IP fallback can resolve unambiguous IPs.
+		if ip, ok := bareIPOfVNIIdentifier(k, identifiers[k]); ok {
+			keys, exists := mgr.ipToVNIAuxKeys[ip]
+			if !exists {
+				keys = map[string]struct{}{}
+				mgr.ipToVNIAuxKeys[ip] = keys
+			}
+			keys[id] = struct{}{}
+		}
 	}
+}
+
+// bareIPOfVNIIdentifier returns the bare IP of a native-vpc VNI-scoped
+// endpoint identifier ("vni-ipv4"/"vni-ipv6" prefix, value "<vni>:<ip>").
+func bareIPOfVNIIdentifier(prefix endpointid.PrefixType, value string) (string, bool) {
+	switch prefix {
+	case endpointid.VNIIPv4Prefix, endpointid.VNIIPv6Prefix:
+		return endpointid.SplitVNIIP(value)
+	}
+	return "", false
 }
 
 // UpdateReferences updates maps the contents of mappings to the specified endpoint.
@@ -694,6 +770,15 @@ func (mgr *endpointManager) removeReferencesLocked(identifiers endpointid.Identi
 	for prefix := range identifiers {
 		id := endpointid.NewID(prefix, identifiers[prefix])
 		delete(mgr.endpointsAux, id)
+
+		if ip, ok := bareIPOfVNIIdentifier(prefix, identifiers[prefix]); ok {
+			if keys, exists := mgr.ipToVNIAuxKeys[ip]; exists {
+				delete(keys, id)
+				if len(keys) == 0 {
+					delete(mgr.ipToVNIAuxKeys, ip)
+				}
+			}
+		}
 	}
 }
 
