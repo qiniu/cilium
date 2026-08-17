@@ -125,6 +125,11 @@ type endpointManager struct {
 // functionality from endpoint management for testing purposes.
 type endpointDeleteFunc func(*endpoint.Endpoint, endpoint.DeleteConfig) []error
 
+// The VNI-aware lookups are reached through an optional interface (Hubble,
+// DNS proxy, L7 accesslog, ipam). A missing method would silently degrade
+// every consumer to bare-IP lookups, so assert it here.
+var _ EndpointsLookupVNI = (*endpointManager)(nil)
+
 // New creates a new endpointManager.
 func New(logger *slog.Logger, registry *metrics.Registry, epSynchronizer EndpointResourceSynchronizer, lns *node.LocalNodeStore, health cell.Health, monitorAgent monitoragent.Agent, config EndpointManagerConfig) *endpointManager {
 	mgr := endpointManager{

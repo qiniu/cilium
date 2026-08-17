@@ -159,6 +159,14 @@ Hubble performs to enrich a flow is scoped by (VNI, IP). The chain is:
    ``destination_vni`` as ``labelsContext`` values, so that metrics of two VPCs
    that share an IP or a pod name do not collapse into one series.
 
+6. **Flow log export (deployment-configured).** The flowlog exporter trims and
+   aggregates flows with user-supplied proto field paths. In native-vpc mode a
+   ``fieldMask`` must include ``source.vni_id`` and ``destination.vni_id``, and
+   a ``fieldAggregate`` that aggregates on IPs or pod names must include them
+   too - otherwise the exporter itself merges two VPCs that share an IP. This
+   is the one place where the (VNI, IP) pair depends on configuration rather
+   than on agent code.
+
 Policy and security-group semantics
 ===================================
 
@@ -317,6 +325,10 @@ Readers (lookup)
 +--------------------------------------+-----------+------------------------------------------+
 | Hubble DNS names (SourceNames)       | yes       | per-endpoint DNS cache, keyed by the     |
 |                                      |           | resolved endpoint id                     |
++--------------------------------------+-----------+------------------------------------------+
+| Hubble flowlog export                 | deploy    | ``fieldMask``/``fieldAggregate`` must    |
+|                                      |           | include ``source.vni_id`` and            |
+|                                      |           | ``destination.vni_id``                   |
 +--------------------------------------+-----------+------------------------------------------+
 | Hubble service enrichment            | n/a       | service VIPs are cluster-scoped, not in  |
 |                                      |           | the VPC address space                    |

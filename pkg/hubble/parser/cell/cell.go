@@ -106,6 +106,18 @@ type payloadGetters struct {
 	frontends         statedb.Table[*loadbalancer.Frontend]
 }
 
+// The native-vpc (VNI, IP) resolution of the Hubble parsers is reached through
+// optional interfaces: a parser that does not find them silently degrades to
+// bare-IP lookups, which is exactly what native-vpc must never do. Assert the
+// production getters implement them so that a rename cannot disable the whole
+// observability chain unnoticed.
+var (
+	_ hubbleGetters.EndpointGetter      = (*payloadGetters)(nil)
+	_ hubbleGetters.EndpointGetterVNI   = (*payloadGetters)(nil)
+	_ hubbleGetters.EndpointGetterByPod = (*payloadGetters)(nil)
+	_ hubbleGetters.IPGetter            = (*ipcache.IPCache)(nil)
+)
+
 // GetIdentity implements IdentityGetter. It looks up identity by ID from
 // Cilium's identity cache. Hubble uses the identity info to populate flow
 // source and destination labels.

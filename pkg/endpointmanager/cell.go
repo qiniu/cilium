@@ -51,6 +51,10 @@ var Cell = cell.Module(
 // EndpointsLookupVNI is the optional VNI-aware extension for endpoint
 // readers. It is intentionally separate from EndpointsLookup so existing
 // lightweight consumers and test doubles keep the legacy interface.
+//
+// Consumers reach it through a type assertion and silently fall back to
+// bare-IP behavior when it is absent, so the production implementation is
+// asserted at compile time (see manager.go).
 type EndpointsLookupVNI interface {
 	LookupIPWithVNI(ip netip.Addr, vni uint64) *endpoint.Endpoint
 	LookupIPUnambiguous(ip netip.Addr) *endpoint.Endpoint
