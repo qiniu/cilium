@@ -25,10 +25,16 @@ type DNSGetter interface {
 
 // EndpointGetter ...
 type EndpointGetter interface {
-	// GetEndpointInfo looks up endpoint by IP address.
+	// GetEndpointInfo looks up non-VPC endpoint by bare IP.
 	GetEndpointInfo(ip netip.Addr) (endpoint EndpointInfo, ok bool)
 	// GetEndpointInfo looks up endpoint by id
 	GetEndpointInfoByID(id uint16) (endpoint EndpointInfo, ok bool)
+}
+
+// EndpointGetterVNI is the optional exact endpoint lookup extension for
+// native-vpc flows. Implementations must not infer VNI from a bare IP.
+type EndpointGetterVNI interface {
+	GetEndpointInfoForVNI(ip netip.Addr, vni uint32) (endpoint EndpointInfo, ok bool)
 }
 
 // IdentityGetter ...
@@ -41,6 +47,11 @@ type IdentityGetter interface {
 type IPGetter interface {
 	// GetK8sMetadata returns Kubernetes metadata for the given IP address.
 	GetK8sMetadata(ip netip.Addr) *ipcache.K8sMetadata
+	// GetK8sMetadataForVNI returns the Kubernetes metadata of the native-vpc
+	// VNI-scoped entry for the given IP (key "<ip>@vni:<vni>"), or nil if no
+	// such entry exists. Overlapping IPs from different VPCs coexist as
+	// VNI-scoped entries that the plain GetK8sMetadata lookup cannot see.
+	GetK8sMetadataForVNI(ip netip.Addr, vni uint32) *ipcache.K8sMetadata
 	// LookupSecIDByIP returns the corresponding security identity that
 	// the specified IP maps to as well as if the corresponding entry exists.
 	LookupSecIDByIP(ip netip.Addr) (ipcache.Identity, bool)

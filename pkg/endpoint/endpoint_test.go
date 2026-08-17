@@ -477,6 +477,143 @@ func TestApplySourceIPVerificationResetsToGlobalDefault(t *testing.T) {
 		"Invalid annotation should reset to global default (Enabled)")
 }
 
+func TestSyncVNIFromPodAnnotation(t *testing.T) {
+	// Save original config and restore after test.
+	oldEnable := option.Config.EnableNativeVPC
+	oldAnnot := option.Config.NativeVPCVNIAnnotation
+	t.Cleanup(func() {
+		option.Config.EnableNativeVPC = oldEnable
+		option.Config.NativeVPCVNIAnnotation = oldAnnot
+	})
+	option.Config.EnableNativeVPC = true
+	option.Config.NativeVPCVNIAnnotation = "ovn.kubernetes.io/tunnel_key"
+
+	// A zero-value Endpoint is enough: SyncVNIFromPodAnnotation only touches
+	// option.Config and e.VNIID under the (zero-value usable) mutex.
+	newEndpoint := func() *Endpoint { return &Endpoint{} }
+
+	podWith := func(vni string, hostNetwork bool) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "test-pod",
+				Namespace:   "default",
+				Annotations: map[string]string{"ovn.kubernetes.io/tunnel_key": vni},
+			},
+			Spec: corev1.PodSpec{HostNetwork: hostNetwork},
+		}
+	}
+
+	t.Run("annotation present updates VNI", func(t *testing.T) {
+		ep := newEndpoint()
+		require.True(t, ep.SyncVNIFromPodAnnotation(podWith("36", false)))
+		require.Equal(t, uint64(36), ep.GetVNIID())
+	})
+
+	t.Run("same value is a no-op", func(t *testing.T) {
+		ep := newEndpoint()
+		ep.VNIID = 36
+		require.False(t, ep.SyncVNIFromPodAnnotation(podWith("36", false)))
+		require.Equal(t, uint64(36), ep.GetVNIID())
+	})
+
+	t.Run("missing annotation resolves to native scheme", func(t *testing.T) {
+		ep := newEndpoint()
+		ep.VNIID = 36
+		require.True(t, ep.SyncVNIFromPodAnnotation(&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default", Annotations: map[string]string{}},
+		}))
+		require.Zero(t, ep.GetVNIID(), "absent annotation follows cilium native logic (plain IP scheme)")
+	})
+
+	t.Run("missing annotation with VNI 0 is a no-op", func(t *testing.T) {
+		ep := newEndpoint()
+		require.False(t, ep.SyncVNIFromPodAnnotation(&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default", Annotations: map[string]string{}},
+		}))
+		require.Zero(t, ep.GetVNIID())
+	})
+
+	t.Run("zero annotation is an error and falls back to native", func(t *testing.T) {
+		ep := newEndpoint()
+		ep.logger.Store(hivetest.Logger(t))
+		ep.VNIID = 36
+		require.True(t, ep.SyncVNIFromPodAnnotation(podWith("0", false)))
+		require.Zero(t, ep.GetVNIID(), "a zero tunnel_key violates the kube-ovn guarantee; fall back to native")
+	})
+
+	t.Run("invalid annotation is an error and falls back to native", func(t *testing.T) {
+		ep := newEndpoint()
+		ep.logger.Store(hivetest.Logger(t))
+		ep.VNIID = 36
+		require.True(t, ep.SyncVNIFromPodAnnotation(podWith("abc", false)))
+		require.Zero(t, ep.GetVNIID())
+	})
+
+	t.Run("out-of-range annotation is an error and falls back to native", func(t *testing.T) {
+		ep := newEndpoint()
+		ep.logger.Store(hivetest.Logger(t))
+		ep.VNIID = 36
+		require.True(t, ep.SyncVNIFromPodAnnotation(podWith("16777216", false)))
+		require.Zero(t, ep.GetVNIID())
+	})
+
+	t.Run("hostNetwork pod resolves to native scheme without error", func(t *testing.T) {
+		ep := newEndpoint()
+		ep.VNIID = 36
+		require.True(t, ep.SyncVNIFromPodAnnotation(podWith("36", true)))
+		require.Zero(t, ep.GetVNIID())
+	})
+
+	t.Run("native-vpc disabled is a no-op", func(t *testing.T) {
+		option.Config.EnableNativeVPC = false
+		defer func() { option.Config.EnableNativeVPC = true }()
+		ep := newEndpoint()
+		ep.VNIID = 36
+		require.False(t, ep.SyncVNIFromPodAnnotation(podWith("17", false)))
+		require.Equal(t, uint64(36), ep.GetVNIID())
+	})
+}
+
+// TestVNILabelRemovalOnVNIReset simulates the metadataResolver branch taken
+// when the native-vpc VNI drops to 0 (annotation removed, or zero/invalid per
+// the SyncVNIFromPodAnnotation decision table): the stale VNI identity label
+// must be fully removed from the identity labels - not moved to Disabled
+// (ModifyIdentityLabels semantics, which would block a later VNI 0->36
+// recovery via UpdateLabels) - and the identity revision must advance so the
+// endpoint is re-resolved without the VNI label.
+func TestVNILabelRemovalOnVNIReset(t *testing.T) {
+	ep := &Endpoint{
+		labels: labels.NewOpLabels(),
+	}
+	ep.logger.Store(hivetest.Logger(t))
+	ep.labels.OrchestrationIdentity[labels.VNIKey] = labels.NewLabel(labels.VNIKey, "36", labels.LabelSourceVNI)
+
+	ep.unconditionalLock()
+	rev := ep.replaceIdentityLabels(labels.LabelSourceVNI, labels.Labels{})
+	ep.unlock()
+
+	require.NotZero(t, rev, "removing the VNI label must bump the identity revision")
+	_, ok := ep.labels.OrchestrationIdentity[labels.VNIKey]
+	require.False(t, ok, "VNI label must be removed from the identity labels")
+	require.NotContains(t, ep.labels.Disabled, labels.VNIKey,
+		"removal must not disable the label; a later VNI 0->36 recovery must be able to re-inject it")
+}
+
+func TestLegacyVPCLabelRemoval(t *testing.T) {
+	ep := &Endpoint{labels: labels.NewOpLabels()}
+	ep.logger.Store(hivetest.Logger(t))
+	ep.labels.OrchestrationIdentity["vpc"] = labels.NewLabel("vpc", "36", legacyVPCLabelSource)
+
+	ep.unconditionalLock()
+	rev := ep.replaceIdentityLabels(legacyVPCLabelSource, labels.Labels{})
+	ep.unlock()
+
+	require.NotZero(t, rev)
+	_, ok := ep.labels.OrchestrationIdentity["vpc"]
+	require.False(t, ok, "legacy vpc:vpc=<vni> label must be removed during upgrade")
+	require.NotContains(t, ep.labels.Disabled, "vpc")
+}
+
 func TestEndpointUpdateLabels(t *testing.T) {
 	s := setupEndpointSuite(t)
 	logger := hivetest.Logger(t)
@@ -1076,7 +1213,7 @@ func TestMetadataResolver(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(fmt.Sprintf("%s (restored=%t)", tt.name, restored), func(t *testing.T) {
 				model := newTestEndpointModel(100, StateWaitingForIdentity)
-				kvstoreSync := ipcache.NewIPIdentitySynchronizer(logger, kvstore.SetupDummy(t, kvstore.DisabledBackendName))
+				kvstoreSync := ipcache.NewIPIdentitySynchronizer(logger, kvstore.SetupDummy(t, kvstore.DisabledBackendName), testipcache.NewMockIPCache())
 				ep, err := NewEndpointFromChangeModel(t.Context(), logger, nil, &MockEndpointBuildQueue{}, nil, s.orchestrator, nil, &fakeTypes.BandwidthManager{}, nil, identitymanager.NewIDManager(logger), nil, nil, s.repo, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), ctmap.NewFakeGCRunner(), kvstoreSync, model, fakeTypes.WireguardConfig{}, fakeTypes.IPsecConfig{}, nil, nil)
 				require.NoError(t, err)
 

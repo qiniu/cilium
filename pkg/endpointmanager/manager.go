@@ -63,6 +63,12 @@ type endpointManager struct {
 	endpoints    map[uint16]*endpoint.Endpoint
 	endpointsAux map[string]*endpoint.Endpoint
 
+	// registeredIdentifiers is the exact identifier snapshot installed for
+	// each exposed endpoint. Endpoint identifiers (notably VNI/IP) can change
+	// while an endpoint object is alive, so cleanup must use the snapshot that
+	// was actually registered rather than recomputing identifiers at delete.
+	registeredIdentifiers map[uint16]endpointid.Identifiers
+
 	// mcastManager handles IPv6 multicast group join/leave for pods. This is required for the
 	// node to receive ICMPv6 NDP messages, especially NS (Neighbor Solicitation) message, so
 	// pod's IPv6 address is discoverable.
@@ -118,6 +124,7 @@ func New(logger *slog.Logger, registry *metrics.Registry, epSynchronizer Endpoin
 		health:                       health,
 		endpoints:                    make(map[uint16]*endpoint.Endpoint),
 		endpointsAux:                 make(map[string]*endpoint.Endpoint),
+		registeredIdentifiers:        make(map[uint16]endpointid.Identifiers),
 		mcastManager:                 mcastmanager.New(logger, option.Config.IPv6MCastDevice),
 		EndpointResourceSynchronizer: epSynchronizer,
 		subscribers:                  make(map[Subscriber]struct{}),
@@ -457,7 +464,6 @@ func (mgr *endpointManager) GetEndpointsByServiceAccount(namespace string, servi
 // lookups will no longer find the endpoint.
 func (mgr *endpointManager) unexpose(ep *endpoint.Endpoint) {
 	defer ep.Close()
-	identifiers := ep.Identifiers()
 
 	previousState := ep.GetState()
 
@@ -476,13 +482,19 @@ func (mgr *endpointManager) unexpose(ep *endpoint.Endpoint) {
 				"Unable to release endpoint ID",
 				logfields.Error, err,
 				logfields.State, previousState,
-				logfields.CNIAttachmentID, identifiers[endpointid.CNIAttachmentIdPrefix],
-				logfields.CEPName, identifiers[endpointid.CEPNamePrefix],
+				logfields.CNIAttachmentID, ep.GetCNIAttachmentID(),
+				logfields.CEPName, ep.GetK8sNamespaceAndCEPName(),
 			)
 		}
 	}
 
-	mgr.removeReferencesLocked(identifiers)
+	if registered := mgr.registeredIdentifiers[ep.ID]; registered != nil {
+		mgr.removeReferencesLocked(registered)
+		delete(mgr.registeredIdentifiers, ep.ID)
+	} else {
+		// Restoring endpoints may not have a registration snapshot yet.
+		mgr.removeReferencesLocked(ep.Identifiers())
+	}
 }
 
 // removeEndpoint stops the active handling of events by the specified endpoint,
@@ -560,6 +572,45 @@ func (mgr *endpointManager) lookupIPv6(ipv6 string) *endpoint.Endpoint {
 	return nil
 }
 
+// LookupIPWithVNI performs an exact (VNI, IP) endpoint lookup. A zero VNI
+// deliberately uses the plain IP namespace and does not consult VNI entries.
+func (mgr *endpointManager) LookupIPWithVNI(ip netip.Addr, vni uint64) *endpoint.Endpoint {
+	if !ip.IsValid() {
+		return nil
+	}
+	mgr.mutex.RLock()
+	defer mgr.mutex.RUnlock()
+	if vni == 0 {
+		if ip.Is4() {
+			return mgr.lookupIPv4(ip.Unmap().String())
+		}
+		return mgr.lookupIPv6(ip.Unmap().String())
+	}
+	key := endpointid.NewVNIIPPrefixID(ip.Unmap(), vni)
+	if key == "" {
+		return nil
+	}
+	if ep, ok := mgr.endpointsAux[key]; ok && mgr.endpoints[ep.ID] == ep {
+		return ep
+	}
+	return nil
+}
+
+// LookupIPUnambiguous is the explicit bare-IP fallback for non-VPC entities.
+// It never returns a VNI-scoped endpoint. Callers without VNI context must
+// fail closed for VPC endpoints; use LookupIPWithVNI for VPC endpoints.
+func (mgr *endpointManager) LookupIPUnambiguous(ip netip.Addr) *endpoint.Endpoint {
+	if !ip.IsValid() {
+		return nil
+	}
+	mgr.mutex.RLock()
+	defer mgr.mutex.RUnlock()
+	if ip.Is4() {
+		return mgr.lookupIPv4(ip.Unmap().String())
+	}
+	return mgr.lookupIPv6(ip.Unmap().String())
+}
+
 // lookupVNIIPv4 looks up an endpoint by VNI-aware IPv4 identifier.
 // The vniIPv4 parameter should be in format "<vni>:<ipv4>".
 func (mgr *endpointManager) lookupVNIIPv4(vniIPv4 string) *endpoint.Endpoint {
@@ -601,10 +652,19 @@ func (mgr *endpointManager) updateIDReferenceLocked(ep *endpoint.Endpoint) {
 	mgr.endpoints[ep.ID] = ep
 }
 
+func cloneIdentifiers(in endpointid.Identifiers) endpointid.Identifiers {
+	out := make(endpointid.Identifiers, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
 func (mgr *endpointManager) updateReferencesLocked(ep *endpoint.Endpoint, identifiers endpointid.Identifiers) {
 	for k := range identifiers {
 		id := endpointid.NewID(k, identifiers[k])
 		mgr.endpointsAux[id] = ep
+
 	}
 }
 
@@ -613,9 +673,19 @@ func (mgr *endpointManager) UpdateReferences(ep *endpoint.Endpoint) error {
 	mgr.mutex.Lock()
 	defer mgr.mutex.Unlock()
 
-	identifiers := ep.Identifiers()
-	mgr.updateReferencesLocked(ep, identifiers)
+	// Only exposed endpoints own endpointmanager references. Preserve the old
+	// behavior for callers racing endpoint teardown: do not create aux keys for
+	// an endpoint that is no longer present in the primary ID map.
+	if current, exposed := mgr.endpoints[ep.ID]; !exposed || current != ep {
+		return nil
+	}
 
+	identifiers := ep.Identifiers()
+	if old := mgr.registeredIdentifiers[ep.ID]; old != nil {
+		mgr.removeReferencesLocked(old)
+	}
+	mgr.updateReferencesLocked(ep, identifiers)
+	mgr.registeredIdentifiers[ep.ID] = cloneIdentifiers(identifiers)
 	return nil
 }
 
@@ -696,6 +766,7 @@ func (mgr *endpointManager) expose(ep *endpoint.Endpoint) error {
 	mgr.mcastManager.AddAddress(ep.IPv6)
 	mgr.updateIDReferenceLocked(ep)
 	mgr.updateReferencesLocked(ep, identifiers)
+	mgr.registeredIdentifiers[ep.ID] = cloneIdentifiers(identifiers)
 	mgr.mutex.Unlock()
 
 	ep.InitEndpointHealth(mgr.health)

@@ -33,6 +33,7 @@ type TestEndpoint struct {
 	isHost      bool
 	State       string
 	NetNsCookie uint64
+	VNIID       uint64
 }
 
 func NewTestEndpoint(t testing.TB) TestEndpoint {
@@ -80,6 +81,8 @@ func (e *TestEndpoint) StringID() string { return "42" }
 func (e *TestEndpoint) GetIdentity() identity.NumericIdentity { return e.Identity.ID }
 
 func (e *TestEndpoint) GetEndpointNetNsCookie() uint64 { return e.NetNsCookie }
+
+func (e *TestEndpoint) GetVNIID() uint64 { return e.VNIID }
 
 func (e *TestEndpoint) GetSecurityIdentity() *identity.Identity { return e.Identity }
 

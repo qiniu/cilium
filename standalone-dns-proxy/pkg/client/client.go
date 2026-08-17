@@ -62,6 +62,11 @@ type IPtoEndpointInfo struct {
 	IP       []netip.Addr
 	ID       uint64
 	Identity identity.NumericIdentity
+	VNI      uint32
+}
+
+func VNIIPKey(vni uint32, ip netip.Addr) string {
+	return fmt.Sprintf("%d\x00%s", vni, ip.Unmap())
 }
 
 var (
@@ -85,19 +90,17 @@ var (
 		FromString: index.Uint64String,
 		Unique:     true,
 	}
-	IdIPToEndpointIndex = statedb.Index[IPtoEndpointInfo, netip.Addr]{
-		Name: "ip",
+	IdIPToEndpointIndex = statedb.Index[IPtoEndpointInfo, string]{
+		Name: "vni-ip",
 		FromObject: func(e IPtoEndpointInfo) index.KeySet {
 			keys := make([]index.Key, 0, len(e.IP))
 			for _, ip := range e.IP {
-				keys = append(keys, index.NetIPAddr(ip))
+				keys = append(keys, index.String(VNIIPKey(e.VNI, ip)))
 			}
 			return index.NewKeySet(keys...)
 		},
-		FromKey: func(key netip.Addr) index.Key {
-			return index.NetIPAddr(key)
-		},
-		FromString: index.NetIPAddrString,
+		FromKey:    func(key string) index.Key { return index.String(key) },
+		FromString: index.FromString,
 		Unique:     true,
 	}
 	PrefixToIdentityIndex = statedb.Index[PrefixToIdentity, netip.Prefix]{
@@ -520,6 +523,7 @@ func (c *GRPCClient) updateIPToEndpoint(mappings []*pb.IdentityToEndpointMapping
 				IP:       ips,
 				ID:       epInfo.GetId(),
 				Identity: identity.NumericIdentity(mapping.GetIdentity()),
+				VNI:      epInfo.GetVni(),
 			})
 			if err != nil {
 				return err

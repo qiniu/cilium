@@ -209,7 +209,7 @@ func TestDecodeAgentEvent(t *testing.T) {
 		},
 		{
 			name: "IPCacheUpsertedMessage (insert)",
-			msg:  monitorAPI.IPCacheUpsertedMessage("10.0.1.42/32", 1023, nil, net.ParseIP("10.1.5.4"), nil, 0xff, "default", "foobar"),
+			msg:  monitorAPI.IPCacheUpsertedMessage("10.0.1.42/32", 1023, nil, net.ParseIP("10.1.5.4"), nil, 0xff, "default", "foobar", 36),
 			ev: &flowpb.AgentEvent{
 				Type: flowpb.AgentEventType_IPCACHE_UPSERTED,
 				Notification: &flowpb.AgentEvent_IpcacheUpdate{
@@ -222,13 +222,14 @@ func TestDecodeAgentEvent(t *testing.T) {
 						EncryptKey:  0xff,
 						Namespace:   "default",
 						PodName:     "foobar",
+						Vni:         36,
 					},
 				},
 			},
 		},
 		{
 			name: "IPCacheUpsertedMessage (update)",
-			msg:  monitorAPI.IPCacheUpsertedMessage("192.168.10.11/32", 1023, &oldID, net.ParseIP("10.1.5.4"), net.ParseIP("10.2.6.11"), 5, "hubble", "podmcpodface"),
+			msg:  monitorAPI.IPCacheUpsertedMessage("192.168.10.11/32", 1023, &oldID, net.ParseIP("10.1.5.4"), net.ParseIP("10.2.6.11"), 5, "hubble", "podmcpodface", 17),
 			ev: &flowpb.AgentEvent{
 				Type: flowpb.AgentEventType_IPCACHE_UPSERTED,
 				Notification: &flowpb.AgentEvent_IpcacheUpdate{
@@ -243,13 +244,14 @@ func TestDecodeAgentEvent(t *testing.T) {
 						EncryptKey: 5,
 						Namespace:  "hubble",
 						PodName:    "podmcpodface",
+						Vni:        17,
 					},
 				},
 			},
 		},
 		{
 			name: "IPCacheDeletedMessage",
-			msg:  monitorAPI.IPCacheDeletedMessage("192.168.10.0/24", 6048, nil, net.ParseIP("10.1.5.4"), nil, 0, "", ""),
+			msg:  monitorAPI.IPCacheDeletedMessage("192.168.10.0/24", 6048, nil, net.ParseIP("10.1.5.4"), nil, 0, "", "", 0),
 			ev: &flowpb.AgentEvent{
 				Type: flowpb.AgentEventType_IPCACHE_DELETED,
 				Notification: &flowpb.AgentEvent_IpcacheUpdate{

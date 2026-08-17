@@ -56,7 +56,7 @@ func (r *endpointInfoRegistry) FillEndpointInfo(ctx context.Context, info *acces
 	// This will fail if the IP does not correspond to an endpoint on this node.
 	var ep *endpoint.Endpoint
 	if info.ID == 0 {
-		ep = r.endpointManager.LookupIP(addr)
+		ep = endpointmanager.LookupIPUnambiguous(r.endpointManager, addr)
 		if ep != nil {
 			info.ID = ep.GetID()
 		}
@@ -77,9 +77,12 @@ func (r *endpointInfoRegistry) FillEndpointInfo(ctx context.Context, info *acces
 			}
 		}
 
-		// Fall back to ipcache
+		// Fall back to ipcache. Native-vpc: use the unambiguous lookup so a
+		// VNI-scoped entry is resolved when exactly one VPC uses the IP (L7
+		// accesslog is best-effort; the generic key-exact lookup cannot see
+		// "<ip>@vni:<vni>" entries and would degrade to WORLD).
 		if info.Identity == 0 && addr.IsValid() {
-			ID, exists := r.ipcache.LookupByIP(addr.String())
+			ID, exists := r.ipcache.LookupSecIDByIPUnambiguous(addr)
 			if exists {
 				info.Identity = uint64(ID.ID)
 			}

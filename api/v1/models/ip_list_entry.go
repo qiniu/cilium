@@ -36,6 +36,11 @@ type IPListEntry struct {
 
 	// metadata
 	Metadata *IPListEntryMetadata `json:"metadata,omitempty"`
+
+	// Native-vpc VNI of the entry; 0 means not VPC-scoped
+	// Maximum: 1.6777215e+07
+	// Minimum: 0
+	VniID *int64 `json:"vniID,omitempty"`
 }
 
 // Validate validates this IP list entry
@@ -51,6 +56,10 @@ func (m *IPListEntry) Validate(formats strfmt.Registry) error {
 	}
 
 	if err := m.validateMetadata(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.validateVniID(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -96,6 +105,22 @@ func (m *IPListEntry) validateMetadata(formats strfmt.Registry) error {
 
 			return err
 		}
+	}
+
+	return nil
+}
+
+func (m *IPListEntry) validateVniID(formats strfmt.Registry) error {
+	if swag.IsZero(m.VniID) { // not required
+		return nil
+	}
+
+	if err := validate.MinimumInt("vniID", "body", *m.VniID, 0, false); err != nil {
+		return err
+	}
+
+	if err := validate.MaximumInt("vniID", "body", *m.VniID, 1.6777215e+07, false); err != nil {
+		return err
 	}
 
 	return nil

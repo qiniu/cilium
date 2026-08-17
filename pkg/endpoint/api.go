@@ -88,7 +88,13 @@ func NewEndpointFromChangeModel(ctx context.Context, logger *slog.Logger, dnsRul
 	ep.K8sNamespace = model.K8sNamespace
 	ep.K8sUID = model.K8sUID
 	ep.disableLegacyIdentifiers = model.DisableLegacyIdentifiers
-	ep.VNIID = model.VniID
+	// Only honor the VNI carried in the API/CNI change request when native-vpc
+	// mode is enabled. Otherwise an external caller could set a VNI to opt into
+	// VNI-aware identifiers and conflict detection, bypassing the global IP
+	// uniqueness check.
+	if option.Config.EnableNativeVPC {
+		ep.VNIID = model.VniID
+	}
 
 	if model.Mac != "" {
 		m, err := mac.ParseMAC(model.Mac)

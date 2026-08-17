@@ -54,11 +54,19 @@ func TestHashEndpoint(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, base.String(), a)
 
-	// When we configure the endpoint differently, it's different
+	// When we configure the endpoint differently, it's different.
 	ep.Opts.SetBool("foo", true)
 	b, err := base.hashEndpoint(cfg, &localNodeConfig, &ep)
 	require.NoError(t, err)
 	require.NotEqual(t, a, b)
+
+	// Native-vpc VNI is load-time configuration: changing it must change the
+	// endpoint hash (so the object is reloaded with new constants), without
+	// changing the template hash (covered in TestHashTemplate below).
+	ep.VNIID = 36
+	c, err := base.hashEndpoint(cfg, &localNodeConfig, &ep)
+	require.NoError(t, err)
+	require.NotEqual(t, b, c)
 }
 
 func TestHashTemplate(t *testing.T) {
@@ -75,11 +83,11 @@ func TestHashTemplate(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, base.String(), a)
 
-	// Even with different endpoint IDs, we get the same hash
-	//
-	// This is the key to avoiding recompilation per endpoint; static
-	// data substitution is performed via pkg/elf instead.
+	// Even with different endpoint IDs or VNIs, we get the same hash.
+	// This is the key to avoiding recompilation per endpoint/VPC; load-time
+	// data substitution is performed via .rodata.config.
 	ep.Id++
+	ep.VNIID = 36
 	b, err := base.hashTemplate(cfg, &localNodeConfig, &ep)
 	require.NoError(t, err)
 	require.Equal(t, a, b)

@@ -805,6 +805,10 @@ func (h *HeaderfileWriter) writeTemplateConfig(fw *bufio.Writer, devices []strin
 	// Local delivery metrics should always be set for endpoint programs.
 	fmt.Fprint(fw, "#define LOCAL_DELIVERY_METRICS 1\n")
 
+	// The native-vpc VNI is load-time per-endpoint data in .rodata.config
+	// (native_vpc_vni), not a compile-time define. Keeping it out of this
+	// header lets one compiled bpf_lxc template serve all VPCs.
+
 	h.writeNetdevConfig(fw, e.GetOptions())
 
 	return fw.Flush()

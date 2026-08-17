@@ -486,7 +486,7 @@ func checkMapping(t *testing.T, client *GRPCClient, ip string, expectedID uint64
 	rtxn := client.db.ReadTxn()
 	addr, err := netip.ParseAddr(ip)
 	require.NoError(t, err)
-	mapping, _, found := client.ipToEndpointTable.Get(rtxn, IdIPToEndpointIndex.Query(addr))
+	mapping, _, found := client.ipToEndpointTable.Get(rtxn, IdIPToEndpointIndex.Query(VNIIPKey(0, addr)))
 	if shouldExist {
 		require.True(t, found)
 		require.Equal(t, []netip.Addr{addr}, mapping.IP)

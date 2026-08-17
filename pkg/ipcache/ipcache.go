@@ -26,6 +26,8 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/source"
 	"github.com/cilium/cilium/pkg/types"
+	"strconv"
+	"strings"
 )
 
 // Identity is the identity representation of an IP<->Identity cache.
@@ -42,6 +44,13 @@ type Identity struct {
 
 	// ID is the numeric identity
 	ID identity.NumericIdentity
+
+	// Vni is the Virtual Network Identifier (VNI) of the endpoint for
+	// native-vpc mode. Entries with a non-zero VNI are scoped to that VPC
+	// (keyed by IP+VNI), which allows overlapping IPs in different VPCs to
+	// coexist in the ipcache. A zero VNI means the entry is a plain
+	// cluster-wide IP mapping.
+	Vni uint32
 
 	// This blank field ensures that the == operator cannot be used on this
 	// type, to avoid external packages accidentally comparing the private
@@ -67,6 +76,7 @@ type Identity struct {
 func (i Identity) equals(o Identity) bool {
 	return i.ID == o.ID &&
 		i.Source == o.Source &&
+		i.Vni == o.Vni &&
 		i.shadowed == o.shadowed &&
 		i.modifiedByLegacyAPI == o.modifiedByLegacyAPI &&
 		i.overwrittenLegacySource == o.overwrittenLegacySource
@@ -88,6 +98,55 @@ func (i Identity) ownedByLegacyAndMetadataAPI() bool {
 type IPKeyPair struct {
 	IP  net.IP
 	Key uint8
+}
+
+// vniKeySuffix is the suffix used to encode a VNI into an ipcache key string.
+// The plain IP/prefix parsers (cmtypes.ParsePrefixCluster / ParseAddrCluster)
+// do not understand this suffix, so ipcache callers that manage entries for
+// native-vpc endpoints must encode the VNI this way to keep overlapping IPs
+// from different VPCs as distinct entries. upsertLocked strips the suffix
+// before parsing the IP, and re-attaches it for all internal map keys.
+//
+// Design note (fork decision): this is the "local ClusterID" split.
+// Cilium upstream solves overlapping IPs across clusters with (IP, ClusterID)
+// cluster-aware addressing (PrefixCluster, "ip@clusterID", cluster_id field in
+// the ipcache key, clusterID bits in the identity). In our multi-tenant VPC
+// model a VPC is the single-cluster equivalent of a cluster, so we reuse the
+// same addressing pattern with the kube-ovn tunnel_key (VNI) as the scoping
+// id. We deliberately do NOT reuse the clusterID bit range / field: VPC and
+// ClusterMesh must not share semantics, and the identity number's clusterID
+// bits are reserved for ClusterMesh. VNI stays in the addressing/resolution
+// layer (this key suffix, cilium_ipcache_vni, endpoint vni-ipv4 identifiers),
+// while the identity/policy layer gets the same VNI dimension via a
+// VNI identity label (injected by endpoint.metadataResolver).
+//
+// The suffix string itself lives in pkg/identity (identity.VNISuffix) so that
+// the kvstore identity path (IPIdentityPair.GetKeyName) can build matching
+// scoped keys without an import cycle.
+const vniKeySuffix = identity.VNISuffix
+
+// KeyWithVNI returns the ipcache key string for the given IP/prefix string and
+// VNI. A zero VNI returns the key unchanged (plain cluster-wide entry).
+//
+// Ordering rule: apply any ClusterID annotation first, then KeyWithVNI last
+// ("ip@clusterID@vni:N"). splitVNIKey deliberately uses LastIndex to strip the
+// final VNI suffix before the cluster-aware parser sees the remaining key.
+func KeyWithVNI(ip string, vni uint32) string {
+	if vni == 0 {
+		return ip
+	}
+	return ip + vniKeySuffix + strconv.FormatUint(uint64(vni), 10)
+}
+
+// splitVNIKey splits a possibly VNI-encoded ipcache key back into the plain
+// IP/prefix string and the VNI (0 if the key is not VNI-encoded).
+func splitVNIKey(key string) (string, uint32) {
+	if i := strings.LastIndex(key, vniKeySuffix); i > 0 {
+		if v, err := strconv.ParseUint(key[i+len(vniKeySuffix):], 10, 32); err == nil {
+			return key[:i], uint32(v)
+		}
+	}
+	return key, 0
 }
 
 // K8sMetadata contains Kubernetes pod information of the IP
@@ -121,6 +180,13 @@ type IPCache struct {
 	identityToIPCache map[identity.NumericIdentity]map[string]struct{}
 	ipToHostIPCache   map[string]IPKeyPair
 	ipToK8sMetadata   map[string]K8sMetadata
+	// ipToVNIKeys maps a plain IP to the set of native-vpc VNI-scoped ipcache
+	// keys ("<ip>@vni:<vni>") currently present for it. It backs only the
+	// explicit best-effort read APIs (LookupSecIDByIPUnambiguous /
+	// GetK8sMetadataUnambiguous), never the generic key-exact paths used by
+	// writers/deleters. When several VPCs share the IP these APIs report a miss
+	// rather than guessing a VPC.
+	ipToVNIKeys       map[string]map[string]struct{}
 	ipToEndpointFlags map[string]uint8
 
 	listeners []IPIdentityMappingListener
@@ -165,6 +231,7 @@ func NewIPCache(c *Configuration) *IPCache {
 		mutex:             lock.NewSemaphoredMutex(),
 		ipToIdentityCache: map[string]Identity{},
 		identityToIPCache: map[identity.NumericIdentity]map[string]struct{}{},
+		ipToVNIKeys:       map[string]map[string]struct{}{},
 		ipToHostIPCache:   map[string]IPKeyPair{},
 		ipToK8sMetadata:   map[string]K8sMetadata{},
 		ipToEndpointFlags: map[string]uint8{},
@@ -238,10 +305,85 @@ func (ipc *IPCache) GetK8sMetadata(ip netip.Addr) *K8sMetadata {
 	return ipc.getK8sMetadata(ip.String())
 }
 
+// GetK8sMetadataForVNI returns the Kubernetes metadata of the native-vpc
+// VNI-scoped entry for the given IP (key "<ip>@vni:<vni>"), or nil if no such
+// entry exists. Overlapping IPs from different VPCs coexist as VNI-scoped
+// entries, which the plain GetK8sMetadata lookup (keyed by the bare IP) cannot
+// see. The returned pointer should *never* be modified.
+func (ipc *IPCache) GetK8sMetadataForVNI(ip netip.Addr, vni uint32) *K8sMetadata {
+	if !ip.IsValid() || vni == 0 {
+		return nil
+	}
+	ipc.mutex.RLock()
+	defer ipc.mutex.RUnlock()
+	return ipc.getK8sMetadata(KeyWithVNI(ip.String(), vni))
+}
+
 // getK8sMetadata returns Kubernetes metadata for the given IP address.
 func (ipc *IPCache) getK8sMetadata(ip string) *K8sMetadata {
 	if k8sMeta, ok := ipc.ipToK8sMetadata[ip]; ok {
 		return &k8sMeta
+	}
+	return nil
+}
+
+// LookupSecIDByIPUnambiguous is the deliberate exception to the key-exact
+// rule: it additionally resolves a native-vpc VNI-scoped entry when exactly
+// one VPC uses the given IP, and reports a miss when several VPCs overlap on
+// it (never guessing a VPC). It is meant for best-effort, read-only consumers
+// that only have a bare IP (L7 accesslog, DNS proxy) and must never be used
+// by writers or by the generic LookupByIP/LookupSecIDByIP paths, whose
+// callers pair their lookups with bare-IP writes.
+func (ipc *IPCache) LookupSecIDByIPUnambiguous(ip netip.Addr) (Identity, bool) {
+	if !ip.IsValid() {
+		return Identity{}, false
+	}
+	ipc.mutex.RLock()
+	defer ipc.mutex.RUnlock()
+	return ipc.lookupByIPUnambiguousLocked(ip.String())
+}
+
+// GetK8sMetadataUnambiguous is the metadata counterpart of
+// LookupSecIDByIPUnambiguous (same caveats apply).
+func (ipc *IPCache) GetK8sMetadataUnambiguous(ip netip.Addr) *K8sMetadata {
+	if !ip.IsValid() {
+		return nil
+	}
+	ipc.mutex.RLock()
+	defer ipc.mutex.RUnlock()
+	return ipc.getK8sMetadataUnambiguousLocked(ip.String())
+}
+
+// lookupByIPUnambiguousLocked resolves a VNI-scoped entry for the given bare
+// IP when it is unambiguous (exactly one VNI key), using the two-value form so
+// that a divergence between ipToVNIKeys and ipToIdentityCache degrades to a
+// miss instead of returning a zero Identity with exists=true.
+func (ipc *IPCache) lookupByIPUnambiguousLocked(ip string) (Identity, bool) {
+	if idn, ok := ipc.ipToIdentityCache[ip]; ok {
+		return idn, true
+	}
+	if keySet := ipc.ipToVNIKeys[ip]; len(keySet) == 1 {
+		for key := range keySet {
+			if idn, ok := ipc.ipToIdentityCache[key]; ok {
+				return idn, true
+			}
+		}
+	}
+	return Identity{}, false
+}
+
+// getK8sMetadataUnambiguousLocked is the metadata counterpart of
+// lookupByIPUnambiguousLocked.
+func (ipc *IPCache) getK8sMetadataUnambiguousLocked(ip string) *K8sMetadata {
+	if k8sMeta, ok := ipc.ipToK8sMetadata[ip]; ok {
+		return &k8sMeta
+	}
+	if keySet := ipc.ipToVNIKeys[ip]; len(keySet) == 1 {
+		for key := range keySet {
+			if k8sMeta, ok := ipc.ipToK8sMetadata[key]; ok {
+				return &k8sMeta
+			}
+		}
 	}
 	return nil
 }
@@ -307,6 +449,14 @@ func (ipc *IPCache) upsertLocked(
 	var newNamedPorts types.NamedPortMap
 	if k8sMeta != nil {
 		newNamedPorts = k8sMeta.NamedPorts
+	}
+
+	// Native-vpc entries are keyed by IP+VNI so that overlapping IPs from
+	// different VPCs can coexist. Strip the VNI suffix for parsing, but keep
+	// the encoded string for all internal map keys.
+	plainIP, keyVNI := splitVNIKey(ip)
+	if newIdentity.Vni == 0 {
+		newIdentity.Vni = keyVNI
 	}
 
 	scopedLog := ipc.logger
@@ -394,22 +544,22 @@ func (ipc *IPCache) upsertLocked(
 	// Endpoint IP identities take precedence over CIDR identities, so if the
 	// IP is a full CIDR prefix and there's an existing equivalent endpoint IP,
 	// don't notify the listeners.
-	if cidrCluster, err = cmtypes.ParsePrefixCluster(ip); err == nil {
+	if cidrCluster, err = cmtypes.ParsePrefixCluster(plainIP); err == nil {
 		if cidrCluster.IsSingleIP() {
-			if _, endpointIPFound := ipc.ipToIdentityCache[cidrCluster.AddrCluster().String()]; endpointIPFound {
+			if _, endpointIPFound := ipc.ipToIdentityCache[KeyWithVNI(cidrCluster.AddrCluster().String(), keyVNI)]; endpointIPFound {
 				scopedLog.Debug("Ignoring CIDR to identity mapping as it is shadowed by an endpoint IP")
 				// Skip calling back the listeners, since the endpoint IP has
 				// precedence over the new CIDR.
 				newIdentity.shadowed = true
 			}
 		}
-	} else if addrCluster, err := cmtypes.ParseAddrCluster(ip); err == nil { // Endpoint IP or Endpoint IP with ClusterID
+	} else if addrCluster, err := cmtypes.ParseAddrCluster(plainIP); err == nil { // Endpoint IP or Endpoint IP with ClusterID
 		cidrCluster = addrCluster.AsPrefixCluster()
 
 		// Check whether the upserted endpoint IP will shadow that CIDR, and
 		// replace its mapping with the listeners if that was the case.
 		if !found {
-			cidrClusterStr := cidrCluster.String()
+			cidrClusterStr := KeyWithVNI(cidrCluster.String(), keyVNI)
 			if cidrIdentity, cidrFound := ipc.ipToIdentityCache[cidrClusterStr]; cidrFound {
 				oldHostIP, _ = ipc.getHostIPCacheRLocked(cidrClusterStr)
 				if cidrIdentity.ID != newIdentity.ID || !oldHostIP.Equal(hostIP) {
@@ -442,6 +592,16 @@ func (ipc *IPCache) upsertLocked(
 
 	// Update both maps.
 	ipc.ipToIdentityCache[ip] = newIdentity
+	// Keep the per-IP VNI index in sync so pure-IP lookups can resolve a
+	// VNI-scoped entry when unambiguous.
+	if keyVNI > 0 {
+		keySet, ok := ipc.ipToVNIKeys[plainIP]
+		if !ok {
+			keySet = make(map[string]struct{})
+			ipc.ipToVNIKeys[plainIP] = keySet
+		}
+		keySet[ip] = struct{}{}
+	}
 	// Delete the old identity, if any.
 	if found {
 		delete(ipc.identityToIPCache[cachedIdentity.ID], ip)
@@ -683,23 +843,26 @@ func (ipc *IPCache) deleteLocked(ip string, source source.Source) (namedPortsCha
 	callbackListeners := true
 
 	var err error
-	if cidrCluster, err = cmtypes.ParsePrefixCluster(ip); err == nil {
+	// Same as upsertLocked: strip the VNI suffix for parsing while keeping
+	// the encoded key for internal maps.
+	plainIP, keyVNI := splitVNIKey(ip)
+	if cidrCluster, err = cmtypes.ParsePrefixCluster(plainIP); err == nil {
 		// Check whether the deleted CIDR was shadowed by an endpoint IP. In
 		// this case, skip calling back the listeners since they don't know
 		// about its mapping.
-		if _, endpointIPFound := ipc.ipToIdentityCache[cidrCluster.AddrCluster().String()]; endpointIPFound {
+		if _, endpointIPFound := ipc.ipToIdentityCache[KeyWithVNI(cidrCluster.AddrCluster().String(), keyVNI)]; endpointIPFound {
 			ipc.logger.Debug(
 				"Deleting CIDR shadowed by endpoint IP",
 			)
 			callbackListeners = false
 		}
-	} else if addrCluster, err := cmtypes.ParseAddrCluster(ip); err == nil { // Endpoint IP or Endpoint IP with ClusterID
+	} else if addrCluster, err := cmtypes.ParseAddrCluster(plainIP); err == nil { // Endpoint IP or Endpoint IP with ClusterID
 		// Convert the endpoint IP into an equivalent full CIDR.
 		cidrCluster = addrCluster.AsPrefixCluster()
 
 		// Check whether the deleted endpoint IP was shadowing that CIDR, and
 		// restore its mapping with the listeners if that was the case.
-		cidrClusterStr := cidrCluster.String()
+		cidrClusterStr := KeyWithVNI(cidrCluster.String(), keyVNI)
 		if cidrIdentity, cidrFound := ipc.ipToIdentityCache[cidrClusterStr]; cidrFound {
 			newHostIP, _ = ipc.getHostIPCacheRLocked(cidrClusterStr)
 			if cidrIdentity.ID != cachedIdentity.ID || !oldHostIP.Equal(newHostIP) {
@@ -735,6 +898,15 @@ func (ipc *IPCache) deleteLocked(ip string, source source.Source) (namedPortsCha
 	delete(ipc.identityToIPCache[cachedIdentity.ID], ip)
 	if len(ipc.identityToIPCache[cachedIdentity.ID]) == 0 {
 		delete(ipc.identityToIPCache, cachedIdentity.ID)
+	}
+	// Keep the per-IP VNI index in sync (see the matching upsert code).
+	if keyVNI > 0 {
+		if keySet, ok := ipc.ipToVNIKeys[plainIP]; ok {
+			delete(keySet, ip)
+			if len(keySet) == 0 {
+				delete(ipc.ipToVNIKeys, plainIP)
+			}
+		}
 	}
 	delete(ipc.ipToHostIPCache, ip)
 	delete(ipc.ipToK8sMetadata, ip)
@@ -812,7 +984,10 @@ func (ipc *IPCache) LookupByIP(IP string) (Identity, bool) {
 
 // lookupByIPRLocked returns the corresponding security identity that endpoint IP maps
 // to within the provided IPCache, as well as if the corresponding entry exists
-// in the IPCache.
+// in the IPCache. The lookup is key-exact: native-vpc entries live under
+// "<ip>@vni:<vni>" and are intentionally invisible here (generic readers must
+// not resolve VPC-scoped entries under a bare-IP key, see
+// LookupSecIDByIPUnambiguous for the deliberate exception).
 func (ipc *IPCache) lookupByIPRLocked(IP string) (Identity, bool) {
 	identity, exists := ipc.ipToIdentityCache[IP]
 	return identity, exists

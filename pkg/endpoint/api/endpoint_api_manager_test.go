@@ -170,8 +170,20 @@ func TestParseVNIFromPod(t *testing.T) {
 					},
 				},
 			},
-			key:         vniKey,
-			expectedVNI: unsetVNI,
+			key:           vniKey,
+			expectedError: `native-vpc pod / is missing tunnel_key annotation "your-cni.io/vni": a non-zero VNI is mandatory for every non-hostNetwork pod`,
+		},
+		{
+			name: "Empty annotation value",
+			pod: &slim_corev1.Pod{
+				ObjectMeta: slim_metav1.ObjectMeta{
+					Annotations: map[string]string{
+						vniKey: "",
+					},
+				},
+			},
+			key:           vniKey,
+			expectedError: `native-vpc pod / is missing tunnel_key annotation "your-cni.io/vni": a non-zero VNI is mandatory for every non-hostNetwork pod`,
 		},
 		{
 			name: "Valid VNI",

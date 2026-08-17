@@ -153,6 +153,10 @@ func (s *DNSProxyTestSuite) LookupSecIDByIP(ip netip.Addr) (secID ipcache.Identi
 	}
 }
 
+func (s *DNSProxyTestSuite) LookupSecIDByIPUnambiguous(ip netip.Addr) (secID ipcache.Identity, exists bool) {
+	return s.LookupSecIDByIP(ip)
+}
+
 func (s *DNSProxyTestSuite) LookupByIdentity(nid identity.NumericIdentity) []string {
 	DNSServerListenerAddr := (s.dnsServer.Listener.Addr()).(*net.TCPAddr)
 	switch nid {

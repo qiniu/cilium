@@ -48,6 +48,32 @@ var Cell = cell.Module(
 	),
 )
 
+// EndpointsLookupVNI is the optional VNI-aware extension for endpoint
+// readers. It is intentionally separate from EndpointsLookup so existing
+// lightweight consumers and test doubles keep the legacy interface.
+type EndpointsLookupVNI interface {
+	LookupIPWithVNI(ip netip.Addr, vni uint64) *endpoint.Endpoint
+	LookupIPUnambiguous(ip netip.Addr) *endpoint.Endpoint
+}
+
+// LookupIPUnambiguous uses the explicit best-effort VNI-aware API when the
+// implementation provides it. Legacy implementations retain their exact
+// LookupIP behavior.
+func LookupIPUnambiguous(lookup interface {
+	LookupIP(netip.Addr) *endpoint.Endpoint
+}, ip netip.Addr) *endpoint.Endpoint {
+	if vniLookup, ok := lookup.(EndpointsLookupVNI); ok {
+		return vniLookup.LookupIPUnambiguous(ip)
+	}
+	// A legacy implementation has no VNI-aware capability. Keep it usable
+	// for non-native-vpc callers, but fail closed in native-vpc mode rather
+	// than silently reintroducing a bare-IP identity lookup.
+	if option.Config.EnableNativeVPC {
+		return nil
+	}
+	return lookup.LookupIP(ip)
+}
+
 type EndpointsLookup interface {
 	// Lookup looks up endpoint by prefix ID
 	Lookup(id string) (*endpoint.Endpoint, error)

@@ -2253,10 +2253,23 @@ func (c *DaemonConfig) Validate(vp *viper.Viper) error {
 		return err
 	}
 
-	if c.EnableNativeVPC && c.NativeVPCVNIAnnotation == "" {
-		return fmt.Errorf("native-vpc mode is enabled but --%s is empty", NativeVPCVNIAnnotationName)
+	if err := c.validateNativeVPC(); err != nil {
+		return err
 	}
 
+	return nil
+}
+
+func (c *DaemonConfig) validateNativeVPC() error {
+	if !c.EnableNativeVPC {
+		return nil
+	}
+	if c.NativeVPCVNIAnnotation == "" {
+		return fmt.Errorf("native-vpc mode is enabled but --%s is empty", NativeVPCVNIAnnotationName)
+	}
+	if c.TunnelingEnabled() {
+		return fmt.Errorf("native-vpc mode requires --%s=%s: kube-ovn owns the host/tunnel datapath and Cilium bpf_overlay uses a plain-IP ipcache", RoutingMode, RoutingModeNative)
+	}
 	return nil
 }
 

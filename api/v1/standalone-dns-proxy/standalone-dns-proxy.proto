@@ -51,6 +51,7 @@ message FQDNMapping {
     uint32 source_identity = 4; // Identity of the client making the DNS request
     bytes source_ip = 5; // IP address of the client making the DNS request
     uint32 response_code = 6; // DNS Response code as specified in RFC2316
+    uint32 vni = 7; // Native-vpc VNI of the source endpoint; zero means non-VPC
 }
 
 // Ack returned by cilium agent to SDP on receiving FQDN-IP mapping update
@@ -91,6 +92,7 @@ message IdentityToEndpointMapping {
 message EndpointInfo {
     uint64 id = 1;
     repeated bytes ip = 2;
+    uint32 vni = 3; // Native-vpc VNI; zero means non-VPC endpoint.
 }
 
 // Cilium Identity ID to IP prefix mapping

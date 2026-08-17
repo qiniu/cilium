@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 
 	"github.com/blang/semver/v4"
 	"github.com/cilium/hive/cell"
@@ -16,6 +17,7 @@ import (
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/cilium/cilium/pkg/annotation"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/k8s"
@@ -33,6 +35,11 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/time"
 )
+
+// ciliumEndpointVNIAnnotation is the annotation written on CiliumEndpoints to
+// carry the native-vpc VNI of the endpoint, so that CiliumEndpoint watchers on
+// other nodes can register the endpoint IP in the VNI-scoped ipcache.
+const ciliumEndpointVNIAnnotation = annotation.NativeVPCVNIPrefix + "/vni"
 
 const (
 	// subsysEndpointSync is the value for logfields.LogSubsys
@@ -273,6 +280,9 @@ func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoin
 								// Mirror the labels of parent pod in CiliumEndpoint object to enable
 								// label based selection for CiliumEndpoints.
 								Labels: cepOwner.GetLabels(),
+								// Carry the native-vpc VNI so that CiliumEndpoint watchers on
+								// other nodes can register the IP in the VNI-scoped ipcache.
+								Annotations: ciliumEndpointVNIAnnotations(e),
 							},
 							Status: *mdl,
 						}
@@ -372,6 +382,16 @@ func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoin
 						Value: mdl,
 					},
 				}
+				// Backfill the native-vpc VNI annotation on pre-existing CEPs.
+				if vniAnnots := ciliumEndpointVNIAnnotations(e); len(vniAnnots) > 0 {
+					if localCEP == nil || localCEP.Annotations[ciliumEndpointVNIAnnotation] != vniAnnots[ciliumEndpointVNIAnnotation] {
+						replaceCEPStatus = append(replaceCEPStatus, k8s.JSONPatch{
+							OP:    "add",
+							Path:  "/metadata/annotations/" + ciliumEndpointVNIAnnotation,
+							Value: vniAnnots[ciliumEndpointVNIAnnotation],
+						})
+					}
+				}
 				var createStatusPatch []byte
 				createStatusPatch, err = json.Marshal(replaceCEPStatus)
 				if err != nil {
@@ -417,6 +437,16 @@ func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoin
 				return deleteCEP(ctx, scopedLog, ciliumClient, e)
 			},
 		})
+}
+
+// ciliumEndpointVNIAnnotations returns the annotations to write on the CEP of
+// the given endpoint to carry its native-vpc VNI. Returns an empty map when the
+// endpoint is not a native-vpc endpoint (VNI == 0).
+func ciliumEndpointVNIAnnotations(e *endpoint.Endpoint) map[string]string {
+	if vni := e.GetVNIID(); vni > 0 {
+		return map[string]string{ciliumEndpointVNIAnnotation: strconv.FormatUint(vni, 10)}
+	}
+	return nil
 }
 
 // updateCEPUID attempts to update the endpoints UID to be that of localCEP.

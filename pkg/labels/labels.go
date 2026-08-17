@@ -159,6 +159,22 @@ const (
 	// LabelSourceFQDN is the label source for IPs resolved by fqdn lookups
 	LabelSourceFQDN = "fqdn"
 
+	// LabelSourceVNI is the label source for the native-vpc identity label
+	// "vni:io-cilium-native-vpc-vni=<vni>". It is injected from the kube-ovn
+	// tunnel_key annotation and
+	// gives the policy/identity layer the same VNI scope used by the
+	// (VNI, IP) ipcache/datapath key. VNI is a logical-switch/subnet property;
+	// it must not be confused with kube-ovn's aggregate VPC object (one VPC can
+	// contain several subnets with different VNIs).
+	LabelSourceVNI = "vni"
+
+	// VNIKey is the internal label key used with LabelSourceVNI. Use a
+	// Cilium-owned, collision-resistant key rather than the generic "vni":
+	// Labels is keyed by label Key (not Source), so a user Kubernetes label
+	// named "vni" could otherwise prevent the mandatory VNI source label from
+	// being injected and collapse identities across VNIs.
+	VNIKey = "io-cilium-native-vpc-vni"
+
 	// LabelSourceReservedKeyPrefix is the prefix of a reserved label
 	LabelSourceReservedKeyPrefix = LabelSourceReserved + "."
 

@@ -342,8 +342,9 @@ var NoopLinkGetter = FakeLinkGetter{}
 
 // FakeIPGetter is used for unit tests that needs IPGetter.
 type FakeIPGetter struct {
-	OnGetK8sMetadata  func(ip netip.Addr) *ipcache.K8sMetadata
-	OnLookupSecIDByIP func(ip netip.Addr) (ipcache.Identity, bool)
+	OnGetK8sMetadata       func(ip netip.Addr) *ipcache.K8sMetadata
+	OnGetK8sMetadataForVNI func(ip netip.Addr, vni uint32) *ipcache.K8sMetadata
+	OnLookupSecIDByIP      func(ip netip.Addr) (ipcache.Identity, bool)
 }
 
 // GetK8sMetadata implements FakeIPGetter.GetK8sMetadata.
@@ -352,6 +353,14 @@ func (f *FakeIPGetter) GetK8sMetadata(ip netip.Addr) *ipcache.K8sMetadata {
 		return f.OnGetK8sMetadata(ip)
 	}
 	panic("OnGetK8sMetadata not set")
+}
+
+// GetK8sMetadataForVNI implements FakeIPGetter.GetK8sMetadataForVNI.
+func (f *FakeIPGetter) GetK8sMetadataForVNI(ip netip.Addr, vni uint32) *ipcache.K8sMetadata {
+	if f.OnGetK8sMetadataForVNI != nil {
+		return f.OnGetK8sMetadataForVNI(ip, vni)
+	}
+	return nil
 }
 
 // LookupSecIDByIP implements FakeIPGetter.LookupSecIDByIP.
@@ -365,6 +374,9 @@ func (f *FakeIPGetter) LookupSecIDByIP(ip netip.Addr) (ipcache.Identity, bool) {
 // NoopIPGetter always returns an empty response.
 var NoopIPGetter = FakeIPGetter{
 	OnGetK8sMetadata: func(ip netip.Addr) *ipcache.K8sMetadata {
+		return nil
+	},
+	OnGetK8sMetadataForVNI: func(ip netip.Addr, vni uint32) *ipcache.K8sMetadata {
 		return nil
 	},
 	OnLookupSecIDByIP: func(ip netip.Addr) (ipcache.Identity, bool) {

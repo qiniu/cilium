@@ -83,6 +83,7 @@ get started and experiment with Cilium.
    network/l2-announcements
    network/node-ipam
    network/pod-annotations
+   network/native-vpc
    network/multicast
 
 .. toctree::

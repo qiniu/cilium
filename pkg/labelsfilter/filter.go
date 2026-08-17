@@ -15,6 +15,7 @@ import (
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/option"
 )
 
 var (
@@ -27,8 +28,13 @@ const (
 	// LPCfgFileVersion represents the version of a Label Prefix Configuration File
 	LPCfgFileVersion = 1
 
-	// reservedLabelsPattern is the prefix pattern for all reserved labels
+	// reservedLabelsPattern is the prefix pattern for all reserved labels.
 	reservedLabelsPattern = labels.LabelSourceReserved + ":.*"
+	// vniLabelsPattern is the mandatory identity prefix for native-vpc: the
+	// VNI identity label is the policy-plane subnet/logical-switch discriminator
+	// and must never be demoted to an information label by --labels whitelist
+	// configuration.
+	vniLabelsPattern = labels.LabelSourceVNI + ":.*"
 )
 
 // LabelPrefix is the cilium's representation of a container label.
@@ -189,6 +195,15 @@ func ParseLabelPrefixCfg(logger *slog.Logger, prefixes, nodePrefixes []string, f
 		}
 	}
 
+	// Native-vpc policy correctness requires VNI identity label to remain an identity
+	// label even in whitelist mode. Append the required prefixes to the final
+	// list for diagnostics/visibility; filterLabels below also hard-keeps the
+	// sources so an explicit ignore rule cannot override the invariant.
+	if option.Config.EnableNativeVPC {
+		ensureLabelPrefix(cfg, reservedLabelsPattern)
+		ensureLabelPrefix(cfg, vniLabelsPattern)
+	}
+
 	validLabelPrefixes = cfg
 	validNodeLabelPrefixes = nodeCfg
 
@@ -214,6 +229,22 @@ type labelPrefixCfg struct {
 	// whitelist if true, indicates that an inclusive rule has to match
 	// in order for the label to be considered
 	whitelist bool `exhaustruct:"optional"`
+}
+
+// ensureLabelPrefix appends an inclusive required prefix if it is not already
+// present. It is used for identity dimensions that policy correctness depends
+// on (reserved labels and, in native-vpc mode, the VNI identity label).
+func ensureLabelPrefix(cfg *labelPrefixCfg, pattern string) {
+	for _, p := range cfg.LabelPrefixes {
+		if !p.Ignore && p.Source+":"+p.Prefix == pattern {
+			return
+		}
+	}
+	p, err := parseLabelPrefix(pattern)
+	if err != nil {
+		panic(fmt.Sprintf("BUG: unable to parse required label prefix %q: %s", pattern, err))
+	}
+	cfg.LabelPrefixes = append(cfg.LabelPrefixes, p)
 }
 
 // defaultLabelPrefixCfg returns a default LabelPrefixCfg using the latest
@@ -306,6 +337,17 @@ func (cfg *labelPrefixCfg) filterLabels(lbls labels.Labels) (identityLabels, inf
 	identityLabels = labels.Labels{}
 	informationLabels = labels.Labels{}
 	for k, v := range lbls {
+		// Security invariants override user filtering. Reserved labels are
+		// always identity labels. In native-vpc mode the VNI identity label is equally
+		// mandatory: demoting it would merge equal-labeled endpoints from
+		// different VNIs into one numeric identity and make fromEndpoints
+		// subnet-blind even though the ipcache/datapath remain VNI-scoped.
+		if v.Source == labels.LabelSourceReserved ||
+			(option.Config.EnableNativeVPC && v.Source == labels.LabelSourceVNI) {
+			identityLabels[k] = v
+			continue
+		}
+
 		included, ignored := 0, 0
 
 		for _, p := range cfg.LabelPrefixes {

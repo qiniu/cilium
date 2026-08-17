@@ -331,6 +331,26 @@ func (r *endpointRestorer) validateEndpoint(ep *endpoint.Endpoint) (valid bool, 
 			return false, err
 		}
 
+		// Native-vpc: re-read the VNI from the pod's tunnel_key annotation
+		// before the endpoint is exposed to the endpoint manager, so the
+		// identifier index (vni-ipv4/6) and the serialized state are built with
+		// the converged VNI (decision table: absent -> native scheme; valid
+		// non-zero -> VNIID; zero/invalid -> error + native fallback, see
+		// endpoint.SyncVNIFromPodAnnotation). This is the control-plane half of
+		// the fallback sequence - restart kube-ovn-controller first (it
+		// backfills the annotations), then restart cilium - which re-flushes
+		// the tunnel_key+IP resources on the control, cache and forwarding
+		// planes after kube-ovn backfills the annotation.
+		if option.Config.EnableNativeVPC && ep.GetPod() != nil {
+			if ep.SyncVNIFromPodAnnotation(ep.GetPod()) {
+				r.logger.Info("Native-vpc VNI refreshed from pod annotation on restore",
+					logfields.EndpointID, ep.ID,
+					logfields.K8sPodName, ep.GetK8sNamespaceAndPodName(),
+					logfields.VNIID, ep.GetVNIID(),
+				)
+			}
+		}
+
 		// Initialize the endpoint's event queue because the following call to
 		// execute the metadata resolver will emit events for the endpoint.
 		// After this endpoint is validated, it'll eventually be restored, in
@@ -366,6 +386,13 @@ func (r *endpointRestorer) getPodForEndpoint(ep *endpoint.Endpoint) error {
 		// if flag CiliumEndpointCRD is disabled,
 		// `GetCachedPod` may return endpoint has moved to another node.
 		return fmt.Errorf("Kubernetes pod %s/%s is not owned by this agent", ep.K8sNamespace, ep.K8sPodName)
+	}
+	// Expose the pod to the endpoint so callers of validateEndpoint (e.g. the
+	// native-vpc VNI re-read before expose) can inspect its annotations.
+	// Only on success: a transient (non-NotFound) informer error must not
+	// clobber the endpoint's pod with nil.
+	if err == nil {
+		ep.SetPod(pod)
 	}
 	return nil
 }

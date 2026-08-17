@@ -90,6 +90,7 @@ Meltwater
 Menlo
 MiB
 Monnet
+multi
 Multihop
 Multiprotocol
 Mythbusters
@@ -187,6 +188,7 @@ awk
 aws
 backend
 backends
+backfill
 backoff
 backport
 backported
@@ -238,6 +240,7 @@ ci
 cidr
 cidrs
 ciliumcon
+CiliumEndpoint
 classful
 classid
 cleanBpfState
@@ -414,6 +417,7 @@ hostPath
 hostPort
 hostname
 hostnames
+hostNetwork
 hostns
 hostonlyifs
 hostscope
@@ -638,6 +642,7 @@ openapi
 openssl
 originatingTLS
 os
+ovn
 oseq
 otx
 pahole
@@ -846,6 +851,7 @@ unaudited
 uncommented
 uncordon
 unencrypted
+underlay
 unexported
 unicast
 uninline
@@ -854,6 +860,7 @@ unlabel
 unmanaged
 unmarshalled
 unmigrated
+unparsable
 unpaginated
 unselect
 unsettable
@@ -885,8 +892,11 @@ vlan
 vmlinux
 vmxnet
 vni
+VNIID
+VNI
 volumeMounts
 vpc
+VPCs
 vrf
 vrouter
 vtep

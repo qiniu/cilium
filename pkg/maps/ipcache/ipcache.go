@@ -125,6 +125,98 @@ func NewKey(ip net.IP, mask net.IPMask, clusterID uint16) Key {
 	return result
 }
 
+// VniKey implements the bpf.MapKey interface for the native-vpc VNI-scoped
+// ipcache map (cilium_ipcache_vni).
+//
+// Must be in sync with struct ipcache_vni_key in <bpf/lib/eps.h>.
+// The VNI is part of the LPM static prefix, so the trie matches on VNI+IP.
+//
+// Layout note: the trailing Pad2 field is REQUIRED. Go rounds the struct size
+// up to the field alignment (26 bytes -> 28), and getVniStaticPrefixBits()
+// derives the LPM static prefix from unsafe.Sizeof. Without an explicit pad,
+// Go computes 64 static bits while the packed C struct computes 48, so BPF
+// lookups in cilium_ipcache_vni never match Go-written entries (and the map
+// key size 28 vs 26 makes the agent-created map incompatible with the one in
+// the BPF ELF). Pad2 must be mirrored in the C struct.
+//
+// This is the "local ClusterID" split: upstream addresses overlapping IPs
+// across clusters with a cluster_id field in the ipcache key; here the
+// kube-ovn tunnel_key (VNI) plays that role for VPCs within one cluster,
+// without touching the cluster_id semantics (see ipcache.ipcache.go).
+type VniKey struct {
+	Prefixlen uint32 `align:"lpm_key"`
+	Vni       uint32 `align:"vni"`
+	Pad1      uint8  `align:"pad1"`
+	Family    uint8  `align:"family"`
+	// represents both IPv6 and IPv4 (in the lowest four bytes)
+	IP types.IPv6 `align:"$union0"`
+	// Pad2 keeps unsafe.Sizeof(VniKey{}) == sizeof(struct ipcache_vni_key)
+	// (28 bytes) and the static prefix at 64 bits on both sides.
+	Pad2 [2]byte `align:"pad2"`
+}
+
+func getVniStaticPrefixBits() uint32 {
+	staticMatchSize := unsafe.Sizeof(VniKey{})
+	staticMatchSize -= unsafe.Sizeof(VniKey{}.Prefixlen)
+	staticMatchSize -= unsafe.Sizeof(VniKey{}.IP)
+	return uint32(staticMatchSize) * 8
+}
+
+func getVniPrefixLen(prefixBits int) uint32 {
+	return getVniStaticPrefixBits() + uint32(prefixBits)
+}
+
+// NewVniKey returns a VniKey based on the provided IP address, mask, and VNI.
+// The address family is automatically detected.
+func NewVniKey(ip net.IP, mask net.IPMask, vni uint32) VniKey {
+	result := VniKey{}
+
+	ones, _ := mask.Size()
+	if ip4 := ip.To4(); ip4 != nil {
+		if mask == nil {
+			ones = net.IPv4len * 8
+		}
+		result.Prefixlen = getVniPrefixLen(ones)
+		result.Family = bpf.EndpointKeyIPv4
+		copy(result.IP[:], ip4)
+	} else {
+		if mask == nil {
+			ones = net.IPv6len * 8
+		}
+		result.Prefixlen = getVniPrefixLen(ones)
+		result.Family = bpf.EndpointKeyIPv6
+		copy(result.IP[:], ip)
+	}
+
+	result.Vni = vni
+
+	return result
+}
+
+func (k VniKey) String() string {
+	var (
+		addr netip.Addr
+		ok   bool
+	)
+
+	switch k.Family {
+	case bpf.EndpointKeyIPv4:
+		addr, ok = netip.AddrFromSlice(k.IP[:net.IPv4len])
+		if !ok {
+			return "<unknown>"
+		}
+	case bpf.EndpointKeyIPv6:
+		addr = netip.AddrFrom16(k.IP)
+	default:
+		return "<unknown>"
+	}
+
+	prefixLen := int(k.Prefixlen - getVniStaticPrefixBits())
+	return fmt.Sprintf("%s@vni:%d", netip.PrefixFrom(addr, prefixLen).String(), k.Vni)
+}
+
+func (k *VniKey) New() bpf.MapKey { return &VniKey{} }
+
 // RemoteEndpointInfoFlags represents various flags that can be attached to
 // remote endpoints in the IPCache.
 type RemoteEndpointInfoFlags uint8
@@ -299,4 +391,34 @@ func IPCacheMapV1() *Map {
 		}
 	})
 	return oldIPcache
+}
+
+// VniName is the canonical name for the native-vpc VNI-scoped IPCache map.
+// Entries are keyed by (VNI, IP) so that overlapping IPs from different VPCs
+// can coexist. It is only used in native-vpc mode.
+const VniName = "cilium_ipcache_vni"
+
+var (
+	vniIpcache     *Map
+	onceVniIpcache = &sync.Once{}
+)
+
+func newIPCacheVniMap(name string) *bpf.Map {
+	return bpf.NewMap(
+		name,
+		ebpf.LPMTrie,
+		&VniKey{},
+		&RemoteEndpointInfo{},
+		MaxEntries,
+		unix.BPF_F_NO_PREALLOC|unix.BPF_F_RDONLY_PROG)
+}
+
+// IPCacheVniMap gets the native-vpc VNI-scoped ipcache Map singleton.
+func IPCacheVniMap(registry *metrics.Registry) *Map {
+	onceVniIpcache.Do(func() {
+		vniIpcache = &Map{
+			Map: *newIPCacheVniMap(VniName).WithCache().WithPressureMetric(registry),
+		}
+	})
+	return vniIpcache
 }

@@ -16,3 +16,9 @@ DECLARE_CONFIG(union v4addr, endpoint_ipv4, "The endpoint's IPv4 address")
 DECLARE_CONFIG(union v6addr, endpoint_ipv6, "The endpoint's IPv6 address")
 
 DECLARE_CONFIG(__u64, endpoint_netns_cookie, "The endpoint's network namespace cookie")
+
+/* Native-vpc VNI of this endpoint. Zero selects the native (non-VPC) scheme.
+ * This is load-time per-endpoint data so one compiled bpf_lxc template serves
+ * every VPC; the loader rewrites it when loading the endpoint program.
+ */
+DECLARE_CONFIG(__u32, native_vpc_vni, "The endpoint's native-vpc VNI")

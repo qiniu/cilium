@@ -275,6 +275,12 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 		DstLabelID:            dstLabelID,
 		TraceObservationPoint: decoded.TraceObservationPoint,
 	}
+	if decoded.Tunnel != nil && decoded.Tunnel.Vni > 0 {
+		// The overlay VNI is the exact logical-switch context for the
+		// encapsulated endpoint addresses. Preserve it for endpoint resolution.
+		datapathContext.SrcVNI = decoded.Tunnel.Vni
+		datapathContext.DstVNI = decoded.Tunnel.Vni
+	}
 	srcEndpoint := p.epResolver.ResolveEndpoint(srcIP, srcLabelID, datapathContext)
 	dstEndpoint := p.epResolver.ResolveEndpoint(dstIP, dstLabelID, datapathContext)
 	var sourceService, destinationService *pb.Service

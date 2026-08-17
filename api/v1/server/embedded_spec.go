@@ -3319,6 +3319,12 @@ func init() {
         },
         "metadata": {
           "$ref": "#/definitions/IPListEntryMetadata"
+        },
+        "vniID": {
+          "description": "Native-vpc VNI of the entry; 0 means not VPC-scoped",
+          "type": "integer",
+          "format": "int64",
+          "maximum": 16777215
         }
       }
     },
@@ -8740,6 +8746,13 @@ func init() {
         },
         "metadata": {
           "$ref": "#/definitions/IPListEntryMetadata"
+        },
+        "vniID": {
+          "description": "Native-vpc VNI of the entry; 0 means not VPC-scoped",
+          "type": "integer",
+          "format": "int64",
+          "maximum": 16777215,
+          "minimum": 0
         }
       }
     },

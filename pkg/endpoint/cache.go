@@ -44,6 +44,7 @@ type epInfoCache struct {
 	ifIndex                int
 	parentIfIndex          int
 	netNsCookie            uint64
+	vniID                  uint64
 	properties             map[string]any
 
 	// endpoint is used to get the endpoint's logger.
@@ -68,6 +69,7 @@ func (e *Endpoint) createEpInfoCache(epdir string) *epInfoCache {
 			ipv4:       e.IPv4Address(),
 			ipv6:       e.IPv6Address(),
 			atHostNS:   true,
+			vniID:      e.GetVNIID(),
 			properties: maps.Clone(e.properties),
 
 			endpoint: e,
@@ -93,6 +95,7 @@ func (e *Endpoint) createEpInfoCache(epdir string) *epInfoCache {
 		ifIndex:                e.ifIndex,
 		parentIfIndex:          e.parentIfIndex,
 		netNsCookie:            e.NetNsCookie,
+		vniID:                  e.GetVNIID(),
 		properties:             maps.Clone(e.properties),
 
 		endpoint: e,
@@ -101,6 +104,10 @@ func (e *Endpoint) createEpInfoCache(epdir string) *epInfoCache {
 
 func (ep *epInfoCache) GetIfIndex() int {
 	return ep.ifIndex
+}
+
+func (ep *epInfoCache) GetVNIID() uint64 {
+	return ep.vniID
 }
 
 func (ep *epInfoCache) GetParentIfIndex() int {

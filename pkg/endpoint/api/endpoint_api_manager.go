@@ -240,6 +240,10 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 						logfields.VNIID, ep.VNIID,
 					)
 				} else {
+					// Only reachable for hostNetwork pods (parseVNIFromPod returns
+					// unsetVNI for them); any other missing/invalid VNI is an error
+					// propagated by parseVNIFromPod above. VNIID=0 keeps hostNetwork
+					// endpoints on the plain-IP scheme (they are not in any VPC).
 					ep.VNIID = 0
 				}
 			}
@@ -569,11 +573,22 @@ func (m *endpointAPIManager) ModifyEndpointIdentityLabelsFromAPI(id string, add,
 }
 
 const unsetVNI = int64(-1)
-const maxVNI = (1 << 24) - 1
+
+// maxVNI mirrors endpoint.MaxVNI: the VNI space is 24 bits.
+const maxVNI = int64(endpoint.MaxVNI)
 
 // parseVNIFromPod extracts and validates the VNI from the Pod annotation.
-// Returns unsetVNI if no VNI annotation is present or if the Pod is using host networking.
-// Returns an error if the annotation value is invalid or not greater than 0.
+// parseVNIFromPod returns the VNI for the pod, or unsetVNI for hostNetwork
+// pods (they use the host network stack directly and are not part of any
+// overlay network, so VNI-based isolation does not apply).
+//
+// For any other pod a missing, empty, non-numeric or non-positive tunnel_key
+// annotation is an ERROR in native-vpc mode: the OVN subnet always carries a
+// non-zero tunnel key (kube-ovn waits for it before allocating pod IPs), so a
+// zero VNI means misconfiguration or an out-of-date kube-ovn. Returning an
+// error here rejects the endpoint instead of silently degrading to the plain
+// IP scheme, which would collide with overlapping VPC subnets and cause
+// non-deterministic policy verdicts ("部分可通").
 func parseVNIFromPod(pod *slim_corev1.Pod, vniAnnotationKey string, logger *slog.Logger) (int64, error) {
 	if pod.Spec.HostNetwork {
 		// Skip VNI for hostNetwork pods - they use host network stack directly,
@@ -585,8 +600,9 @@ func parseVNIFromPod(pod *slim_corev1.Pod, vniAnnotationKey string, logger *slog
 	}
 
 	vniStr, ok := pod.Annotations[vniAnnotationKey]
-	if !ok {
-		return unsetVNI, nil
+	if !ok || vniStr == "" {
+		return 0, fmt.Errorf("native-vpc pod %s/%s is missing tunnel_key annotation %q: a non-zero VNI is mandatory for every non-hostNetwork pod",
+			pod.Namespace, pod.Name, vniAnnotationKey)
 	}
 
 	// VNI annotation exists, parse it

@@ -119,6 +119,14 @@ func newIPCache(params ipCacheParams) *ipcache.IPCache {
 				return fmt.Errorf("initializing ipcache map: %w", err)
 			}
 
+			// In native-vpc mode also (re)create the VNI-scoped ipcache map so
+			// that bpf programs referencing cilium_ipcache_vni can be loaded.
+			if option.Config.EnableNativeVPC {
+				if err := ipcachemap.IPCacheVniMap(params.MetricsRegistry).Recreate(); err != nil {
+					return fmt.Errorf("initializing native-vpc ipcache map: %w", err)
+				}
+			}
+
 			return nil
 		},
 		OnStop: func(hc cell.HookContext) error {

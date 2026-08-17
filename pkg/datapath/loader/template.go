@@ -19,6 +19,9 @@ const (
 	templatePolicyVerdictFilter = uint32(0xffff)
 	templateIfIndex             = math.MaxUint32
 	templateEndpointNetNsCookie = math.MaxUint64
+	// Keep every 32-bit static-data segment non-zero in the template object;
+	// the loader replaces this with the real per-endpoint VNI (possibly 0).
+	templateNativeVPCVNI = uint64(1)
 )
 
 var (
@@ -76,6 +79,13 @@ func (t *templateCfg) GetIdentity() identity.NumericIdentity {
 // GetEndpointNetNsCookie returns a invalid (zero) network namespace cookie.
 func (t *templateCfg) GetEndpointNetNsCookie() uint64 {
 	return templateEndpointNetNsCookie
+}
+
+// GetVNIID returns a non-zero dummy VNI for the template object's load-time
+// configuration. It is not part of the template hash and is replaced with the
+// real endpoint value by endpointConfiguration when the object is loaded.
+func (t *templateCfg) GetVNIID() uint64 {
+	return templateNativeVPCVNI
 }
 
 // GetNodeMAC returns a well-known dummy MAC address which may be later

@@ -124,7 +124,23 @@ func (h *payloadGetters) GetEndpointInfo(ip netip.Addr) (endpoint hubbleGetters.
 	if !ip.IsValid() {
 		return nil, false
 	}
-	ep := h.endpointManager.LookupIP(ip)
+	ep := endpointmanager.LookupIPUnambiguous(h.endpointManager, ip)
+	if ep == nil {
+		return nil, false
+	}
+	return ep, true
+}
+
+// GetEndpointInfoForVNI implements the exact native-vpc endpoint lookup.
+func (h *payloadGetters) GetEndpointInfoForVNI(ip netip.Addr, vni uint32) (endpoint hubbleGetters.EndpointInfo, ok bool) {
+	if !ip.IsValid() || vni == 0 {
+		return nil, false
+	}
+	vniLookup, supported := h.endpointManager.(endpointmanager.EndpointsLookupVNI)
+	if !supported {
+		return nil, false
+	}
+	ep := vniLookup.LookupIPWithVNI(ip, uint64(vni))
 	if ep == nil {
 		return nil, false
 	}

@@ -97,6 +97,7 @@ func notifyIPCacheNotificationToProto(typ flowpb.AgentEventType, n monitorAPI.IP
 				EncryptKey:  uint32(n.EncryptKey),
 				Namespace:   n.Namespace,
 				PodName:     n.PodName,
+				Vni:         n.Vni,
 			},
 		},
 	}

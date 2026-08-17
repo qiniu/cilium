@@ -57,12 +57,34 @@ type IPIdentityPair struct {
 	K8sPodName        string          `json:"K8sPodName,omitempty"`
 	K8sServiceAccount string          `json:"K8sServiceAccount,omitempty"`
 	NamedPorts        []NamedPort     `json:"NamedPorts,omitempty"`
+	// Vni is the native-vpc Virtual Network Identifier of the entry. When
+	// non-zero the entry (and its kvstore/ipcache key) is scoped to that VPC as
+	// "<ip>@vni:<N>", so overlapping IPs from different VPCs coexist.
+	// omitempty keeps non-native-vpc entries byte-compatible. Native-vpc mixed
+	// versions are intentionally unsupported: an older reader does not include
+	// Vni in GetKeyName and rejects the scoped physical key in Unmarshal.
+	Vni uint64 `json:"Vni,omitempty"`
 }
 
 type IdentityMap map[NumericIdentity]labels.LabelArray
 
-// GetKeyName returns the kvstore key to be used for the IPIdentityPair
-func (pair *IPIdentityPair) GetKeyName() string { return pair.PrefixString() }
+// VNISuffix is the suffix used to encode a native-vpc VNI into identity keys
+// ("<ip>@vni:<N>"). It must stay in sync with the ipcache key encoding
+// (pkg/ipcache KeyWithVNI) and the LPM map display strings.
+const VNISuffix = "@vni:"
+
+// GetKeyName returns the kvstore key to be used for the IPIdentityPair. For
+// native-vpc entries (Vni > 0) the key carries the VNI suffix so that the
+// same IP in different VPCs maps to distinct kvstore keys (the kvstore has no
+// per-VPC namespace of its own). Must be consistent with the key passed to
+// Unmarshal, which validates GetKeyName against the physical key.
+func (pair *IPIdentityPair) GetKeyName() string {
+	name := pair.PrefixString()
+	if pair.Vni > 0 {
+		return name + VNISuffix + strconv.FormatUint(pair.Vni, 10)
+	}
+	return name
+}
 
 // Marshal returns the IPIdentityPair object as JSON byte slice
 func (pair *IPIdentityPair) Marshal() ([]byte, error) { return json.Marshal(pair) }

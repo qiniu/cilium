@@ -193,3 +193,22 @@ func NewVNIIPPrefixID(ip netip.Addr, vniID uint64) string {
 func FormatVNIIP(vniID uint64, ip netip.Addr) string {
 	return strconv.FormatUint(vniID, 10) + ":" + ip.String()
 }
+
+// SplitVNIIP splits a "<vni>:<ip>" identifier value (see FormatVNIIP) back
+// into its bare IP string, reporting whether the value was well-formed. Note
+// that IPv6 addresses contain colons, so the split is on the *first* colon
+// (the VNI is a plain decimal number and never contains one).
+func SplitVNIIP(vniIP string) (ip string, ok bool) {
+	i := strings.Index(vniIP, ":")
+	if i <= 0 || i == len(vniIP)-1 {
+		return "", false
+	}
+	if _, err := strconv.ParseUint(vniIP[:i], 10, 64); err != nil {
+		return "", false
+	}
+	ip = vniIP[i+1:]
+	if parsed, err := netip.ParseAddr(ip); err != nil || !parsed.IsValid() {
+		return "", false
+	}
+	return ip, true
+}

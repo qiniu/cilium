@@ -37,9 +37,20 @@ func (r *rulesClient) LookupByIdentity(nid identity.NumericIdentity) []string {
 	return []string{}
 }
 
-// Note: isHost is always false because the standalone DNS proxy does not handle host endpoints yet.
+// LookupRegisteredEndpoint returns only non-VPC/plain entries. Native-vpc
+// callers must use LookupRegisteredEndpointWithVNI.
 func (r *rulesClient) LookupRegisteredEndpoint(endpointAddr netip.Addr) (endpt *endpoint.Endpoint, isHost bool, err error) {
-	info, _, found := r.ipToIdentityTable.Get(r.db.ReadTxn(), client.IdIPToEndpointIndex.Query(endpointAddr))
+	return r.lookupRegisteredEndpointWithVNI(endpointAddr, 0)
+}
+
+// LookupRegisteredEndpointWithVNI performs the exact (VNI, IP) lookup used by
+// native-vpc standalone DNS mappings.
+func (r *rulesClient) LookupRegisteredEndpointWithVNI(endpointAddr netip.Addr, vni uint32) (endpt *endpoint.Endpoint, isHost bool, err error) {
+	return r.lookupRegisteredEndpointWithVNI(endpointAddr, vni)
+}
+
+func (r *rulesClient) lookupRegisteredEndpointWithVNI(endpointAddr netip.Addr, vni uint32) (endpt *endpoint.Endpoint, isHost bool, err error) {
+	info, _, found := r.ipToIdentityTable.Get(r.db.ReadTxn(), client.IdIPToEndpointIndex.Query(client.VNIIPKey(vni, endpointAddr)))
 	if !found {
 		return nil, false, nil
 	}
@@ -53,12 +64,20 @@ func (r *rulesClient) LookupRegisteredEndpoint(endpointAddr netip.Addr) (endpt *
 
 // LookupSecIDByIP looks up the security ID for a given IP address
 // It is similar to ipcache.LookupSecIDByIP
+// LookupSecIDByIPUnambiguous implements the best-effort lookup required by
+// the in-agent DNS proxy interface. The standalone DNS proxy state currently
+// has no VNI-scoped key dimension, so its exact lookup is the best available
+// behavior (native-vpc does not use this standalone path).
+func (r *rulesClient) LookupSecIDByIPUnambiguous(ip netip.Addr) (secID ipcache.Identity, exists bool) {
+	return r.LookupSecIDByIP(ip)
+}
+
 func (r *rulesClient) LookupSecIDByIP(ip netip.Addr) (secID ipcache.Identity, exists bool) {
 	if !ip.IsValid() {
 		return ipcache.Identity{}, false
 	}
 	txn := r.db.ReadTxn()
-	info, _, found := r.ipToIdentityTable.Get(txn, client.IdIPToEndpointIndex.Query(ip))
+	info, _, found := r.ipToIdentityTable.Get(txn, client.IdIPToEndpointIndex.Query(client.VNIIPKey(0, ip)))
 	if found {
 		return ipcache.Identity{
 			ID:     info.Identity,

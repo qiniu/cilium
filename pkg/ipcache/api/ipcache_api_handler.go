@@ -108,6 +108,13 @@ func (ipc *ipCacheDumpListener) OnIPIdentityCacheChange(modType ipcache.CacheMod
 		HostIP:     hostIP,
 		EncryptKey: int64(encryptKey),
 	}
+	// Expose the native-vpc VNI so diagnostics can distinguish overlapping
+	// IPs from different VPCs. Leave the optional field absent for non-VPC
+	// entries (VNI 0).
+	if newID.Vni > 0 {
+		vni := int64(newID.Vni)
+		entry.VniID = &vni
+	}
 
 	if k8sMeta != nil {
 		entry.Metadata = &models.IPListEntryMetadata{

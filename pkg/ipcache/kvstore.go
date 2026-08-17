@@ -22,6 +22,7 @@ import (
 	storepkg "github.com/cilium/cilium/pkg/kvstore/store"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/source"
 	"github.com/cilium/cilium/pkg/types"
 	"github.com/cilium/cilium/pkg/u8proto"
@@ -53,15 +54,28 @@ type kvstoreClient interface {
 	Delete(ctx context.Context, key string) error
 }
 
+// localIPCache is the subset of *IPCache used by the kvstore-disabled local
+// fallback path. Kept as an interface for testability.
+type localIPCache interface {
+	Upsert(ip string, hostIP net.IP, hostKey uint8, k8sMeta *K8sMetadata, newIdentity Identity) (namedPortsChanged bool, err error)
+	Delete(IP string, source source.Source) (namedPortsChanged bool)
+}
+
 // IPIdentitySynchronizer handles the synchronization of ipcache entries into the kvstore.
+// When the kvstore is disabled (e.g. CRD-only identity mode), it falls back to registering
+// the mapping directly into the local ipcache so that local endpoints are always visible to
+// the datapath. In native-vpc mode the local registration is keyed by IP+VNI.
 type IPIdentitySynchronizer struct {
 	logger  *slog.Logger
 	client  kvstoreClient
 	tracker lock.Map[string, []byte]
+
+	// ipc is the local ipcache used as a fallback when the kvstore is disabled.
+	ipc localIPCache
 }
 
-func NewIPIdentitySynchronizer(logger *slog.Logger, client kvstore.Client) *IPIdentitySynchronizer {
-	return &IPIdentitySynchronizer{logger: logger, client: client}
+func NewIPIdentitySynchronizer(logger *slog.Logger, client kvstore.Client, ipc localIPCache) *IPIdentitySynchronizer {
+	return &IPIdentitySynchronizer{logger: logger, client: client, ipc: ipc}
 }
 
 // UpsertParams provides a structured set of parameters for IPIdentitySynchronizer.Upsert.
@@ -75,10 +89,21 @@ type UpsertParams struct {
 	K8sPodName        string
 	K8sServiceAccount string
 	NPM               types.NamedPortMap
+	// Vni is the Virtual Network Identifier for native-vpc endpoints. When
+	// non-zero, the local ipcache entry (kvstore-disabled path) is keyed by
+	// IP+VNI.
+	Vni uint64
 }
 
 // Upsert updates / inserts the provided IP->Identity mapping into the kvstore.
 func (s *IPIdentitySynchronizer) Upsert(ctx context.Context, params *UpsertParams) error {
+	// Without a kvstore, register the mapping directly in the local ipcache so
+	// that the datapath can resolve the source identity of local endpoints
+	// (keyed by IP+VNI in native-vpc mode).
+	if !s.client.IsEnabled() {
+		return s.upsertLocal(params)
+	}
+
 	// Sort named ports into a slice
 	namedPorts := make([]identity.NamedPort, 0, len(params.NPM))
 	for name, value := range params.NPM {
@@ -92,7 +117,7 @@ func (s *IPIdentitySynchronizer) Upsert(ctx context.Context, params *UpsertParam
 		return namedPorts[i].Name < namedPorts[j].Name
 	})
 
-	ipKey := path.Join(IPIdentitiesPath, AddressSpace, params.IP.String())
+	ipKey := path.Join(IPIdentitiesPath, AddressSpace, KeyWithVNI(params.IP.String(), uint32(params.Vni)))
 	ipIDPair := identity.IPIdentityPair{
 		IP:                params.IP.AsSlice(),
 		ID:                params.ID,
@@ -103,6 +128,7 @@ func (s *IPIdentitySynchronizer) Upsert(ctx context.Context, params *UpsertParam
 		K8sPodName:        params.K8sPodName,
 		K8sServiceAccount: params.K8sServiceAccount,
 		NamedPorts:        namedPorts,
+		Vni:               params.Vni,
 	}
 
 	marshaledIPIDPair, err := json.Marshal(ipIDPair)
@@ -125,12 +151,65 @@ func (s *IPIdentitySynchronizer) Upsert(ctx context.Context, params *UpsertParam
 	return err
 }
 
-// Delete removes the IP->Identity mapping for the specified ip
-// from the kvstore, which will subsequently trigger an event in
-// NewIPIdentityWatcher().
-func (s *IPIdentitySynchronizer) Delete(ctx context.Context, ip string) error {
-	ipKey := path.Join(IPIdentitiesPath, AddressSpace, ip)
+// upsertLocal registers the IP->Identity mapping directly in the local
+// ipcache. It is used when no kvstore is configured so that local endpoints
+// are still resolvable by the datapath. In native-vpc mode the entry is keyed
+// by IP+VNI to keep overlapping IPs from different VPCs distinct.
+func (s *IPIdentitySynchronizer) upsertLocal(params *UpsertParams) error {
+	if s.ipc == nil {
+		return nil
+	}
+
+	// In native-vpc mode a zero VNI is an error (the endpoint-create path
+	// rejects such pods); refuse to register a plain-IP entry that would
+	// collide with overlapping VPC subnets.
+	if option.Config.EnableNativeVPC && params.Vni == 0 {
+		s.logger.Error("native-vpc endpoint is missing a valid VNI; skipping local ipcache registration",
+			logfields.IPAddr, params.IP,
+			logfields.K8sPodName, params.K8sNamespace+"/"+params.K8sPodName,
+		)
+		return nil
+	}
+
+	var hostIP net.IP
+	if params.HostIP.IsValid() {
+		hostIP = params.HostIP.AsSlice()
+	}
+
+	k8sMeta := &K8sMetadata{
+		Namespace:  params.K8sNamespace,
+		PodName:    params.K8sPodName,
+		NamedPorts: params.NPM,
+	}
+	vni := uint32(params.Vni)
+
+	_, err := s.ipc.Upsert(
+		KeyWithVNI(params.IP.String(), vni),
+		hostIP, params.Key, k8sMeta,
+		Identity{ID: params.ID, Source: source.Local, Vni: vni},
+	)
+	return err
+}
+
+// Delete removes the IP->Identity mapping for the specified ip from the
+// kvstore, which will subsequently trigger an event in NewIPIdentityWatcher().
+// Without a kvstore, it removes the local ipcache entry that was created by
+// upsertLocal instead. vni is the native-vpc VNI of the endpoint being
+// deleted; it scopes the kvstore/ipcache key so that overlapping IPs from
+// different VPCs (even on the same node) delete the correct entry. Passing the
+// VNI explicitly (rather than remembering it in a map keyed by IP) avoids a
+// same-IP-different-VPC overwrite.
+func (s *IPIdentitySynchronizer) Delete(ctx context.Context, ip string, vni uint64) error {
+	ipKey := path.Join(IPIdentitiesPath, AddressSpace, KeyWithVNI(ip, uint32(vni)))
 	s.tracker.Delete(ipKey)
+
+	if !s.client.IsEnabled() {
+		if s.ipc != nil {
+			s.ipc.Delete(KeyWithVNI(ip, uint32(vni)), source.Local)
+		}
+		return nil
+	}
+
 	return s.client.Delete(ctx, ipKey)
 }
 
@@ -446,15 +525,21 @@ func (iw *IPIdentityWatcher) OnUpdate(k storepkg.Key) {
 		ip = cmtypes.AnnotateIPCacheKeyWithClusterID(ip, iw.clusterID)
 	}
 
+	// Native-vpc: scope the ipcache entry by the pair's VNI so that
+	// overlapping IPs from different VPCs stay distinct (see KeyWithVNI).
+	vni := uint32(ipIDPair.Vni)
+	ipKey := KeyWithVNI(ip, vni)
+
 	// There is no need to delete the "old" IP addresses from this
 	// ip ID pair. The only places where the ip ID pair are created
 	// is the clustermesh, where it sends a delete to the KVStore,
 	// and the endpoint-runIPIdentitySync where it bounded to a
 	// lease and a controller which is stopped/removed when the
 	// endpoint is gone.
-	iw.ipcache.Upsert(ip, ipIDPair.HostIP, ipIDPair.Key, k8sMeta, Identity{
+	iw.ipcache.Upsert(ipKey, ipIDPair.HostIP, ipIDPair.Key, k8sMeta, Identity{
 		ID:     peerIdentity,
 		Source: iw.source,
+		Vni:    vni,
 	})
 }
 
@@ -472,12 +557,16 @@ func (iw *IPIdentityWatcher) OnDelete(k storepkg.NamedKey) {
 	ipIDPair := k.(*identity.IPIdentityPair)
 	ip := ipIDPair.PrefixString()
 
+	// Native-vpc: scope the key by the pair's VNI (see KeyWithVNI).
+	vni := uint32(ipIDPair.Vni)
+	ipKey := KeyWithVNI(ip, vni)
+
 	iw.log.Debug(
 		"Observed deletion event",
 		logfields.IPAddr, ip,
 	)
 
-	if iw.withSelfDeletionProtection && iw.selfDeletionProtection(ip) {
+	if iw.withSelfDeletionProtection && iw.selfDeletionProtection(ipKey) {
 		return
 	}
 
@@ -489,7 +578,7 @@ func (iw *IPIdentityWatcher) OnDelete(k storepkg.NamedKey) {
 	// The key no longer exists in the
 	// local cache, it is safe to remove
 	// from the datapath ipcache.
-	iw.ipcache.Delete(ip, iw.source)
+	iw.ipcache.Delete(KeyWithVNI(ip, vni), iw.source)
 }
 
 func (iw *IPIdentityWatcher) onSync(context.Context) {

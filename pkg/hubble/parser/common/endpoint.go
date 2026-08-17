@@ -6,12 +6,15 @@ package common
 import (
 	"log/slog"
 	"net/netip"
+	"strconv"
+	"strings"
 
 	pb "github.com/cilium/cilium/api/v1/flow"
 	"github.com/cilium/cilium/pkg/hubble/parser/getters"
 	"github.com/cilium/cilium/pkg/identity"
 	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	"github.com/cilium/cilium/pkg/k8s/utils"
+	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/time"
@@ -20,8 +23,10 @@ import (
 type DatapathContext struct {
 	SrcIP                 netip.Addr
 	SrcLabelID            uint32
+	SrcVNI                uint32
 	DstIP                 netip.Addr
 	DstLabelID            uint32
+	DstVNI                uint32
 	TraceObservationPoint pb.TraceObservationPoint
 }
 
@@ -135,9 +140,24 @@ func (r *EndpointResolver) ResolveEndpoint(ip netip.Addr, datapathSecurityIdenti
 		return datapathID.Uint32()
 	}
 
-	// for local endpoints, use the available endpoint information
+	// For local endpoints, use exact (VNI, IP) context when available. A
+	// native-vpc endpoint must never be selected by guessing from a bare IP.
 	if r.endpointGetter != nil {
-		if ep, ok := r.endpointGetter.GetEndpointInfo(ip); ok {
+		var epInfo getters.EndpointInfo
+		var ok bool
+		vni := context.SrcVNI
+		if ip != context.SrcIP {
+			vni = context.DstVNI
+		}
+		if vni > 0 {
+			if vniGetter, supported := r.endpointGetter.(getters.EndpointGetterVNI); supported {
+				epInfo, ok = vniGetter.GetEndpointInfoForVNI(ip, vni)
+			}
+		} else {
+			epInfo, ok = r.endpointGetter.GetEndpointInfo(ip)
+		}
+		if ok {
+			ep := epInfo
 			epIdentity := resolveIdentityConflict(ep.GetIdentity(), true)
 			labels := ep.GetLabels()
 			e := &pb.Endpoint{
@@ -162,16 +182,23 @@ func (r *EndpointResolver) ResolveEndpoint(ip netip.Addr, datapathSecurityIdenti
 	// for remote endpoints, assemble the information via ip and identity
 	numericIdentity := datapathSecurityIdentity
 	var namespace, podName string
+	var needVNIMetadata bool
 	if r.ipGetter != nil {
 		if ipIdentity, ok := r.ipGetter.LookupSecIDByIP(ip); ok {
 			numericIdentity = resolveIdentityConflict(ipIdentity.ID, false)
 		}
 		if meta := r.ipGetter.GetK8sMetadata(ip); meta != nil {
 			namespace, podName = meta.Namespace, meta.PodName
+		} else {
+			// Native-vpc: the metadata of VNI-scoped entries lives under
+			// "<ip>@vni:<vni>" and is invisible to the plain lookup. Resolve
+			// it below once the identity's VNI identity label yields the VNI.
+			needVNIMetadata = true
 		}
 	}
 	var labels []string
 	var clusterName string
+	var resolvedVNI uint32
 	if r.identityGetter != nil {
 		if id, err := r.identityGetter.GetIdentity(numericIdentity); err != nil {
 			r.log.Debug(
@@ -182,6 +209,15 @@ func (r *EndpointResolver) ResolveEndpoint(ip netip.Addr, datapathSecurityIdenti
 		} else {
 			labels = SortAndFilterLabels(r.log, id.Labels.GetModel(), identity.NumericIdentity(numericIdentity))
 			clusterName = (id.Labels[k8sConst.PolicyLabelCluster]).Value
+
+			if vni, ok := vniFromIdentityLabels(id.Labels); ok {
+				resolvedVNI = vni
+				if needVNIMetadata && r.ipGetter != nil {
+					if meta := r.ipGetter.GetK8sMetadataForVNI(ip, vni); meta != nil {
+						namespace, podName = meta.Namespace, meta.PodName
+					}
+				}
+			}
 		}
 	}
 
@@ -191,5 +227,24 @@ func (r *EndpointResolver) ResolveEndpoint(ip netip.Addr, datapathSecurityIdenti
 		Namespace:   namespace,
 		Labels:      labels,
 		PodName:     podName,
+		VniId:       uint64(resolvedVNI),
 	}
+}
+
+// vniFromIdentityLabels returns the native-vpc VNI carried by the internal VNI
+// identity label of the given labels, if present. The identity is VNI-distinct
+// (endpoints on different logical switches carry different VNI identity labels),
+// so the VNI derived here unambiguously identifies the VNI-scoped
+// ipcache/metadata entry
+// of a remote peer.
+func vniFromIdentityLabels(lbls labels.Labels) (uint32, bool) {
+	l, ok := lbls[labels.VNIKey]
+	if !ok || l.Source != labels.LabelSourceVNI {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(strings.TrimSpace(l.Value), 10, 32)
+	if err != nil || v == 0 {
+		return 0, false
+	}
+	return uint32(v), true
 }

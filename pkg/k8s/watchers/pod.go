@@ -21,6 +21,7 @@ import (
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"strconv"
 
 	agentK8s "github.com/cilium/cilium/daemon/k8s"
 	"github.com/cilium/cilium/pkg/annotation"
@@ -575,6 +576,29 @@ func (k *K8sPodWatcher) deleteK8sPodV1(pod *slim_corev1.Pod) error {
 	return err
 }
 
+// podVNI returns the Virtual Network Identifier (VNI) of the pod in
+// native-vpc mode, read from the pod's tunnel_key annotation
+// (option.Config.NativeVPCVNIAnnotation, e.g. ovn.kubernetes.io/tunnel_key).
+// Returns 0 when native-vpc mode is disabled or the annotation is missing or
+// invalid, in which case the pod uses the plain cluster-wide IP scheme.
+func podVNI(pod *slim_corev1.Pod) uint32 {
+	if !option.Config.EnableNativeVPC || option.Config.NativeVPCVNIAnnotation == "" {
+		return 0
+	}
+	if pod == nil {
+		return 0
+	}
+	vniStr, ok := pod.Annotations[option.Config.NativeVPCVNIAnnotation]
+	if !ok || vniStr == "" {
+		return 0
+	}
+	vni, err := strconv.ParseUint(vniStr, 10, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(vni)
+}
+
 func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPodIPs, newPodIPs k8sTypes.IPSlice) error {
 	if newPod.Spec.HostNetwork {
 		k.logger.Debug("Pod is using host networking",
@@ -585,6 +609,23 @@ func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPo
 	}
 
 	var namedPortsChanged bool
+
+	// VNI (from the tunnel_key annotation) used to scope ipcache entries in
+	// native-vpc mode. Zero for non-native-vpc pods.
+	vni := podVNI(newPod)
+
+	// In native-vpc mode every non-hostNetwork pod must carry a non-zero VNI
+	// (the OVN subnet's tunnel key). A missing/zero VNI is an error: registering
+	// nothing under the plain-IP scheme would collide with overlapping VPC
+	// subnets. The endpoint-create path rejects such pods too; this guards
+	// already-running pods that cannot be re-created (e.g. created by an
+	// out-of-date kube-ovn before the tunnel_key backfill).
+	if option.Config.EnableNativeVPC && vni == 0 {
+		k.logger.Error("native-vpc pod is missing a valid tunnel_key annotation; skipping ipcache registration",
+			logfields.K8sPodName, newPod.Namespace+"/"+newPod.Name,
+		)
+		return nil
+	}
 
 	ipSliceEqual := oldPodIPs != nil && oldPodIPs.DeepEqual(&newPodIPs)
 
@@ -599,7 +640,7 @@ func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPo
 					found = true
 				}
 				if !found {
-					npc := k.ipcache.Delete(oldPodIP, source.Kubernetes)
+					npc := k.ipcache.Delete(ipcache.KeyWithVNI(oldPodIP, vni), source.Kubernetes)
 					if npc {
 						namedPortsChanged = true
 					}
@@ -659,9 +700,13 @@ func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPo
 		// Initial mapping of podIP <-> hostIP <-> identity. The mapping is
 		// later updated once the allocator has determined the real identity.
 		// If the endpoint remains unmanaged, the identity remains untouched.
-		npc, err := k.ipcache.Upsert(podIP, hostIP, hostKey, k8sMeta, ipcache.Identity{
+		// In native-vpc mode the entry is keyed by IP+VNI (from the
+		// tunnel_key annotation) so that overlapping IPs in different VPCs
+		// can coexist.
+		npc, err := k.ipcache.Upsert(ipcache.KeyWithVNI(podIP, vni), hostIP, hostKey, k8sMeta, ipcache.Identity{
 			ID:     identity.ReservedIdentityUnmanaged,
 			Source: source.Kubernetes,
+			Vni:    vni,
 		})
 		if npc {
 			namedPortsChanged = true
@@ -714,7 +759,8 @@ func (k *K8sPodWatcher) deletePodHostData(pod *slim_corev1.Pod) (bool, error) {
 		// a small race condition exists here as deletion could occur in
 		// parallel based on another event but it doesn't matter as the
 		// identity is going away
-		id, exists := k.ipcache.LookupByIP(podIP)
+		ipKey := ipcache.KeyWithVNI(podIP, podVNI(pod))
+		id, exists := k.ipcache.LookupByIP(ipKey)
 		if !exists {
 			skipped = true
 			errs = append(errs, fmt.Sprintf("identity for IP %s does not exist in case", podIP))
@@ -727,7 +773,7 @@ func (k *K8sPodWatcher) deletePodHostData(pod *slim_corev1.Pod) (bool, error) {
 			continue
 		}
 
-		k.ipcache.DeleteOnMetadataMatch(podIP, source.Kubernetes, pod.Namespace, pod.Name)
+		k.ipcache.DeleteOnMetadataMatch(ipKey, source.Kubernetes, pod.Namespace, pod.Name)
 	}
 
 	if len(errs) != 0 {
