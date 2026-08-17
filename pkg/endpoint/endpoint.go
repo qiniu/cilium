@@ -907,27 +907,27 @@ const legacyVPCLabelSource = "vpc"
 //     CONFIG(native_vpc_vni) value in bpf_lxc and the ipcache listener writes
 //     cilium_ipcache_vni entries.
 func (e *Endpoint) SyncVNIFromPodAnnotation(pod *slim_corev1.Pod) bool {
-	if !option.Config.EnableNativeVPC || option.Config.NativeVPCVNIAnnotation == "" {
-		return false
-	}
-
 	var (
 		parsed uint64
 		valid  bool
 		broken bool // annotation present but 0 / unparsable / out of range
 		// hostNetwork is an immutable, structural "not in any VPC" signal, as
-		// opposed to an annotation that can transiently disappear.
+		// opposed to an annotation that can transiently disappear. It comes
+		// from the shared decision table, never from a second reading of the
+		// pod here.
 		hostNetwork bool
 		parseErr    error
 	)
 	vni, res, err := nativevpc.VNIFromPod(pod)
 	switch res {
+	case nativevpc.Disabled:
+		return false
 	case nativevpc.Valid:
 		parsed, valid = vni, true
 	case nativevpc.Invalid:
 		broken, parseErr = true, err
-	case nativevpc.NotInVPC:
-		hostNetwork = pod != nil && pod.Spec.HostNetwork
+	case nativevpc.HostNetwork:
+		hostNetwork = true
 	}
 
 	if broken {

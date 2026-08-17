@@ -640,7 +640,7 @@ func requireVNI(nativeVPCEnabled bool, vni uint64, isHostEndpoint, isK8sPod bool
 func parseVNIFromPod(pod *slim_corev1.Pod, logger *slog.Logger) (int64, error) {
 	vni, res, err := nativevpc.VNIFromPod(pod)
 	switch res {
-	case nativevpc.NotInVPC:
+	case nativevpc.Disabled, nativevpc.HostNetwork:
 		logger.Debug("Skipping VNI for pod that is not in any VPC",
 			logfields.K8sPodName, pod.Namespace+"/"+pod.Name,
 		)

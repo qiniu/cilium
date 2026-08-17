@@ -56,7 +56,7 @@ func TestVNIFromPod(t *testing.T) {
 		{name: "not a number", pod: pod("abc", false), wantRes: Invalid},
 		{name: "out of range", pod: pod("16777216", false), wantRes: Invalid},
 		{name: "way out of range", pod: pod("4294967295", false), wantRes: Invalid},
-		{name: "hostNetwork", pod: pod("36", true), wantRes: NotInVPC},
+		{name: "hostNetwork", pod: pod("36", true), wantRes: HostNetwork},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			vni, res, err := VNIFromPod(tc.pod)
@@ -75,7 +75,7 @@ func TestVNIFromPod(t *testing.T) {
 		defer func() { option.Config.EnableNativeVPC = true }()
 		vni, res, err := VNIFromPod(pod("36", false))
 		require.NoError(t, err)
-		require.Equal(t, NotInVPC, res)
+		require.Equal(t, Disabled, res, "callers must be able to tell 'mode off' from 'not in a VPC'")
 		require.Zero(t, vni)
 	})
 
@@ -84,6 +84,6 @@ func TestVNIFromPod(t *testing.T) {
 		defer func() { option.Config.NativeVPCVNIAnnotation = "ovn.kubernetes.io/tunnel_key" }()
 		_, res, err := VNIFromPod(pod("36", false))
 		require.NoError(t, err)
-		require.Equal(t, NotInVPC, res)
+		require.Equal(t, Disabled, res)
 	})
 }

@@ -28,12 +28,21 @@ import (
 const MaxVNI = uint64(1<<24) - 1
 
 // Result describes the outcome of reading the tunnel_key annotation of a pod.
+//
+// The cases are kept apart on purpose: a caller must never have to re-derive
+// one of them (for example by looking at pod.Spec.HostNetwork itself), because
+// that is how the readers drifted apart before this package existed.
 type Result int
 
 const (
-	// NotInVPC means the pod is structurally not part of any VPC: it uses the
-	// host network stack. This is authoritative and immutable.
-	NotInVPC Result = iota
+	// Disabled means native-vpc is not in use, so every caller must behave
+	// exactly as it did before the feature existed.
+	Disabled Result = iota
+	// HostNetwork means the pod is structurally not part of any VPC: it uses
+	// the host network stack. Unlike a missing annotation this is immutable
+	// and authoritative, so it is the one signal that may reset an existing
+	// VPC scope to none.
+	HostNetwork
 	// Absent means the annotation is missing. kube-ovn guarantees a non-zero
 	// tunnel_key on every non-hostNetwork pod before CNI ADD, so this only
 	// happens for legacy pods, a stale pod object, or an error on the kube-ovn
@@ -57,13 +66,13 @@ const (
 // and the pod watcher skips registration.
 func VNIFromPod(pod *slim_corev1.Pod) (uint64, Result, error) {
 	if !option.Config.EnableNativeVPC || option.Config.NativeVPCVNIAnnotation == "" {
-		return 0, NotInVPC, nil
+		return 0, Disabled, nil
 	}
 	if pod == nil {
 		return 0, Absent, nil
 	}
 	if pod.Spec.HostNetwork {
-		return 0, NotInVPC, nil
+		return 0, HostNetwork, nil
 	}
 
 	key := option.Config.NativeVPCVNIAnnotation
