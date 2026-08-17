@@ -365,11 +365,14 @@ type IPCacheNotification struct {
 	EncryptKey uint8  `json:"encrypt-key"`
 	Namespace  string `json:"namespace,omitempty"`
 	PodName    string `json:"pod-name,omitempty"`
+	// Vni is the native-vpc VNI of the entry, so monitor/hubble events can
+	// distinguish overlapping IPs from different VPCs.
+	Vni uint32 `json:"vni,omitempty"`
 }
 
 // IPCacheUpsertedMessage constructs an agent notification message for ipcache upsertions
 func IPCacheUpsertedMessage(cidr string, id uint32, oldID *uint32, hostIP net.IP, oldHostIP net.IP,
-	encryptKey uint8, namespace, podName string) AgentNotifyMessage {
+	encryptKey uint8, namespace, podName string, vni uint32) AgentNotifyMessage {
 	notification := IPCacheNotification{
 		CIDR:        cidr,
 		Identity:    id,
@@ -379,6 +382,7 @@ func IPCacheUpsertedMessage(cidr string, id uint32, oldID *uint32, hostIP net.IP
 		EncryptKey:  encryptKey,
 		Namespace:   namespace,
 		PodName:     podName,
+		Vni:         vni,
 	}
 
 	return AgentNotifyMessage{
@@ -389,7 +393,7 @@ func IPCacheUpsertedMessage(cidr string, id uint32, oldID *uint32, hostIP net.IP
 
 // IPCacheDeletedMessage constructs an agent notification message for ipcache deletions
 func IPCacheDeletedMessage(cidr string, id uint32, oldID *uint32, hostIP net.IP, oldHostIP net.IP,
-	encryptKey uint8, namespace, podName string) AgentNotifyMessage {
+	encryptKey uint8, namespace, podName string, vni uint32) AgentNotifyMessage {
 	notification := IPCacheNotification{
 		CIDR:        cidr,
 		Identity:    id,
@@ -399,6 +403,7 @@ func IPCacheDeletedMessage(cidr string, id uint32, oldID *uint32, hostIP net.IP,
 		EncryptKey:  encryptKey,
 		Namespace:   namespace,
 		PodName:     podName,
+		Vni:         vni,
 	}
 
 	return AgentNotifyMessage{

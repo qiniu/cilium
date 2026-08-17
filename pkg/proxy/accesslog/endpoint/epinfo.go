@@ -16,8 +16,15 @@ import (
 )
 
 // EndpointLookup is any type which maps from IP to the endpoint owning that IP.
+//
+// LookupCiliumID is part of the contract because the proxy usually already
+// knows the endpoint id: resolving by id is exact, while a bare-IP lookup is
+// ambiguous in native-vpc mode. Declaring it here rather than type-asserting
+// it at the call site means a rename cannot silently degrade the access log to
+// the bare-IP path.
 type EndpointLookup interface {
 	LookupIP(ip netip.Addr) (ep *endpoint.Endpoint)
+	LookupCiliumID(id uint16) *endpoint.Endpoint
 }
 
 // endpointInfoRegistry provides a default implementation of the logger.EndpointInfoRegistry interface.
@@ -56,9 +63,27 @@ func (r *endpointInfoRegistry) FillEndpointInfo(ctx context.Context, info *acces
 	// This will fail if the IP does not correspond to an endpoint on this node.
 	var ep *endpoint.Endpoint
 	if info.ID == 0 {
-		ep = r.endpointManager.LookupIP(addr)
+		ep = endpointmanager.LookupIPUnambiguous(r.endpointManager, addr)
 		if ep != nil {
 			info.ID = ep.GetID()
+		}
+	} else {
+		// The proxy already knows the local endpoint: resolve it by ID (never
+		// by bare IP, which is ambiguous with overlapping VPC subnets) so that
+		// the native-vpc VNI below is exact.
+		ep = r.endpointManager.LookupCiliumID(uint16(info.ID))
+	}
+
+	// Native-vpc: record the (VNI, IP) scope of the endpoint so that the
+	// observability plane (Hubble L7 flows) can resolve pod metadata with the
+	// exact VNI-scoped key instead of a bare IP.
+	if info.VNIID == 0 {
+		if ep != nil {
+			info.VNIID = ep.GetVNIID()
+		} else if addr.IsValid() {
+			if id, exists := r.ipcache.LookupSecIDByIPUnambiguous(addr); exists {
+				info.VNIID = uint64(id.Vni)
+			}
 		}
 	}
 
@@ -77,9 +102,12 @@ func (r *endpointInfoRegistry) FillEndpointInfo(ctx context.Context, info *acces
 			}
 		}
 
-		// Fall back to ipcache
+		// Fall back to ipcache. Native-vpc: use the unambiguous lookup so a
+		// VNI-scoped entry is resolved when exactly one VPC uses the IP (L7
+		// accesslog is best-effort; the generic key-exact lookup cannot see
+		// "<ip>@vni:<vni>" entries and would degrade to WORLD).
 		if info.Identity == 0 && addr.IsValid() {
-			ID, exists := r.ipcache.LookupByIP(addr.String())
+			ID, exists := r.ipcache.LookupSecIDByIPUnambiguous(addr)
 			if exists {
 				info.Identity = uint64(ID.ID)
 			}

@@ -368,7 +368,7 @@ func TestLocalObserverServer_GetAgentEvents(t *testing.T) {
 		if i == 0 {
 			msg = monitorAPI.StartMessage(time.Unix(42, 1))
 		} else {
-			msg = monitorAPI.IPCacheUpsertedMessage(cidr, uint32(i), nil, net.ParseIP("10.1.5.4"), nil, 0xff, "default", "foobar")
+			msg = monitorAPI.IPCacheUpsertedMessage(cidr, uint32(i), nil, net.ParseIP("10.1.5.4"), nil, 0xff, "default", "foobar", 0)
 		}
 		m <- &observerTypes.MonitorEvent{
 			Timestamp: ts,

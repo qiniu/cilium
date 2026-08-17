@@ -192,3 +192,92 @@ ipcache_lookup4(const void *map, __be32 addr, __u32 prefix, __u32 cluster_id)
 	ipcache_lookup6(&cilium_ipcache_v2, addr, V6_CACHE_KEY_LEN, cluster_id)
 #define lookup_ip4_remote_endpoint(addr, cluster_id) \
 	ipcache_lookup4(&cilium_ipcache_v2, addr, V4_CACHE_KEY_LEN, cluster_id)
+
+/* Native-vpc VNI-scoped ipcache.
+ *
+ * Entries are keyed by (VNI, IP) so that overlapping IPs from different VPCs
+ * can coexist. It is only consulted by native-vpc endpoints
+ * (CONFIG(native_vpc_vni) > 0) to resolve the identity of a peer that is
+ * expected to live in the same VPC
+ * (the endpoint's own VNI). Must be kept in sync with
+ * pkg/maps/ipcache.VniKey.
+ *
+ * This is the "local ClusterID" split: upstream uses a cluster_id field in the
+ * ipcache key to disambiguate overlapping IPs across clusters; here the
+ * kube-ovn tunnel_key (VNI) plays that role for VPCs within one cluster. We
+ * deliberately do not reuse cluster_id semantics (VPC != ClusterMesh).
+ *
+ * Layout rule (same as struct ipcache_key): every non-IP field must precede
+ * the IP union, because IPCACHE_VNI_STATIC_PREFIX is derived from
+ * sizeof(key) - sizeof(lpm_key) - sizeof(v6addr) and is added to the IP prefix
+ * length. Padding placed *after* the IP would inflate the static prefix and
+ * make any entry shorter than a host prefix match only addresses whose
+ * remaining bytes are zero.
+ */
+struct ipcache_vni_key {
+	struct bpf_lpm_trie_key lpm_key;
+	__u32 vni;
+	__u8 pad1;
+	__u8 family;
+	/* pad2 rounds the non-IP part to 8 bytes so that the Go side
+	 * (pkg/maps/ipcache.VniKey, which cannot be packed) has the same layout
+	 * and the same 64-bit static prefix.
+	 */
+	__u8 pad2[2];
+	union {
+		struct {
+			__u32		ip4;
+			__u32		pad4;
+			__u32		pad5;
+			__u32		pad6;
+		};
+		union v6addr	ip6;
+	};
+} __packed;
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__type(key, struct ipcache_vni_key);
+	__type(value, struct remote_endpoint_info);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(max_entries, IPCACHE_MAP_SIZE);
+	__uint(map_flags, BPF_F_NO_PREALLOC | BPF_F_RDONLY_PROG_COND);
+} cilium_ipcache_vni __section_maps_btf;
+
+/* IPCACHE_VNI_STATIC_PREFIX is the number of key bits that precede the IP:
+ * vni + pad1 + family + pad2. It is derived the same way as
+ * IPCACHE_STATIC_PREFIX, which only holds because every non-IP field comes
+ * before the IP union (see the layout rule above).
+ */
+#define IPCACHE_VNI_STATIC_PREFIX					\
+	(8 * (sizeof(struct ipcache_vni_key) - sizeof(struct bpf_lpm_trie_key)	\
+	      - sizeof(union v6addr)))
+
+static __always_inline __maybe_unused const struct remote_endpoint_info *
+ipcache_lookup4_vni(const void *map, __be32 addr, __u32 prefix, __u32 vni)
+{
+	struct ipcache_vni_key key = {
+		.lpm_key = { IPCACHE_VNI_STATIC_PREFIX + prefix, {} },
+		.family = ENDPOINT_KEY_IPV4,
+		.ip4 = addr,
+	};
+
+	key.vni = vni;
+	key.ip4 &= GET_PREFIX(prefix);
+	return map_lookup_elem(map, &key);
+}
+
+static __always_inline __maybe_unused const struct remote_endpoint_info *
+ipcache_lookup6_vni(const void *map, const union v6addr *addr,
+		    __u32 prefix, __u32 vni)
+{
+	struct ipcache_vni_key key = {
+		.lpm_key = { IPCACHE_VNI_STATIC_PREFIX + prefix, {} },
+		.family = ENDPOINT_KEY_IPV6,
+		.ip6 = *addr,
+	};
+
+	key.vni = vni;
+	ipv6_addr_clear_suffix(&key.ip6, prefix);
+	return map_lookup_elem(map, &key);
+}

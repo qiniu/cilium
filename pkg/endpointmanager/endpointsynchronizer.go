@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 
 	"github.com/blang/semver/v4"
 	"github.com/cilium/hive/cell"
@@ -16,6 +18,7 @@ import (
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/cilium/cilium/pkg/annotation"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/k8s"
@@ -33,6 +36,19 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/time"
 )
+
+// ciliumEndpointVNIAnnotation is the annotation written on CiliumEndpoints to
+// carry the native-vpc VNI of the endpoint, so that CiliumEndpoint watchers on
+// other nodes can register the endpoint IP in the VNI-scoped ipcache.
+const ciliumEndpointVNIAnnotation = annotation.CiliumEndpointNativeVPCVNI
+
+// jsonPointerEscape escapes a JSON Patch path token per RFC 6901. The VNI
+// annotation key contains a '/' ("native-vpc.cilium.io/vni"), which would
+// otherwise be interpreted as a path separator and make the whole patch
+// (including the status replace) fail.
+func jsonPointerEscape(token string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(token, "~", "~0"), "/", "~1")
+}
 
 const (
 	// subsysEndpointSync is the value for logfields.LogSubsys
@@ -273,6 +289,9 @@ func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoin
 								// Mirror the labels of parent pod in CiliumEndpoint object to enable
 								// label based selection for CiliumEndpoints.
 								Labels: cepOwner.GetLabels(),
+								// Carry the native-vpc VNI so that CiliumEndpoint watchers on
+								// other nodes can register the IP in the VNI-scoped ipcache.
+								Annotations: ciliumEndpointVNIAnnotations(e),
 							},
 							Status: *mdl,
 						}
@@ -372,6 +391,27 @@ func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoin
 						Value: mdl,
 					},
 				}
+				// Backfill the native-vpc VNI annotation on pre-existing CEPs.
+				if vniAnnots := ciliumEndpointVNIAnnotations(e); len(vniAnnots) > 0 {
+					vniValue := vniAnnots[ciliumEndpointVNIAnnotation]
+					switch {
+					case localCEP == nil || localCEP.Annotations == nil:
+						// The annotations object does not exist (or is unknown):
+						// "add" on a missing parent member fails, so create the
+						// whole map. Nothing can be clobbered as it is empty.
+						replaceCEPStatus = append(replaceCEPStatus, k8s.JSONPatch{
+							OP:    "add",
+							Path:  "/metadata/annotations",
+							Value: vniAnnots,
+						})
+					case localCEP.Annotations[ciliumEndpointVNIAnnotation] != vniValue:
+						replaceCEPStatus = append(replaceCEPStatus, k8s.JSONPatch{
+							OP:    "add",
+							Path:  "/metadata/annotations/" + jsonPointerEscape(ciliumEndpointVNIAnnotation),
+							Value: vniValue,
+						})
+					}
+				}
 				var createStatusPatch []byte
 				createStatusPatch, err = json.Marshal(replaceCEPStatus)
 				if err != nil {
@@ -417,6 +457,16 @@ func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoin
 				return deleteCEP(ctx, scopedLog, ciliumClient, e)
 			},
 		})
+}
+
+// ciliumEndpointVNIAnnotations returns the annotations to write on the CEP of
+// the given endpoint to carry its native-vpc VNI. Returns an empty map when the
+// endpoint is not a native-vpc endpoint (VNI == 0).
+func ciliumEndpointVNIAnnotations(e *endpoint.Endpoint) map[string]string {
+	if vni := e.GetVNIID(); vni > 0 {
+		return map[string]string{ciliumEndpointVNIAnnotation: strconv.FormatUint(vni, 10)}
+	}
+	return nil
 }
 
 // updateCEPUID attempts to update the endpoints UID to be that of localCEP.

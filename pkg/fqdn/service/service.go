@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"maps"
 	"net"
 	"net/netip"
 	"strings"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/counter"
+	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/fqdn/dnsproxy"
 	"github.com/cilium/cilium/pkg/fqdn/messagehandler"
@@ -36,6 +38,22 @@ import (
 
 	pb "github.com/cilium/cilium/api/v1/standalone-dns-proxy"
 )
+
+func endpointVNI(lookup endpointmanager.EndpointsLookup, id uint64) uint64 {
+	for _, ep := range lookup.GetEndpoints() {
+		if uint64(ep.GetID()) == id {
+			return ep.GetVNIID()
+		}
+	}
+	return 0
+}
+
+func lookupEndpointWithVNI(lookup endpointmanager.EndpointsLookup, ip netip.Addr, vni uint32) *endpoint.Endpoint {
+	if vniLookup, ok := lookup.(endpointmanager.EndpointsLookupVNI); ok {
+		return vniLookup.LookupIPWithVNI(ip, uint64(vni))
+	}
+	return nil
+}
 
 // FQDNDataServer is the server for the standalone DNS proxy grpc server
 // It is responsible for handling the FQDN mapping requests from the SDP
@@ -125,6 +143,9 @@ var _ statedb.TableWritable = PolicyRules{}
 type identityToIPs struct {
 	Identity identity.NumericIdentity
 	IPs      part.Set[netip.Prefix]
+	// VNIs preserves the VNI alongside each prefix. A zero value denotes the
+	// non-VPC/plain namespace; non-zero values are required for exact lookup.
+	VNIs map[string]uint32
 }
 
 // TableHeader implements statedb.TableWritable.
@@ -276,6 +297,7 @@ func (s *FQDNDataServer) sendAndRecvAckForDNSPolicies(stream pb.FQDNData_StreamP
 	var identityToPrefixMapping []*pb.IdentityToPrefixMapping
 	// Process identity to IPs mappings - build both for quick lookup map and endpoint mappings
 	identityIPMap := make(map[identity.NumericIdentity][]netip.Prefix)
+	identityIPMapVNI := make(map[identity.NumericIdentity]map[string]uint32)
 
 	for identityIP := range identityToIPs {
 		var prefixes []netip.Prefix
@@ -285,7 +307,13 @@ func (s *FQDNDataServer) sendAndRecvAckForDNSPolicies(stream pb.FQDNData_StreamP
 			prefixes = append(prefixes, prefix)
 
 			ip := prefix.Addr()
-			ep := s.endpointsLookup.LookupIP(ip)
+			vni := identityIP.VNIs[prefix.String()]
+			var ep *endpoint.Endpoint
+			if vni > 0 {
+				ep = lookupEndpointWithVNI(s.endpointsLookup, ip, vni)
+			} else {
+				ep = endpointmanager.LookupIPUnambiguous(s.endpointsLookup, ip)
+			}
 			if ep != nil {
 				epID := uint64(ep.GetID())
 				endpointToIPsBytes[epID] = append(endpointToIPsBytes[epID], ip.AsSlice())
@@ -294,13 +322,15 @@ func (s *FQDNDataServer) sendAndRecvAckForDNSPolicies(stream pb.FQDNData_StreamP
 
 		// Store prefixes for DNS policy processing
 		identityIPMap[identityIP.Identity] = prefixes
+		identityIPMapVNI[identityIP.Identity] = identityIP.VNIs
 
 		// Create EndpointInfo structures to be sent to the client
 		var endpointInfos []*pb.EndpointInfo
 		for epID, ipBytes := range endpointToIPsBytes {
 			endpointInfo := &pb.EndpointInfo{
-				Id: epID,
-				Ip: ipBytes,
+				Id:  epID,
+				Ip:  ipBytes,
+				Vni: uint32(endpointVNI(s.endpointsLookup, epID)),
 			}
 			endpointInfos = append(endpointInfos, endpointInfo)
 		}
@@ -341,7 +371,13 @@ func (s *FQDNDataServer) sendAndRecvAckForDNSPolicies(stream pb.FQDNData_StreamP
 			// For each IP, find the corresponding endpoint and create DNS policy
 			for _, prefix := range epIPs {
 				ip := prefix.Addr()
-				ep := s.endpointsLookup.LookupIP(ip)
+				vni := identityIPMapVNI[rule.Identity][prefix.String()]
+				var ep *endpoint.Endpoint
+				if vni > 0 {
+					ep = lookupEndpointWithVNI(s.endpointsLookup, ip, vni)
+				} else {
+					ep = endpointmanager.LookupIPUnambiguous(s.endpointsLookup, ip)
+				}
 				if ep == nil {
 					// If the endpoint is not found, log a warning
 					s.log.Debug("Endpoint not found for IP", logfields.IPAddr, ip)
@@ -452,14 +488,17 @@ func (s *FQDNDataServer) OnIPIdentityCacheChange(modType ipcache.CacheModificati
 			newObj := identityToIPs{
 				Identity: newID.ID,
 				IPs:      part.NewSet(prefix),
+				VNIs:     map[string]uint32{prefix.String(): newID.Vni},
 			}
 			_, _, err := s.identityToIPsTable.Modify(txn, newObj, func(oldObj identityToIPs, newObj identityToIPs) identityToIPs {
 				// Update the existing record with the new IPs
 				newIPs := oldObj.IPs.Union(part.NewSet(prefix))
-				return identityToIPs{
-					Identity: oldObj.Identity,
-					IPs:      newIPs,
+				vnis := maps.Clone(oldObj.VNIs)
+				if vnis == nil {
+					vnis = map[string]uint32{}
 				}
+				vnis[prefix.String()] = newID.Vni
+				return identityToIPs{Identity: oldObj.Identity, IPs: newIPs, VNIs: vnis}
 			})
 			if err != nil {
 				s.log.Error("Failed to update identity to IP mapping", logfields.Error, err)
@@ -495,6 +534,8 @@ func (s *FQDNDataServer) deleteFromIdentityToIPLocked(txn statedb.WriteTxn, iden
 	}
 
 	newIPs := existing.IPs.Delete(prefix)
+	vnis := maps.Clone(existing.VNIs)
+	delete(vnis, prefix.String())
 	if existing.IPs.Has(prefix) {
 		// If the prefix was found, we need to remove it from the prefixLength
 		s.prefixLengths.Delete([]netip.Prefix{prefix})
@@ -511,6 +552,7 @@ func (s *FQDNDataServer) deleteFromIdentityToIPLocked(txn statedb.WriteTxn, iden
 		_, _, err := s.identityToIPsTable.Insert(txn, identityToIPs{
 			Identity: identity.ID,
 			IPs:      newIPs,
+			VNIs:     vnis,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to insert identity to IP mapping: %w", err)
@@ -686,7 +728,12 @@ func (s *FQDNDataServer) UpdateMappingRequest(ctx context.Context, mappings *pb.
 	}
 
 	endpointAddr := netip.MustParseAddr(string(sourceIP))
-	ep := s.endpointsLookup.LookupIP(endpointAddr)
+	var ep *endpoint.Endpoint
+	if mappings.GetVni() > 0 {
+		ep = lookupEndpointWithVNI(s.endpointsLookup, endpointAddr, mappings.GetVni())
+	} else {
+		ep = endpointmanager.LookupIPUnambiguous(s.endpointsLookup, endpointAddr)
+	}
 	if ep == nil {
 		s.log.Error("Endpoint not found for IP", logfields.IPAddr, endpointAddr)
 		return &pb.UpdateMappingResponse{

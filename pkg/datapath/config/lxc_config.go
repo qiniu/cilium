@@ -46,6 +46,8 @@ type BPFLXC struct {
 	NATIPv4Masquerade [4]byte `config:"nat_ipv4_masquerade"`
 	// Masquerade address for IPv6 traffic.
 	NATIPv6Masquerade [16]byte `config:"nat_ipv6_masquerade"`
+	// The endpoint's native-vpc VNI.
+	NativeVpcVni uint32 `config:"native_vpc_vni"`
 	// The log level for policy verdicts in workload endpoints.
 	PolicyVerdictLogFilter uint32 `config:"policy_verdict_log_filter"`
 	// Whether to redirect to the proxy via cilium_net (hairpin) or via stack.
@@ -64,5 +66,5 @@ func NewBPFLXC(node Node) *BPFLXC {
 		0x0, 0x0, 0x0, 0x0, [8]byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
 		[4]byte{0x0, 0x0, 0x0, 0x0},
 		[16]byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
-		0x0, false, 0x0, 0x0, node}
+		0x0, 0x0, false, 0x0, 0x0, node}
 }

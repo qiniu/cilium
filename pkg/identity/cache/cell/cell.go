@@ -5,6 +5,7 @@ package identitycachecell
 
 import (
 	"cmp"
+	"fmt"
 	"log/slog"
 	"net"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/logging"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
@@ -100,12 +102,52 @@ var defaultConfig = config{
 	IdentityAllocationSyncInterval: allocator.DefaultSyncInterval,
 }
 
+// nativeVPCIdentityModeError reports whether the configured identity
+// management mode is compatible with native-vpc. The VNI identity label is
+// computed by the agent from the pod's tunnel_key annotation; the operator's
+// CiliumIdentity controller derives identities from pod and namespace labels
+// only, so operator-managed CIDs would drop the VNI label and garbage collect
+// the agent's VNI-scoped identities, merging every VPC into one identity.
+func nativeVPCIdentityModeError(mode string) error {
+	if !option.Config.EnableNativeVPC {
+		return nil
+	}
+	switch mode {
+	case option.IdentityManagementModeOperator, option.IdentityManagementModeBoth:
+		return fmt.Errorf("native-vpc mode is incompatible with --%s=%s: identities must be managed by the agent so that the VNI identity label is preserved",
+			option.IdentityManagementMode, mode)
+	}
+	return nil
+}
+
 func newIdentityAllocator(params identityAllocatorParams) identityAllocatorOut {
 	// iao: updates SelectorCache and regenerates endpoints when
 	// identity allocation / deallocation has occurred.
 	iao := &identityAllocatorOwner{
 		IdentityUpdater: params.IDUpdater,
 		logger:          params.Log,
+	}
+
+	// Native-vpc: the identity of an endpoint carries its VNI label, which is
+	// derived from the pod's tunnel_key annotation by the *agent*. The
+	// operator's CiliumIdentity controller computes identities from pod and
+	// namespace labels only, so with operator-managed CIDs it would create
+	// identities without the VNI label, consider the agent's VNI-scoped
+	// identities unused and garbage collect them - merging all VPCs into one
+	// identity. Refuse to start instead.
+	//
+	// Checked unconditionally: the combination is invalid regardless of
+	// whether this agent currently enforces network policy, and the operator
+	// would act on the identities either way.
+	if err := nativeVPCIdentityModeError(params.Config.IdentityManagementMode); err != nil {
+		params.Log.Error(
+			"native-vpc mode requires agent-managed CiliumIdentities",
+			logfields.Error, err,
+			logfields.Value, params.Config.IdentityManagementMode,
+		)
+		params.Lifecycle.Append(cell.Hook{
+			OnStart: func(cell.HookContext) error { return err },
+		})
 	}
 
 	var idAlloc CachingIdentityAllocator

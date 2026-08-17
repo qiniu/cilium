@@ -38,6 +38,12 @@ type LoadTimeConfiguration interface {
 	GetIfIndex() int
 	GetEndpointNetNsCookie() uint64
 
+	// GetVNIID returns the native-vpc VNI of the endpoint. A zero value means
+	// the endpoint uses the native (non-VPC) scheme. This is load-time data:
+	// templates are shared across VNIs and the loader rewrites the per-endpoint
+	// .rodata.config value when loading bpf_lxc.
+	GetVNIID() uint64
+
 	// GetPolicyVerdictLogFilter returns the PolicyVerdictLogFilter for the endpoint
 	GetPolicyVerdictLogFilter() uint32
 

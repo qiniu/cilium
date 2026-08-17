@@ -15,6 +15,9 @@ import (
 	"strconv"
 	"strings"
 
+	cmcommon "github.com/cilium/cilium/pkg/clustermesh/common"
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
+
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/job"
@@ -1236,6 +1239,8 @@ type daemonConfigParams struct {
 	KPRInitializer  kprinitializer.KPRInitializer
 	IPSecConfig     datapath.IPsecConfig
 	WireguardConfig wgTypes.WireguardConfig
+	ClusterInfo     cmtypes.ClusterInfo
+	ClusterMesh     cmcommon.Config
 }
 
 type daemonParams struct {

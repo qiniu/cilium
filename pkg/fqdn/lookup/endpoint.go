@@ -14,19 +14,25 @@ import (
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/node"
+	"github.com/cilium/cilium/pkg/option"
 )
 
 type ProxyLookupHandler interface {
-	// LookupSecIDByIP looks up the security ID for a given IP address
-	// from the ipcache.
+	// LookupSecIDByIP looks up the security ID for a given IP address from the
+	// key-exact (bare-IP) ipcache entry.
 	LookupSecIDByIP(ip netip.Addr) (secID ipcache.Identity, exists bool)
+
+	// LookupSecIDByIPUnambiguous is the explicit best-effort exception used by
+	// the DNS proxy: if the bare-IP entry is absent it resolves a native-vpc
+	// VNI-scoped entry only when exactly one VPC uses the IP, and reports a
+	// miss under overlap rather than guessing a VPC.
+	LookupSecIDByIPUnambiguous(ip netip.Addr) (secID ipcache.Identity, exists bool)
 
 	// LookupByIdentity is a provided callback that returns the IPs of a given security ID.
 	LookupByIdentity(nid identity.NumericIdentity) []string
 
-	// LookupRegisteredEndpoint looks up the endpoint corresponding
-	// to a given IP address. It correctly handles *all* IPs belonging to the node, not just that
-	// of the node endpoint.
+	// LookupRegisteredEndpoint looks up non-VPC endpoints by bare IP. Native-VPC
+	// endpoints require VNI context and are intentionally unresolved here.
 	LookupRegisteredEndpoint(endpointAddr netip.Addr) (endpoint *endpoint.Endpoint, isHost bool, err error)
 }
 
@@ -39,7 +45,7 @@ type proxyLookupHandler struct {
 var _ ProxyLookupHandler = &proxyLookupHandler{}
 
 func (p *proxyLookupHandler) LookupRegisteredEndpoint(endpointAddr netip.Addr) (endpoint *endpoint.Endpoint, isHost bool, err error) {
-	if e := p.endpointManager.LookupIP(endpointAddr); e != nil {
+	if e := endpointmanager.LookupIPUnambiguous(p.endpointManager, endpointAddr); e != nil {
 		return e, e.IsHost(), nil
 	}
 
@@ -56,11 +62,34 @@ func (p *proxyLookupHandler) LookupRegisteredEndpoint(endpointAddr netip.Addr) (
 		}
 	}
 
-	return nil, false, fmt.Errorf("cannot find endpoint with IP %s", endpointAddr.String())
+	return nil, false, endpointLookupError(p.endpointManager, endpointAddr)
+}
+
+// endpointLookupError explains why an address could not be attributed to an
+// endpoint.
+//
+// The proxy is reached from the host namespace and has only the address of the
+// connection to work with. That is enough while an address belongs to one
+// endpoint, and it stops being enough the moment several VPCs use it: the
+// lookup then refuses to answer rather than picking one of them, and the query
+// is dropped. Saying which of the two situations it is turns a stream of
+// "cannot find endpoint" failures into something an operator can act on -
+// either the address really is unknown, or DNS policy cannot be applied to this
+// address at all.
+func endpointLookupError(mgr endpointmanager.EndpointManager, addr netip.Addr) error {
+	if option.Config.EnableNativeVPC && endpointmanager.LookupIPAnyVNI(mgr, addr) != nil {
+		return fmt.Errorf("cannot attribute IP %s to an endpoint: it is used by endpoints in more than one VPC, "+
+			"and the proxy sees only the address", addr)
+	}
+	return fmt.Errorf("cannot find endpoint with IP %s", addr)
 }
 
 func (p *proxyLookupHandler) LookupSecIDByIP(ip netip.Addr) (secID ipcache.Identity, exists bool) {
 	return p.ipCache.LookupSecIDByIP(ip)
+}
+
+func (p *proxyLookupHandler) LookupSecIDByIPUnambiguous(ip netip.Addr) (secID ipcache.Identity, exists bool) {
+	return p.ipCache.LookupSecIDByIPUnambiguous(ip)
 }
 
 func (p *proxyLookupHandler) LookupByIdentity(nid identity.NumericIdentity) []string {

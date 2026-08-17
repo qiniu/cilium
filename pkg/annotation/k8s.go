@@ -23,6 +23,21 @@ const (
 	// NetworkPrefix is the common prefix for network related annotations.
 	NetworkPrefix = "network.cilium.io"
 
+	// NativeVPCVNIPrefix is the prefix for the native-vpc VNI annotation written
+	// on CiliumEndpoints. The annotation carries the Virtual Network Identifier
+	// (VNI) of the endpoint so that CiliumEndpoint watchers on other nodes can
+	// register the endpoint IP in the VNI-scoped ipcache (overlapping IPs from
+	// different VPCs).
+	NativeVPCVNIPrefix = "native-vpc.cilium.io"
+
+	// CiliumEndpointNativeVPCVNI is the CiliumEndpoint annotation that carries
+	// the native-vpc VNI of the endpoint. It is written by the agent owning the
+	// endpoint (endpointsynchronizer) and read by the CiliumEndpoint watchers of
+	// the other nodes. It must be preserved by the CiliumEndpoint informer
+	// transform (see k8s.TransformToCiliumEndpoint), otherwise remote endpoints
+	// would be registered without a VNI.
+	CiliumEndpointNativeVPCVNI = NativeVPCVNIPrefix + "/vni"
+
 	// PolicyPrefix is the common prefix for policy related annotations.
 	PolicyPrefix = "policy.cilium.io"
 

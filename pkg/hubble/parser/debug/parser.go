@@ -93,6 +93,10 @@ func (p *Parser) decodeEndpoint(id uint16) *flowpb.Endpoint {
 				Namespace:   ep.GetK8sNamespace(),
 				Labels:      common.SortAndFilterLabels(p.log, labels.GetModel(), ep.GetIdentity()),
 				PodName:     ep.GetK8sPodName(),
+				// The endpoint is resolved by id, so its native-vpc VNI is
+				// exact: debug events of two VPCs sharing an IP stay
+				// distinguishable.
+				VniId: ep.GetVNIID(),
 			}
 		}
 	}

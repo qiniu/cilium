@@ -6,6 +6,7 @@ package api
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -44,6 +45,11 @@ const (
 	ContextWorkloadName
 	// ContextApp uses the pod's app label for identification.
 	ContextApp
+	// ContextVNI uses the native-vpc VNI (kube-ovn tunnel_key) of the endpoint
+	// for identification purposes. With overlapping VPC subnets the pod/IP
+	// contexts alone are ambiguous, so the VNI is what separates two flows
+	// that share an IP.
+	ContextVNI
 )
 
 // ContextOptionsHelp is the help text for context options
@@ -55,8 +61,8 @@ const ContextOptionsHelp = `
  destinationEgressContext  ::= identifier , { "|", identifier }
  destinationIngressContext ::= identifier , { "|", identifier }
  labels                    ::= label , { ",", label }
- identifier                ::= identity | namespace | pod | pod-name | dns | ip | reserved-identity | workload | workload-name | app
- label                     ::= source_ip | source_pod | source_namespace | source_workload | source_workload_kind | source_app | destination_ip | destination_pod | destination_namespace | destination_workload | destination_workload_kind | destination_app | traffic_direction
+ identifier                ::= identity | namespace | pod | pod-name | dns | ip | reserved-identity | workload | workload-name | app | vni
+ label                     ::= source_ip | source_pod | source_namespace | source_workload | source_workload_kind | source_app | source_vni | destination_ip | destination_pod | destination_namespace | destination_workload | destination_workload_kind | destination_app | destination_vni | traffic_direction
 `
 
 var (
@@ -70,12 +76,14 @@ var (
 		"source_workload",
 		"source_workload_kind",
 		"source_app",
+		"source_vni",
 		"destination_ip",
 		"destination_pod",
 		"destination_namespace",
 		"destination_workload",
 		"destination_workload_kind",
 		"destination_app",
+		"destination_vni",
 		"traffic_direction",
 	}
 	allowedContextLabels = newLabelsSet(contextLabelsList)
@@ -114,6 +122,8 @@ func (c ContextIdentifier) String() string {
 		return "workload-name"
 	case ContextApp:
 		return "app"
+	case ContextVNI:
+		return "vni"
 	}
 	return fmt.Sprintf("%d", c)
 }
@@ -176,6 +186,8 @@ func parseContextIdentifier(s string) (ContextIdentifier, error) {
 		return ContextWorkloadName, nil
 	case "app":
 		return ContextApp, nil
+	case "vni":
+		return ContextVNI, nil
 	default:
 		return ContextDisabled, fmt.Errorf("unknown context '%s'", s)
 	}
@@ -318,6 +330,8 @@ func labelsContext(invertSourceDestination bool, wantedLabels labelsSet, flow *p
 				}
 			case "source_app":
 				labelValue = getK8sAppFromLabels(source.GetLabels())
+			case "source_vni":
+				labelValue = vniLabelValue(source)
 			case "destination_ip":
 				labelValue = destinationIp
 			case "destination_pod":
@@ -334,6 +348,8 @@ func labelsContext(invertSourceDestination bool, wantedLabels labelsSet, flow *p
 				}
 			case "destination_app":
 				labelValue = getK8sAppFromLabels(destination.GetLabels())
+			case "destination_vni":
+				labelValue = vniLabelValue(destination)
 			case "traffic_direction":
 				direction := flow.GetTrafficDirection()
 				if direction == pb.TrafficDirection_TRAFFIC_DIRECTION_UNKNOWN {
@@ -498,8 +514,20 @@ func getContextIDLabelValue(contextID ContextIdentifier, flow *pb.Flow, source b
 		}
 	case ContextApp:
 		labelValue = getK8sAppFromLabels(ep.GetLabels())
+	case ContextVNI:
+		labelValue = vniLabelValue(ep)
 	}
 	return labelValue
+}
+
+// vniLabelValue returns the native-vpc VNI of the endpoint as a metric label
+// value, or "" for non-VPC endpoints (nodes, host, world, non-OVN pods) so
+// that the next context identifier in a "a|b" list is used instead.
+func vniLabelValue(ep *pb.Endpoint) string {
+	if vni := ep.GetVniId(); vni != 0 {
+		return strconv.FormatUint(vni, 10)
+	}
+	return ""
 }
 
 // GetLabelNames returns a slice of label names required to fulfil the

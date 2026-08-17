@@ -1010,9 +1010,12 @@ func (e *Endpoint) FormatGlobalEndpointID() string {
 }
 
 // This synchronizes the key-value store with a mapping of the endpoint's IP
-// with the numerical ID representing its security identity.
+// with the numerical ID representing its security identity. When no kvstore is
+// configured, the mapping is registered directly in the local ipcache instead
+// (see IPIdentitySynchronizer.Upsert), so local endpoints are always
+// resolvable by the datapath.
 func (e *Endpoint) runIPIdentitySync(endpointIP netip.Addr) {
-	if !e.kvstoreSyncher.IsEnabled() || !endpointIP.IsValid() {
+	if !endpointIP.IsValid() {
 		return
 	}
 
@@ -1028,6 +1031,12 @@ func (e *Endpoint) runIPIdentitySync(endpointIP netip.Addr) {
 	if endpointIP.Is6() {
 		addressFamily = "IPv6"
 	}
+
+	// Capture the VNI used by this controller instance. UpdateController
+	// replaces the old controller when VNI/identity changes; the old StopFunc
+	// must delete the exact key its DoFunc wrote (e.g. <ip>@vni:N), rather than
+	// re-reading a newer e.VNIID and leaking the old kvstore/tracker entry.
+	vni := e.VNIID
 
 	e.controllers.UpdateController(
 		fmt.Sprintf("sync-%s-identity-mapping (%d)", addressFamily, e.ID),
@@ -1074,6 +1083,8 @@ func (e *Endpoint) runIPIdentitySync(endpointIP netip.Addr) {
 					K8sPodName:        k8sPodName,
 					K8sServiceAccount: k8sServiceAccount,
 					NPM:               e.GetK8sPorts(),
+					Vni:               vni,
+					EndpointID:        e.ID,
 				}
 
 				if err := e.kvstoreSyncher.Upsert(ctx, params); err != nil {
@@ -1083,7 +1094,11 @@ func (e *Endpoint) runIPIdentitySync(endpointIP netip.Addr) {
 			},
 			StopFunc: func(ctx context.Context) error {
 				ip := endpointIP.String()
-				if err := e.kvstoreSyncher.Delete(ctx, ip); err != nil {
+				// The address outlives this endpoint: once it is free another
+				// pod can be given it, and that pod's endpoint registers the
+				// same (VNI, IP). Name the pod this entry belongs to so the
+				// removal cannot take the new owner's entry with it.
+				if err := e.kvstoreSyncher.Delete(ctx, ip, vni, e.K8sNamespace, e.K8sPodName, e.ID); err != nil {
 					return fmt.Errorf("unable to delete endpoint IP '%s' from ipcache: %w", ip, err)
 				}
 				return nil

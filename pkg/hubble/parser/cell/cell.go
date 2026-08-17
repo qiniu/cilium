@@ -106,6 +106,18 @@ type payloadGetters struct {
 	frontends         statedb.Table[*loadbalancer.Frontend]
 }
 
+// The native-vpc (VNI, IP) resolution of the Hubble parsers is reached through
+// optional interfaces: a parser that does not find them silently degrades to
+// bare-IP lookups, which is exactly what native-vpc must never do. Assert the
+// production getters implement them so that a rename cannot disable the whole
+// observability chain unnoticed.
+var (
+	_ hubbleGetters.EndpointGetter      = (*payloadGetters)(nil)
+	_ hubbleGetters.EndpointGetterVNI   = (*payloadGetters)(nil)
+	_ hubbleGetters.EndpointGetterByPod = (*payloadGetters)(nil)
+	_ hubbleGetters.IPGetter            = (*ipcache.IPCache)(nil)
+)
+
 // GetIdentity implements IdentityGetter. It looks up identity by ID from
 // Cilium's identity cache. Hubble uses the identity info to populate flow
 // source and destination labels.
@@ -124,7 +136,25 @@ func (h *payloadGetters) GetEndpointInfo(ip netip.Addr) (endpoint hubbleGetters.
 	if !ip.IsValid() {
 		return nil, false
 	}
-	ep := h.endpointManager.LookupIP(ip)
+	ep := endpointmanager.LookupIPUnambiguous(h.endpointManager, ip)
+	if ep == nil {
+		return nil, false
+	}
+	return ep, true
+}
+
+// GetEndpointInfoForVNI implements the exact native-vpc endpoint lookup. A zero
+// VNI is the plain (non-VPC) scope and resolves only endpoints that are not in
+// any VPC; both forms are key-exact and never guess a VNI from a bare IP.
+func (h *payloadGetters) GetEndpointInfoForVNI(ip netip.Addr, vni uint32) (endpoint hubbleGetters.EndpointInfo, ok bool) {
+	if !ip.IsValid() {
+		return nil, false
+	}
+	vniLookup, supported := h.endpointManager.(endpointmanager.EndpointsLookupVNI)
+	if !supported {
+		return nil, false
+	}
+	ep := vniLookup.LookupIPWithVNI(ip, uint64(vni))
 	if ep == nil {
 		return nil, false
 	}
@@ -139,6 +169,22 @@ func (h *payloadGetters) GetEndpointInfoByID(id uint16) (endpoint hubbleGetters.
 		return nil, false
 	}
 	return ep, true
+}
+
+// GetEndpointInfoByPod implements EndpointGetterByPod. It resolves the local
+// endpoint of a pod (an exact context, e.g. derived from a cgroup id), which
+// is what gives socket-level events their native-vpc VNI without any bare-IP
+// lookup. A pod with several endpoints (which does not happen for the local
+// pod of a socket event) is reported as unresolved rather than guessed.
+func (h *payloadGetters) GetEndpointInfoByPod(namespace, name string) (endpoint hubbleGetters.EndpointInfo, ok bool) {
+	if namespace == "" || name == "" {
+		return nil, false
+	}
+	eps := h.endpointManager.GetEndpointsByPodName(namespace + "/" + name)
+	if len(eps) != 1 {
+		return nil, false
+	}
+	return eps[0], true
 }
 
 // GetNamesOf implements DNSGetter.GetNamesOf. It looks up DNS names of a given

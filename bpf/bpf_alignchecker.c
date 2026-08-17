@@ -33,6 +33,7 @@ add_type(struct ct_entry);
 add_type(struct endpoint_key);
 add_type(struct endpoint_info);
 add_type(struct ipcache_key);
+add_type(struct ipcache_vni_key);
 add_type(struct remote_endpoint_info);
 
 #include "lib/lb.h"

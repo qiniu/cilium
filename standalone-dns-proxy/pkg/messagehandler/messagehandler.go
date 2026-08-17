@@ -55,6 +55,7 @@ func (m *messageHandler) NotifyOnDNSMsg(lookupTime time.Time, ep *endpoint.Endpo
 		Ttl:            TTL,
 		SourceIp:       []byte(sourceIp),
 		SourceIdentity: uint32(sourceIdentity.ID),
+		Vni:            uint32(ep.GetVNIID()),
 		ResponseCode:   uint32(rcode),
 	}
 	return m.ConnHandler.NotifyOnMsg(message)

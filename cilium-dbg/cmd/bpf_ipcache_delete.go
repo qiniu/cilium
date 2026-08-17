@@ -12,13 +12,13 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cilium/cilium/pkg/common"
-	"github.com/cilium/cilium/pkg/maps/ipcache"
 )
 
 func init() {
 	BPFIPCacheCmd.AddCommand(bpfIPCacheDeleteCmd)
 
 	bpfIPCacheDeleteCmd.PersistentFlags().Uint16("clusterid", 0, "Cluster ID")
+	bpfIPCacheDeleteCmd.PersistentFlags().Uint32("vni", 0, "native-vpc VNI of the entry (0 = the unscoped ipcache)")
 }
 
 var bpfIPCacheDeleteCmd = &cobra.Command{
@@ -46,8 +46,8 @@ var bpfIPCacheDeleteCmd = &cobra.Command{
 
 		ip := net.IP(prefix.Addr().AsSlice())
 		mask := net.CIDRMask(prefix.Bits(), 32)
-		key := ipcache.NewKey(ip, mask, clusterID)
-		if err := ipcache.IPCacheMap(nil).Delete(&key); err != nil {
+		m, key := ipcacheScope(cmd, ip, mask, clusterID)
+		if err := m.Delete(key); err != nil {
 			fmt.Fprintf(os.Stderr, "Error deleting entry %s: %v\n", key, err)
 			os.Exit(1)
 		}

@@ -37,6 +37,11 @@ var Cell = cell.Module(
 
 	cell.Provide(
 		newIPCache,
+		// The local-ipcache fallback of the identity synchronizer takes an
+		// interface: hive can only build it if a constructor returns it, so
+		// provide the adapter explicitly. Without this the whole agent object
+		// graph fails with "missing type: ipcache.LocalIPCache".
+		func(ipc *ipcache.IPCache) ipcache.LocalIPCache { return ipc },
 		ipcache.NewLocalIPIdentityWatcher,
 		ipcache.NewIPIdentitySynchronizer,
 		newIPCacheAPIHandler,
@@ -117,6 +122,14 @@ func newIPCache(params ipCacheParams) *ipcache.IPCache {
 			// are re-allocated on startup.
 			if err := ipcachemap.IPCacheMap(params.MetricsRegistry).Recreate(); err != nil {
 				return fmt.Errorf("initializing ipcache map: %w", err)
+			}
+
+			// In native-vpc mode also (re)create the VNI-scoped ipcache map so
+			// that bpf programs referencing cilium_ipcache_vni can be loaded.
+			if option.Config.EnableNativeVPC {
+				if err := ipcachemap.IPCacheVniMap(params.MetricsRegistry).Recreate(); err != nil {
+					return fmt.Errorf("initializing native-vpc ipcache map: %w", err)
+				}
 			}
 
 			return nil

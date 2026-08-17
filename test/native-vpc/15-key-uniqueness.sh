@@ -1,0 +1,314 @@
+#!/usr/bin/env bash
+# 15 - (VNI, IP) is the key, on every plane that can be observed.
+#
+# The premise is that a pod's VNI and IP are fixed for the whole life of its CNI
+# attachment. What has to hold then is narrow and checkable:
+#
+#   after CNI ADD  - the pod owns exactly one resource per plane, under its own
+#                    (VNI, IP), and it collides with nothing that the pods with
+#                    the same address in the other VPCs own;
+#   after CNI DEL  - exactly that pod's resources are gone and every other VPC's
+#                    resources on the same address are untouched.
+#
+# The fixture is built for this: three VPCs whose subnets share one CIDR, with a
+# client and a server on the same two addresses in each. Any place that keys by
+# address alone therefore holds one entry where there should be three - or three
+# endpoints' worth of state where there should be one.
+#
+# Planes with no observable state (conntrack, service, encryption/egress) are
+# covered by the startup rejections in 50-datapath.sh instead.
+
+set -uo pipefail
+cd "$(dirname "$0")" && source ./lib.sh
+
+# vni_of <vpc> - the VNI of a VPC, read from a pod that lives in it
+declare -A VNI
+for vpc in "${VPCS[@]}"; do VNI[$vpc]=$(pod_vni "$vpc" server); done
+
+# --- helpers, one per observable plane -------------------------------------
+
+# cache: userspace ipcache, scoped keys only
+cache_keys() { cilium_exec cilium-dbg ip list | awk -v ip="$1/32" '$1 ~ "^"ip"(@|$)" {print $1}' | sort; }
+
+# forwarding: the VNI-scoped BPF ipcache
+fwd_keys() { cilium_exec cilium-dbg bpf ipcache list | awk -v ip="$1/32" '$1 ~ "^"ip"(@|$)" {print $1}' | sort; }
+
+# forwarding: the address-keyed endpoint map, which must not describe VPC pods
+endpoint_map_rows() { cilium_exec cilium-dbg bpf endpoint list | grep -c "^$1:" ; }
+
+# control: endpoints known to the agent for this address
+control_ids() {
+  cilium_exec cilium-dbg endpoint list -o json | python3 -c "
+import json,sys
+ids=[]
+for e in json.load(sys.stdin):
+    st=e.get('status',{})
+    for a in (st.get('networking',{}) or {}).get('addressing',[]) or []:
+        if a.get('ipv4')=='$1': ids.append(e['id'])
+print(' '.join(str(i) for i in sorted(ids)))
+"
+}
+
+# policy: identities in use for this address, one per VPC
+identities_for() {
+  cilium_exec cilium-dbg bpf ipcache list | awk -v ip="$1/32" '$1 ~ "^"ip"@vni:" {print $2}' | sed 's/identity=//' | sort -n | tr '\n' ' ' | sed 's/ $//'
+}
+
+log "topology: three VPCs, one CIDR, the same two addresses in each"
+for vpc in "${VPCS[@]}"; do info "${vpc}: vni=${VNI[$vpc]} client=${CLIENT_IP} server=${SERVER_IP}"; done
+
+# --- after CNI ADD ---------------------------------------------------------
+
+log "cache plane: one key per VPC, and every key carries its scope"
+for ip in "$CLIENT_IP" "$SERVER_IP"; do
+  keys=$(cache_keys "$ip")
+  n=$(echo "$keys" | grep -c .)
+  assert_eq "3" "$n" "${ip}: three scoped ipcache keys"
+  unscoped=$(echo "$keys" | grep -cv "@vni:")
+  assert_eq "0" "${unscoped:-x}" "${ip}: no key without a scope"
+  for vpc in "${VPCS[@]}"; do
+    echo "$keys" | grep -q "@vni:${VNI[$vpc]}$" \
+      && pass "${ip}: ${vpc} owns ${ip}@vni:${VNI[$vpc]}" \
+      || fail "${ip}: no key for ${vpc} (vni ${VNI[$vpc]})"
+  done
+done
+
+log "forwarding plane: the datapath sees the same three, and nothing bare"
+for ip in "$CLIENT_IP" "$SERVER_IP"; do
+  n=$(fwd_keys "$ip" | grep -c "@vni:")
+  assert_eq "3" "$n" "${ip}: three scoped BPF ipcache entries"
+  bare=$(fwd_keys "$ip" | grep -cv "@vni:")
+  assert_eq "0" "${bare:-x}" "${ip}: nothing in the unscoped ipcache"
+done
+
+log "forwarding plane: the address-keyed endpoint map describes no VPC pod"
+# cilium_lxc has no room for a scope in its key, so an entry for a shared
+# address could only answer for whichever endpoint wrote last.
+for ip in "$CLIENT_IP" "$SERVER_IP"; do
+  assert_eq "0" "$(endpoint_map_rows "$ip")" "${ip}: no entry in the endpoint map"
+done
+
+log "control plane: three endpoints share the address, each addressable"
+for ip in "$CLIENT_IP" "$SERVER_IP"; do
+  ids=$(control_ids "$ip")
+  n=$(echo "$ids" | wc -w)
+  assert_eq "3" "$n" "${ip}: three endpoints (ids: ${ids})"
+done
+
+log "policy plane: three distinct identities on one address"
+for ip in "$CLIENT_IP" "$SERVER_IP"; do
+  ids=$(identities_for "$ip")
+  uniq_n=$(echo "$ids" | tr ' ' '\n' | sort -u | grep -c .)
+  assert_eq "3" "$uniq_n" "${ip}: identities are distinct per VPC (${ids})"
+done
+
+# --- after CNI DEL ---------------------------------------------------------
+
+VICTIM=vpc-b
+VICTIM_VNI=${VNI[$VICTIM]}
+
+make_victim_server() {
+  kubectl apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: server
+  namespace: ${VICTIM}
+  labels: {app: server, vni-test: "true"}
+  annotations:
+    ovn.kubernetes.io/ip_address: "${SERVER_IP}"
+    ovn.kubernetes.io/logical_switch: subnet-${VICTIM}
+spec:
+  containers:
+  - name: c
+    image: docker.io/library/busybox:1.36
+    imagePullPolicy: IfNotPresent
+    command: ["sh","-c"]
+    args:
+    - |
+      mkdir -p /www && echo "hello from ${VICTIM}" > /www/index.html
+      httpd -p ${PORT_ALLOWED} -h /www
+      httpd -p ${PORT_DENIED} -h /www
+      sleep infinity
+YAML
+  kubectl -n "$VICTIM" wait --for=condition=Ready pod/server --timeout=120s >/dev/null 2>&1
+  sleep 8
+}
+
+log "deleting ${VICTIM}/server removes its resources and only its own"
+
+before_cache=$(cache_keys "$SERVER_IP" | grep -c .)
+kubectl -n "$VICTIM" delete pod server --wait=true >/dev/null 2>&1
+sleep 8
+
+after=$(cache_keys "$SERVER_IP")
+assert_eq "$((before_cache - 1))" "$(echo "$after" | grep -c .)" \
+  "one ipcache key fewer"
+echo "$after" | grep -q "@vni:${VICTIM_VNI}$" \
+  && fail "the deleted pod's key ${SERVER_IP}@vni:${VICTIM_VNI} survived" \
+  || pass "the deleted pod's key is gone"
+for vpc in vpc-a vpc-c; do
+  echo "$after" | grep -q "@vni:${VNI[$vpc]}$" \
+    && pass "${vpc} still owns ${SERVER_IP}@vni:${VNI[$vpc]}" \
+    || fail "${vpc} lost its key when ${VICTIM} was deleted"
+done
+
+fwd_after=$(fwd_keys "$SERVER_IP")
+assert_eq "2" "$(echo "$fwd_after" | grep -c '@vni:')" "two scoped datapath entries remain"
+echo "$fwd_after" | grep -q "@vni:${VICTIM_VNI}$" \
+  && fail "the datapath entry of the deleted pod survived" \
+  || pass "the datapath entry of the deleted pod is gone"
+
+assert_eq "2" "$(control_ids "$SERVER_IP" | wc -w)" "two endpoints remain on the address"
+
+log "the survivors still work"
+# The point of the previous checks is this one: deleting a pod in one VPC must
+# not disturb the pod that owns the same address in another VPC.
+res=$(try_connect vpc-c client "$SERVER_IP" "$PORT_ALLOWED")
+assert_eq "open" "$res" "vpc-c still reaches its own server on ${SERVER_IP}"
+
+log "recreating it restores exactly one key, in its own VPC"
+make_victim_server
+
+restored=$(cache_keys "$SERVER_IP")
+assert_eq "3" "$(echo "$restored" | grep -c .)" "three keys again"
+echo "$restored" | grep -q "@vni:${VICTIM_VNI}$" \
+  && pass "${VICTIM} owns ${SERVER_IP}@vni:${VICTIM_VNI} again" \
+  || fail "${VICTIM} did not get its key back"
+assert_eq "0" "$(endpoint_map_rows "$SERVER_IP")" "still no entry in the endpoint map"
+
+log "a CNI DEL that happens while the agent is down is still reconciled"
+# The agent is the only thing that removes an entry, so the interesting case is
+# the one where it is not running when the pod goes away: on startup it must end
+# up with the keys of the pods that exist, which means removing the one that
+# does not - and only that one, while two other VPCs still use the address.
+agent_stop() {
+  kubectl -n "$CILIUM_NS" patch ds cilium --type=merge \
+    -p '{"spec":{"template":{"spec":{"nodeSelector":{"native-vpc-e2e/absent":"true"}}}}}' >/dev/null 2>&1
+  for _ in $(seq 60); do
+    [[ "$(kubectl -n "$CILIUM_NS" get pods -l k8s-app=cilium --no-headers 2>/dev/null | wc -l)" == "0" ]] && return 0
+    sleep 2
+  done
+  return 1
+}
+agent_start() {
+  kubectl -n "$CILIUM_NS" patch ds cilium --type=json \
+    -p '[{"op":"remove","path":"/spec/template/spec/nodeSelector/native-vpc-e2e~1absent"}]' >/dev/null 2>&1
+  kubectl -n "$CILIUM_NS" rollout status ds/cilium --timeout=300s >/dev/null 2>&1
+  sleep 15
+}
+
+if agent_stop; then
+  pass "the agent is stopped"
+  kubectl -n "$VICTIM" delete pod server --wait=true --timeout=120s >/dev/null 2>&1
+  info "deleted ${VICTIM}/server with no agent running"
+  agent_start
+
+  after_down=$(fwd_keys "$SERVER_IP")
+  echo "$after_down" | grep -q "@vni:${VICTIM_VNI}$" \
+    && fail "the key of the pod deleted during the outage survived the restart" \
+    || pass "the key of the pod deleted during the outage is gone"
+  for vpc in vpc-a vpc-c; do
+    echo "$after_down" | grep -q "@vni:${VNI[$vpc]}$" \
+      && pass "${vpc} kept ${SERVER_IP}@vni:${VNI[$vpc]} across the outage" \
+      || fail "${vpc} lost its key across the outage"
+  done
+  assert_eq "0" "$(endpoint_map_rows "$SERVER_IP")" "still nothing in the endpoint map"
+
+  make_victim_server
+  assert_eq "3" "$(cache_keys "$SERVER_IP" | grep -c .)" "the fixture is whole again"
+else
+  fail "could not stop the agent for the outage check"
+fi
+
+log "a pod that comes back keeps its own mapping"
+# Two shapes of restart, with different consequences. A container that restarts
+# in place keeps its sandbox, so no CNI call happens and nothing may move. A pod
+# that is recreated goes through CNI DEL and ADD, and because Cilium's teardown
+# outlives the DEL, the previous endpoint's removal can arrive after the new one
+# has registered the same (VNI, IP) - the entry that survives must be the new
+# one's.
+RESTART_NS=vpc-b
+before_restart=$(fwd_keys "$SERVER_IP")
+cid=$(crictl ps -o json 2>/dev/null | python3 -c "
+import json,sys
+for c in json.load(sys.stdin).get('containers',[]):
+    l=c.get('labels',{})
+    if l.get('io.kubernetes.pod.namespace')=='${RESTART_NS}' and l.get('io.kubernetes.pod.name')=='server':
+        print(c['id']); break
+" 2>/dev/null)
+if [[ -n "$cid" ]]; then
+  crictl stop "$cid" >/dev/null 2>&1
+  for _ in $(seq 30); do
+    [[ "$(kubectl -n "$RESTART_NS" get pod server -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)" != "0" ]] && break
+    sleep 2
+  done
+  sleep 5
+  assert_eq "$(kubectl -n "$RESTART_NS" get pod server -o jsonpath='{.status.podIP}')" "$SERVER_IP" \
+    "the restarted container keeps its address"
+  assert_eq "$before_restart" "$(fwd_keys "$SERVER_IP")" \
+    "an in-place container restart moves nothing"
+else
+  warn "container of ${RESTART_NS}/server not found, skipping the in-place restart check"
+fi
+
+# Recreate under the same name on the same address: namespace, name, address and
+# VNI are all unchanged, so only the endpoint tells the two apart.
+ep_before=$(control_ids "$SERVER_IP")
+kubectl -n "$VICTIM" delete pod server --wait=true --timeout=120s >/dev/null 2>&1
+make_victim_server
+ep_after=$(control_ids "$SERVER_IP")
+assert_eq "3" "$(cache_keys "$SERVER_IP" | grep -c .)" "the address is back in three VPCs"
+fwd_keys "$SERVER_IP" | grep -q "@vni:${VICTIM_VNI}$" \
+  && pass "the recreated pod owns ${SERVER_IP}@vni:${VICTIM_VNI}" \
+  || fail "the recreated pod has no entry: a late teardown removed it"
+[[ "$ep_before" != "$ep_after" ]] \
+  && pass "it is a different endpoint (${ep_before} -> ${ep_after})" \
+  || fail "the endpoint did not change, so the check proves nothing"
+
+log "the host stack holds no resource keyed by a shared address"
+# A per-endpoint route is a kernel route to the address, and the routing table
+# has no notion of a VPC: the pods sharing an address would install one route
+# between them. The mode that installs those routes is refused at startup, and
+# this is what that refusal is worth on the node.
+for ip in "$CLIENT_IP" "$SERVER_IP"; do
+  n=$(ip route show 2>/dev/null | grep -cE "^${ip} |^${ip}/32 ")
+  assert_eq "0" "${n:-x}" "${ip}: no host route to the shared address"
+done
+epr=$(kubectl -n "$CILIUM_NS" get cm cilium-config -o jsonpath='{.data.enable-endpoint-routes}' 2>/dev/null)
+assert_eq "" "${epr}" "per-endpoint routes are not enabled (the agent would refuse to start)"
+
+log "the operator interface acts on the scope it is given, and nothing else"
+# "cilium bpf ipcache delete <addr>" used to act on the unscoped map only: it
+# reported success while removing nothing, and its update twin would have put a
+# pod address into the space the datapath falls back to when a scoped lookup
+# misses. Both now require the scope to be stated.
+#
+# The check runs against a VPC the fixture does not use, so it can create and
+# remove an entry for an address that three real endpoints share without ever
+# touching what those endpoints own.
+SPARE_VNI=4094
+before=$(fwd_keys "$SERVER_IP" | grep -c "@vni:")
+before_ids=$(identities_for "$SERVER_IP")
+
+unscoped=$(kubectl -n "$CILIUM_NS" exec "$(cilium_pod)" -c cilium-agent -- \
+  cilium-dbg bpf ipcache delete "${SERVER_IP}/32" 2>&1; true)
+echo "$unscoped" | grep -qi "state the scope" \
+  && pass "an unscoped delete is refused and says what to do instead" \
+  || fail "an unscoped delete was accepted: ${unscoped}"
+
+cilium_exec cilium-dbg bpf ipcache update "${SERVER_IP}/32" --vni "$SPARE_VNI" --identity 4242 --tunnelendpoint 0.0.0.0 >/dev/null 2>&1
+sleep 1
+assert_eq "$((before + 1))" "$(fwd_keys "$SERVER_IP" | grep -c '@vni:')" \
+  "a scoped create adds exactly one entry"
+assert_eq "$before_ids" "$(identities_for "$SERVER_IP" | sed "s/4242//" | xargs)" \
+  "the entries of the real VPCs are untouched"
+
+cilium_exec cilium-dbg bpf ipcache delete "${SERVER_IP}/32" --vni "$SPARE_VNI" >/dev/null 2>&1
+sleep 1
+assert_eq "0" "$(fwd_keys "$SERVER_IP" | grep -c "@vni:${SPARE_VNI}$")" \
+  "a scoped delete removes exactly that entry"
+assert_eq "$before" "$(fwd_keys "$SERVER_IP" | grep -c '@vni:')" "the fixture is back as it was"
+assert_eq "$before_ids" "$(identities_for "$SERVER_IP")" "with the same identities"
+
+summary

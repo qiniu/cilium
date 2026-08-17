@@ -13,6 +13,9 @@ type ProxyUpdaterMock struct {
 	Id   uint64
 	Ipv4 string
 	Ipv6 string
+	// VNIID is the native-vpc scope; zero means the endpoint is not in a VPC,
+	// which is what the existing tests exercise.
+	VNIID uint64
 }
 
 func (m *ProxyUpdaterMock) GetPolicyNames() []string {
@@ -27,7 +30,8 @@ func (m *ProxyUpdaterMock) GetPolicyNames() []string {
 	return res
 }
 
-func (m *ProxyUpdaterMock) GetID() uint64 { return m.Id }
+func (m *ProxyUpdaterMock) GetID() uint64    { return m.Id }
+func (m *ProxyUpdaterMock) GetVNIID() uint64 { return m.VNIID }
 
 func (m *ProxyUpdaterMock) GetIPv4Address() string { return m.Ipv4 }
 

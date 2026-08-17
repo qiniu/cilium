@@ -4866,15 +4866,19 @@ func (x *EndpointUpdateNotification) GetNamespace() string {
 }
 
 type IPCacheNotification struct {
-	state         protoimpl.MessageState  `protogen:"open.v1"`
-	Cidr          string                  `protobuf:"bytes,1,opt,name=cidr,proto3" json:"cidr,omitempty"`
-	Identity      uint32                  `protobuf:"varint,2,opt,name=identity,proto3" json:"identity,omitempty"`
-	OldIdentity   *wrapperspb.UInt32Value `protobuf:"bytes,3,opt,name=old_identity,json=oldIdentity,proto3" json:"old_identity,omitempty"`
-	HostIp        string                  `protobuf:"bytes,4,opt,name=host_ip,json=hostIp,proto3" json:"host_ip,omitempty"`
-	OldHostIp     string                  `protobuf:"bytes,5,opt,name=old_host_ip,json=oldHostIp,proto3" json:"old_host_ip,omitempty"`
-	EncryptKey    uint32                  `protobuf:"varint,6,opt,name=encrypt_key,json=encryptKey,proto3" json:"encrypt_key,omitempty"`
-	Namespace     string                  `protobuf:"bytes,7,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	PodName       string                  `protobuf:"bytes,8,opt,name=pod_name,json=podName,proto3" json:"pod_name,omitempty"`
+	state       protoimpl.MessageState  `protogen:"open.v1"`
+	Cidr        string                  `protobuf:"bytes,1,opt,name=cidr,proto3" json:"cidr,omitempty"`
+	Identity    uint32                  `protobuf:"varint,2,opt,name=identity,proto3" json:"identity,omitempty"`
+	OldIdentity *wrapperspb.UInt32Value `protobuf:"bytes,3,opt,name=old_identity,json=oldIdentity,proto3" json:"old_identity,omitempty"`
+	HostIp      string                  `protobuf:"bytes,4,opt,name=host_ip,json=hostIp,proto3" json:"host_ip,omitempty"`
+	OldHostIp   string                  `protobuf:"bytes,5,opt,name=old_host_ip,json=oldHostIp,proto3" json:"old_host_ip,omitempty"`
+	EncryptKey  uint32                  `protobuf:"varint,6,opt,name=encrypt_key,json=encryptKey,proto3" json:"encrypt_key,omitempty"`
+	Namespace   string                  `protobuf:"bytes,7,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	PodName     string                  `protobuf:"bytes,8,opt,name=pod_name,json=podName,proto3" json:"pod_name,omitempty"`
+	// vni is the native-vpc VNI (Virtual Network Identifier) of the ipcache
+	// entry, so monitor/hubble events can distinguish overlapping IPs from
+	// different VPCs.
+	Vni           uint32 `protobuf:"varint,9,opt,name=vni,proto3" json:"vni,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4963,6 +4967,13 @@ func (x *IPCacheNotification) GetPodName() string {
 		return x.PodName
 	}
 	return ""
+}
+
+func (x *IPCacheNotification) GetVni() uint32 {
+	if x != nil {
+		return x.Vni
+	}
+	return 0
 }
 
 // Deprecated: Marked as deprecated in flow/flow.proto.
@@ -5741,7 +5752,7 @@ const file_flow_flow_proto_rawDesc = "" +
 	"\x06labels\x18\x02 \x03(\tR\x06labels\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12\x19\n" +
 	"\bpod_name\x18\x04 \x01(\tR\apodName\x12\x1c\n" +
-	"\tnamespace\x18\x05 \x01(\tR\tnamespace\"\x99\x02\n" +
+	"\tnamespace\x18\x05 \x01(\tR\tnamespace\"\xab\x02\n" +
 	"\x13IPCacheNotification\x12\x12\n" +
 	"\x04cidr\x18\x01 \x01(\tR\x04cidr\x12\x1a\n" +
 	"\bidentity\x18\x02 \x01(\rR\bidentity\x12?\n" +
@@ -5751,7 +5762,8 @@ const file_flow_flow_proto_rawDesc = "" +
 	"\vencrypt_key\x18\x06 \x01(\rR\n" +
 	"encryptKey\x12\x1c\n" +
 	"\tnamespace\x18\a \x01(\tR\tnamespace\x12\x19\n" +
-	"\bpod_name\x18\b \x01(\tR\apodName\"G\n" +
+	"\bpod_name\x18\b \x01(\tR\apodName\x12\x10\n" +
+	"\x03vni\x18\t \x01(\rR\x03vni\"G\n" +
 	"\x1dServiceUpsertNotificationAddr\x12\x0e\n" +
 	"\x02ip\x18\x01 \x01(\tR\x02ip\x12\x12\n" +
 	"\x04port\x18\x02 \x01(\rR\x04port:\x02\x18\x01\"\x9e\x03\n" +

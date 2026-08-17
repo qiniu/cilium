@@ -11,6 +11,7 @@ import (
 	"maps"
 	"net/netip"
 	"runtime"
+	"slices"
 	"sync"
 
 	"github.com/cilium/hive/cell"
@@ -63,6 +64,21 @@ type endpointManager struct {
 	endpoints    map[uint16]*endpoint.Endpoint
 	endpointsAux map[string]*endpoint.Endpoint
 
+	// ipToVNIAuxKeys maps a bare IP string to the set of native-vpc
+	// VNI-scoped aux keys ("vni-ipv4:<vni>:<ip>") currently registered for
+	// it. Native-vpc endpoints are deliberately not registered under the bare
+	// "ipv4:/ipv6:" keys (overlapping IPs would overwrite each other), so this
+	// index is what allows the explicit bare-IP fallback
+	// (LookupIPUnambiguous) to resolve an endpoint when exactly one VNI uses
+	// the IP on this node. It is never used to guess between overlapping IPs.
+	ipToVNIAuxKeys map[string]map[string]struct{}
+
+	// registeredIdentifiers is the exact identifier snapshot installed for
+	// each exposed endpoint. Endpoint identifiers (notably VNI/IP) can change
+	// while an endpoint object is alive, so cleanup must use the snapshot that
+	// was actually registered rather than recomputing identifiers at delete.
+	registeredIdentifiers map[uint16]endpointid.Identifiers
+
 	// mcastManager handles IPv6 multicast group join/leave for pods. This is required for the
 	// node to receive ICMPv6 NDP messages, especially NS (Neighbor Solicitation) message, so
 	// pod's IPv6 address is discoverable.
@@ -110,6 +126,11 @@ type endpointManager struct {
 // functionality from endpoint management for testing purposes.
 type endpointDeleteFunc func(*endpoint.Endpoint, endpoint.DeleteConfig) []error
 
+// The VNI-aware lookups are reached through an optional interface (Hubble,
+// DNS proxy, L7 accesslog, ipam). A missing method would silently degrade
+// every consumer to bare-IP lookups, so assert it here.
+var _ EndpointsLookupVNI = (*endpointManager)(nil)
+
 // New creates a new endpointManager.
 func New(logger *slog.Logger, registry *metrics.Registry, epSynchronizer EndpointResourceSynchronizer, lns *node.LocalNodeStore, health cell.Health, monitorAgent monitoragent.Agent, config EndpointManagerConfig) *endpointManager {
 	mgr := endpointManager{
@@ -118,6 +139,8 @@ func New(logger *slog.Logger, registry *metrics.Registry, epSynchronizer Endpoin
 		health:                       health,
 		endpoints:                    make(map[uint16]*endpoint.Endpoint),
 		endpointsAux:                 make(map[string]*endpoint.Endpoint),
+		ipToVNIAuxKeys:               make(map[string]map[string]struct{}),
+		registeredIdentifiers:        make(map[uint16]endpointid.Identifiers),
 		mcastManager:                 mcastmanager.New(logger, option.Config.IPv6MCastDevice),
 		EndpointResourceSynchronizer: epSynchronizer,
 		subscribers:                  make(map[Subscriber]struct{}),
@@ -457,7 +480,6 @@ func (mgr *endpointManager) GetEndpointsByServiceAccount(namespace string, servi
 // lookups will no longer find the endpoint.
 func (mgr *endpointManager) unexpose(ep *endpoint.Endpoint) {
 	defer ep.Close()
-	identifiers := ep.Identifiers()
 
 	previousState := ep.GetState()
 
@@ -476,19 +498,26 @@ func (mgr *endpointManager) unexpose(ep *endpoint.Endpoint) {
 				"Unable to release endpoint ID",
 				logfields.Error, err,
 				logfields.State, previousState,
-				logfields.CNIAttachmentID, identifiers[endpointid.CNIAttachmentIdPrefix],
-				logfields.CEPName, identifiers[endpointid.CEPNamePrefix],
+				logfields.CNIAttachmentID, ep.GetCNIAttachmentID(),
+				logfields.CEPName, ep.GetK8sNamespaceAndCEPName(),
 			)
 		}
 	}
 
-	mgr.removeReferencesLocked(identifiers)
+	if registered := mgr.registeredIdentifiers[ep.ID]; registered != nil {
+		mgr.removeReferencesLocked(ep, registered)
+		delete(mgr.registeredIdentifiers, ep.ID)
+	} else {
+		// Restoring endpoints may not have a registration snapshot yet.
+		mgr.removeReferencesLocked(ep, ep.Identifiers())
+	}
 }
 
 // removeEndpoint stops the active handling of events by the specified endpoint,
 // and prevents the endpoint from being globally accessible via other packages.
 func (mgr *endpointManager) removeEndpoint(ep *endpoint.Endpoint, conf endpoint.DeleteConfig) []error {
 	mgr.unexpose(ep)
+	mgr.updateOverlappingIPsMetric()
 	result := ep.Delete(conf)
 
 	if !option.Config.DryMode {
@@ -560,6 +589,91 @@ func (mgr *endpointManager) lookupIPv6(ipv6 string) *endpoint.Endpoint {
 	return nil
 }
 
+// LookupIPWithVNI performs an exact (VNI, IP) endpoint lookup. A zero VNI
+// deliberately uses the plain IP namespace and does not consult VNI entries.
+func (mgr *endpointManager) LookupIPWithVNI(ip netip.Addr, vni uint64) *endpoint.Endpoint {
+	if !ip.IsValid() {
+		return nil
+	}
+	mgr.mutex.RLock()
+	defer mgr.mutex.RUnlock()
+	if vni == 0 {
+		if ip.Is4() {
+			return mgr.lookupIPv4(ip.Unmap().String())
+		}
+		return mgr.lookupIPv6(ip.Unmap().String())
+	}
+	key := endpointid.NewVNIIPPrefixID(ip.Unmap(), vni)
+	if key == "" {
+		return nil
+	}
+	if ep, ok := mgr.endpointsAux[key]; ok && mgr.endpoints[ep.ID] == ep {
+		return ep
+	}
+	return nil
+}
+
+// LookupIPUnambiguous is the explicit bare-IP fallback for consumers that only
+// have an IP (DNS proxy source endpoint, Hubble local endpoint, L7 accesslog,
+// ipam API). It first resolves the plain (non-VPC) key, then - only if exactly
+// one native-vpc endpoint on this node uses the IP - the corresponding
+// VNI-scoped endpoint. When several VPCs overlap on the IP it deliberately
+// reports a miss (fail closed) instead of guessing a VPC; those callers must
+// use LookupIPWithVNI with a real (VNI, IP) context.
+func (mgr *endpointManager) LookupIPUnambiguous(ip netip.Addr) *endpoint.Endpoint {
+	if !ip.IsValid() {
+		return nil
+	}
+	ipStr := ip.Unmap().String()
+	mgr.mutex.RLock()
+	defer mgr.mutex.RUnlock()
+	var ep *endpoint.Endpoint
+	if ip.Is4() {
+		ep = mgr.lookupIPv4(ipStr)
+	} else {
+		ep = mgr.lookupIPv6(ipStr)
+	}
+	if ep != nil {
+		return ep
+	}
+	keys := mgr.ipToVNIAuxKeys[ipStr]
+	if len(keys) != 1 {
+		return nil
+	}
+	for key := range keys {
+		if ep, ok := mgr.endpointsAux[key]; ok && mgr.endpoints[ep.ID] == ep {
+			return ep
+		}
+	}
+	return nil
+}
+
+// LookupIPAnyVNI returns any endpoint using the given IP, regardless of its
+// VNI scope (see the interface documentation in cell.go).
+func (mgr *endpointManager) LookupIPAnyVNI(ip netip.Addr) *endpoint.Endpoint {
+	if !ip.IsValid() {
+		return nil
+	}
+	ipStr := ip.Unmap().String()
+	mgr.mutex.RLock()
+	defer mgr.mutex.RUnlock()
+	var ep *endpoint.Endpoint
+	if ip.Is4() {
+		ep = mgr.lookupIPv4(ipStr)
+	} else {
+		ep = mgr.lookupIPv6(ipStr)
+	}
+	if ep != nil {
+		return ep
+	}
+	for key := range mgr.ipToVNIAuxKeys[ipStr] {
+		if ep, ok := mgr.endpointsAux[key]; ok && mgr.endpoints[ep.ID] == ep {
+			return ep
+		}
+	}
+	return nil
+}
+
 // lookupVNIIPv4 looks up an endpoint by VNI-aware IPv4 identifier.
 // The vniIPv4 parameter should be in format "<vni>:<ipv4>".
 func (mgr *endpointManager) lookupVNIIPv4(vniIPv4 string) *endpoint.Endpoint {
@@ -601,11 +715,38 @@ func (mgr *endpointManager) updateIDReferenceLocked(ep *endpoint.Endpoint) {
 	mgr.endpoints[ep.ID] = ep
 }
 
+func cloneIdentifiers(in endpointid.Identifiers) endpointid.Identifiers {
+	out := make(endpointid.Identifiers, len(in))
+	maps.Copy(out, in)
+	return out
+}
+
 func (mgr *endpointManager) updateReferencesLocked(ep *endpoint.Endpoint, identifiers endpointid.Identifiers) {
 	for k := range identifiers {
 		id := endpointid.NewID(k, identifiers[k])
 		mgr.endpointsAux[id] = ep
+
+		// Keep the per-IP index of VNI-scoped keys in sync so that the
+		// explicit bare-IP fallback can resolve unambiguous IPs.
+		if ip, ok := bareIPOfVNIIdentifier(k, identifiers[k]); ok {
+			keys, exists := mgr.ipToVNIAuxKeys[ip]
+			if !exists {
+				keys = map[string]struct{}{}
+				mgr.ipToVNIAuxKeys[ip] = keys
+			}
+			keys[id] = struct{}{}
+		}
 	}
+}
+
+// bareIPOfVNIIdentifier returns the bare IP of a native-vpc VNI-scoped
+// endpoint identifier ("vni-ipv4"/"vni-ipv6" prefix, value "<vni>:<ip>").
+func bareIPOfVNIIdentifier(prefix endpointid.PrefixType, value string) (string, bool) {
+	switch prefix {
+	case endpointid.VNIIPv4Prefix, endpointid.VNIIPv6Prefix:
+		return endpointid.SplitVNIIP(value)
+	}
+	return "", false
 }
 
 // UpdateReferences updates maps the contents of mappings to the specified endpoint.
@@ -613,17 +754,69 @@ func (mgr *endpointManager) UpdateReferences(ep *endpoint.Endpoint) error {
 	mgr.mutex.Lock()
 	defer mgr.mutex.Unlock()
 
-	identifiers := ep.Identifiers()
-	mgr.updateReferencesLocked(ep, identifiers)
+	// Only exposed endpoints own endpointmanager references. Preserve the old
+	// behavior for callers racing endpoint teardown: do not create aux keys for
+	// an endpoint that is no longer present in the primary ID map.
+	if current, exposed := mgr.endpoints[ep.ID]; !exposed || current != ep {
+		return nil
+	}
 
+	identifiers := ep.Identifiers()
+	if old := mgr.registeredIdentifiers[ep.ID]; old != nil {
+		mgr.removeReferencesLocked(ep, old)
+	}
+	mgr.updateReferencesLocked(ep, identifiers)
+	mgr.registeredIdentifiers[ep.ID] = cloneIdentifiers(identifiers)
 	return nil
 }
 
+// updateOverlappingIPsMetric publishes the number of IPs that are used by more
+// than one local endpoint in different VNIs. This is the precondition for
+// conntrack entry sharing between VPCs (the CT key is the bare 5-tuple), so it
+// must be observable rather than only logged. Zero on this node means no CT
+// ambiguity on this node.
+func (mgr *endpointManager) updateOverlappingIPsMetric() {
+	if !option.Config.EnableNativeVPC {
+		return
+	}
+	mgr.mutex.RLock()
+	var overlapping int
+	for _, keys := range mgr.ipToVNIAuxKeys {
+		if len(keys) > 1 {
+			overlapping++
+		}
+	}
+	mgr.mutex.RUnlock()
+	metrics.NativeVPCOverlappingIPs.Set(float64(overlapping))
+}
+
 // removeReferencesLocked removes the mappings from the endpointmanager.
-func (mgr *endpointManager) removeReferencesLocked(identifiers endpointid.Identifiers) {
+// removeReferencesLocked drops the aux identifiers of an endpoint that is being
+// removed.
+//
+// An identifier may already belong to a different endpoint by the time this
+// runs: a pod that is deleted and recreated on the same address in the same VPC
+// produces a new endpoint that registers the same (VNI, IP) identifier before
+// the previous one has finished being torn down. Removing it then would leave
+// the running pod with no identifier at all - endpoints in a VPC deliberately
+// register no bare-address one - so only references that still point at this
+// endpoint are removed.
+func (mgr *endpointManager) removeReferencesLocked(ep *endpoint.Endpoint, identifiers endpointid.Identifiers) {
 	for prefix := range identifiers {
 		id := endpointid.NewID(prefix, identifiers[prefix])
+		if current, exists := mgr.endpointsAux[id]; exists && current != ep {
+			continue
+		}
 		delete(mgr.endpointsAux, id)
+
+		if ip, ok := bareIPOfVNIIdentifier(prefix, identifiers[prefix]); ok {
+			if keys, exists := mgr.ipToVNIAuxKeys[ip]; exists {
+				delete(keys, id)
+				if len(keys) == 0 {
+					delete(mgr.ipToVNIAuxKeys, ip)
+				}
+			}
+		}
 	}
 }
 
@@ -696,12 +889,60 @@ func (mgr *endpointManager) expose(ep *endpoint.Endpoint) error {
 	mgr.mcastManager.AddAddress(ep.IPv6)
 	mgr.updateIDReferenceLocked(ep)
 	mgr.updateReferencesLocked(ep, identifiers)
+	mgr.registeredIdentifiers[ep.ID] = cloneIdentifiers(identifiers)
+	overlapping := mgr.overlappingVNIEndpointsLocked(ep)
 	mgr.mutex.Unlock()
+
+	for ip, ids := range overlapping {
+		// The conntrack and NAT maps are keyed by the bare 5-tuple, so two
+		// endpoints of different VPCs that share an IP on this node can share
+		// a CT entry when they also pick the same peer and ports. Surface the
+		// condition: it is the one plane where the (VNI, IP) pair cannot be
+		// expressed today (see Documentation/network/native-vpc.rst).
+		mgr.logger.Warn(
+			"local endpoints of different VPCs share an IP: conntrack entries are keyed by the bare 5-tuple and may be shared between them",
+			logfields.IPAddr, ip,
+			logfields.EndpointID, ids,
+		)
+	}
+	mgr.updateOverlappingIPsMetric()
 
 	ep.InitEndpointHealth(mgr.health)
 	mgr.RunK8sCiliumEndpointSync(ep, ep.GetReporter("cep-k8s-sync"))
 
 	return nil
+}
+
+// overlappingVNIEndpointsLocked reports, per IP of the given endpoint, the ids
+// of all local endpoints that use the same IP in a different VNI scope.
+// Returns nil (the normal case) when the endpoint's IPs are unique on the node.
+func (mgr *endpointManager) overlappingVNIEndpointsLocked(ep *endpoint.Endpoint) map[string][]uint16 {
+	if !option.Config.EnableNativeVPC {
+		return nil
+	}
+	var out map[string][]uint16
+	for _, addr := range []netip.Addr{ep.IPv4, ep.IPv6} {
+		if !addr.IsValid() {
+			continue
+		}
+		ipStr := addr.Unmap().String()
+		keys := mgr.ipToVNIAuxKeys[ipStr]
+		if len(keys) < 2 {
+			continue
+		}
+		ids := make([]uint16, 0, len(keys))
+		for key := range keys {
+			if other, ok := mgr.endpointsAux[key]; ok {
+				ids = append(ids, other.ID)
+			}
+		}
+		slices.Sort(ids)
+		if out == nil {
+			out = map[string][]uint16{}
+		}
+		out[ipStr] = ids
+	}
+	return out
 }
 
 func (mgr *endpointManager) GetEndpointList(params endpointapi.GetEndpointParams) []*models.Endpoint {

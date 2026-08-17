@@ -292,6 +292,13 @@ var (
 	// EndpointStateCount is the total count of the endpoints in various states.
 	EndpointStateCount = NoOpGaugeVec
 
+	// NativeVPCOverlappingIPs is the number of IP addresses on this node that
+	// are used by more than one local endpoint in different native-vpc VNIs.
+	// It is the precondition for conntrack entry sharing between VPCs (the CT
+	// key is the bare 5-tuple), so it must be alerted on. See
+	// Documentation/network/native-vpc.rst.
+	NativeVPCOverlappingIPs = NoOpGauge
+
 	// EndpointRegenerationTimeStats is the total time taken to regenerate
 	// endpoints, labeled by span name and status ("success" or "failure")
 	EndpointRegenerationTimeStats = NoOpObserverVec
@@ -624,6 +631,7 @@ type LegacyMetrics struct {
 	Endpoint                         metric.GaugeFunc
 	EndpointRegenerationTotal        metric.Vec[metric.Counter]
 	EndpointStateCount               metric.Vec[metric.Gauge]
+	NativeVPCOverlappingIPs          metric.Gauge
 	EndpointRegenerationTimeStats    metric.Vec[metric.Observer]
 	EndpointPropagationDelay         metric.Vec[metric.Observer]
 	Policy                           metric.Gauge
@@ -733,6 +741,13 @@ func NewLegacyMetrics() *LegacyMetrics {
 		},
 			[]string{"endpoint_state"},
 		),
+
+		NativeVPCOverlappingIPs: metric.NewGauge(metric.GaugeOpts{
+			ConfigName: Namespace + "_native_vpc_overlapping_ips",
+			Namespace:  Namespace,
+			Name:       "native_vpc_overlapping_ips",
+			Help:       "Number of IP addresses used by more than one local endpoint in different native-vpc VNIs. Conntrack entries are keyed by the bare 5-tuple, so a non-zero value means connections of different VPCs can share CT state on this node",
+		}),
 
 		EndpointRegenerationTimeStats: metric.NewHistogramVec(metric.HistogramOpts{
 			ConfigName: Namespace + "_endpoint_regeneration_time_stats_seconds",
@@ -1276,6 +1291,7 @@ func NewLegacyMetrics() *LegacyMetrics {
 	Endpoint = lm.Endpoint
 	EndpointRegenerationTotal = lm.EndpointRegenerationTotal
 	EndpointStateCount = lm.EndpointStateCount
+	NativeVPCOverlappingIPs = lm.NativeVPCOverlappingIPs
 	EndpointRegenerationTimeStats = lm.EndpointRegenerationTimeStats
 	EndpointPropagationDelay = lm.EndpointPropagationDelay
 	Policy = lm.Policy

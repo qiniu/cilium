@@ -166,7 +166,7 @@ func TestParseContextOptions(t *testing.T) {
 		},
 	)
 	assert.NoError(t, err)
-	assert.Equal(t, "labels=source_ip,source_pod,source_namespace,source_workload,source_workload_kind,source_app,destination_ip,destination_pod,destination_namespace,destination_workload,destination_workload_kind,destination_app,traffic_direction", opts.Status())
+	assert.Equal(t, "labels=source_ip,source_pod,source_namespace,source_workload,source_workload_kind,source_app,source_vni,destination_ip,destination_pod,destination_namespace,destination_workload,destination_workload_kind,destination_app,destination_vni,traffic_direction", opts.Status())
 	assert.Equal(t, contextLabelsList, opts.GetLabelNames())
 
 	opts, err = ParseContextOptions(
@@ -515,10 +515,10 @@ func TestParseGetLabelValues(t *testing.T) {
 	}
 	assert.Equal(t,
 		[]string{
-			// source_ip, source_pod, source_namespace, source_workload, source_workload_kind , source_app
-			"1.2.3.4", "foo-deploy-pod", "foo-ns", "foo-deploy", "Deployment", "fooapp",
-			// destination_ip, destination_pod, destination_namespace, destination_workload, destination_workload_kind, destination_app
-			"5.6.7.8", "bar-deploy-pod", "bar-ns", "bar-deploy", "StatefulSet", "barapp",
+			// source_ip, source_pod, source_namespace, source_workload, source_workload_kind , source_app, source_vni
+			"1.2.3.4", "foo-deploy-pod", "foo-ns", "foo-deploy", "Deployment", "fooapp", "",
+			// destination_ip, destination_pod, destination_namespace, destination_workload, destination_workload_kind, destination_app, destination_vni
+			"5.6.7.8", "bar-deploy-pod", "bar-ns", "bar-deploy", "StatefulSet", "barapp", "",
 			// traffic_direction
 			"ingress",
 		}, mustGetLabelValues(opts, flow),
@@ -528,8 +528,8 @@ func TestParseGetLabelValues(t *testing.T) {
 	// and set traffic_direction to "unknown"
 	assert.Equal(t,
 		[]string{
-			"", "", "", "", "", "",
-			"", "", "", "", "", "",
+			"", "", "", "", "", "", "",
+			"", "", "", "", "", "", "",
 			"unknown",
 		}, mustGetLabelValues(opts, &pb.Flow{}),
 	)

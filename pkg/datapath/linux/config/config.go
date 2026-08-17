@@ -218,6 +218,15 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 		cDefinesMap["ENABLE_IPV6"] = "1"
 	}
 
+	if option.Config.EnableNativeVPC {
+		// Node-level switch for the native-vpc datapath bits that cannot be
+		// expressed as per-endpoint load-time config, i.e. map key layouts.
+		// Currently only the VNI scope of the IPv4 fragment key; the
+		// per-endpoint VNI itself stays load-time data (native_vpc_vni) so
+		// that one bpf_lxc template serves every VPC.
+		cDefinesMap["ENABLE_NATIVE_VPC"] = "1"
+	}
+
 	if option.Config.EnableSRv6 {
 		cDefinesMap["ENABLE_SRV6"] = "1"
 		if option.Config.SRv6EncapMode != "reduced" {
@@ -804,6 +813,10 @@ func (h *HeaderfileWriter) writeTemplateConfig(fw *bufio.Writer, devices []strin
 
 	// Local delivery metrics should always be set for endpoint programs.
 	fmt.Fprint(fw, "#define LOCAL_DELIVERY_METRICS 1\n")
+
+	// The native-vpc VNI is load-time per-endpoint data in .rodata.config
+	// (native_vpc_vni), not a compile-time define. Keeping it out of this
+	// header lets one compiled bpf_lxc template serve all VPCs.
 
 	h.writeNetdevConfig(fw, e.GetOptions())
 

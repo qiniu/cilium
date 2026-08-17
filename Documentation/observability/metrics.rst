@@ -480,6 +480,7 @@ Name                                         Labels                             
 ``endpoint_regenerations_total``             ``outcome``                                        Enabled    Count of all endpoint regenerations that have completed
 ``endpoint_regeneration_time_stats_seconds`` ``scope``                                          Enabled    Endpoint regeneration time stats
 ``endpoint_state``                           ``state``                                          Enabled    Count of all endpoints
+``native_vpc_overlapping_ips``                                                                  Enabled    Number of IPs used by more than one local endpoint in different native-vpc VNIs. Alert on ``> 0``: conntrack entries are keyed by the bare 5-tuple, so connections of different VPCs can share CT state on that node (see :ref:`native_vpc`)
 ============================================ ================================================== ========== ========================================================
 
 Services
@@ -1095,6 +1096,7 @@ Option Value          Description
 ``workload``          Kubernetes pod's workload name and namespace in the form of ``namespace/workload-name``.
 ``workload-name``     Kubernetes pod's workload name (workloads are: Deployment, Statefulset, Daemonset, ReplicationController, CronJob, Job, DeploymentConfig (OpenShift), etc).
 ``app``               Kubernetes pod's app name, derived from pod labels (``app.kubernetes.io/name``, ``k8s-app``, or ``app``).
+``vni``               The native-vpc VNI (kube-ovn ``tunnel_key``) of the endpoint, empty for non-VPC endpoints. See :ref:`native_vpc`.
 ===================== ===================================================================================
 
 When specifying the source and/or destination context, multiple contexts can be
@@ -1128,12 +1130,14 @@ Option Value                   Description
 ``source_workload``            The name of the source pod's workload (Deployment, Statefulset, Daemonset, ReplicationController, CronJob, Job, DeploymentConfig (OpenShift)).
 ``source_workload_kind``       The kind of the source pod's workload, for example, Deployment, Statefulset, Daemonset, ReplicationController, CronJob, Job, DeploymentConfig (OpenShift).
 ``source_app``                 The app name of the source pod, derived from pod labels (``app.kubernetes.io/name``, ``k8s-app``, or ``app``).
+``source_vni``                 The native-vpc VNI of the flow source, empty for non-VPC endpoints. With overlapping VPC subnets this is what separates two flows sharing an IP.
 ``destination_ip``             The destination IP of the flow.
 ``destination_namespace``      The namespace of the pod if the flow destination is from a Kubernetes pod.
 ``destination_pod``            The pod name if the flow destination is from a Kubernetes pod.
 ``destination_workload``       The name of the destination pod's workload (Deployment, Statefulset, Daemonset, ReplicationController, CronJob, Job, DeploymentConfig (OpenShift)).
 ``destination_workload_kind``  The kind of the destination pod's workload, for example, Deployment, Statefulset, Daemonset, ReplicationController, CronJob, Job, DeploymentConfig (OpenShift).
 ``destination_app``            The app name of the source pod, derived from pod labels (``app.kubernetes.io/name``, ``k8s-app``, or ``app``).
+``destination_vni``            The native-vpc VNI of the flow destination, empty for non-VPC endpoints.
 ``traffic_direction``          Identifies the traffic direction of the flow. Possible values are ``ingress``, ``egress`` and ``unknown``.
 ============================== ===============================================================================
 

@@ -4,7 +4,9 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -34,6 +36,14 @@ var bpfIPCacheListCmd = &cobra.Command{
 		bpfIPCacheList := make(map[string][]string)
 		if err := ipcache.IPCacheMap(nil).Dump(bpfIPCacheList); err != nil {
 			fmt.Fprintf(os.Stderr, "error dumping contents of map: %s\n", err)
+			os.Exit(1)
+		}
+		// Also dump the native-vpc VNI-scoped ipcache, if present. cilium-dbg is
+		// a separate process, so the singleton starts closed: calling IsOpen()
+		// here would always skip the map. Dump opens the pinned map itself;
+		// absence is expected on non-native-vpc nodes and is ignored.
+		if err := ipcache.IPCacheVniMap(nil).Dump(bpfIPCacheList); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "error dumping contents of vni map: %s\n", err)
 			os.Exit(1)
 		}
 

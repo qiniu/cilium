@@ -4,9 +4,12 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
+	"sort"
 	"strings"
 
 	iradix "github.com/hashicorp/go-immutable-radix/v2"
@@ -38,7 +41,19 @@ var bpfIPCacheGetCmd = &cobra.Command{
 
 		bpfIPCache := dumpIPCache()
 
+		// Native-vpc: print every exact VNI-scoped entry for this IP first.
+		// They are keyed by (VNI, IP), so several VPCs may legitimately answer
+		// for the same address and an LPM over the merged key space would hide
+		// all but one of them.
+		vniMatches := lookupVNIEntries(ip)
+		for _, m := range vniMatches {
+			fmt.Printf("%s maps to identity %s\n", m.key, strings.Join(m.value, ","))
+		}
+
 		if len(bpfIPCache) == 0 {
+			if len(vniMatches) > 0 {
+				return
+			}
 			fmt.Fprintf(os.Stderr, "No entries found.\n")
 			os.Exit(1)
 		}
@@ -46,6 +61,9 @@ var bpfIPCacheGetCmd = &cobra.Command{
 		value, exists := getLPMValue(ip, bpfIPCache)
 
 		if !exists {
+			if len(vniMatches) > 0 {
+				return
+			}
 			fmt.Printf("%s does not map to any identity\n", arg)
 			os.Exit(1)
 		}
@@ -73,6 +91,48 @@ func dumpIPCache() map[string][]string {
 	}
 
 	return bpfIPCache
+}
+
+type vniEntry struct {
+	key   string
+	value []string
+}
+
+// lookupVNIEntries returns the entries of the native-vpc VNI-scoped ipcache
+// ("<prefix>@vni:<vni>") whose prefix contains ip. Entries of different VPCs
+// for the same address are all returned: the (VNI, IP) key space is not
+// totally ordered by prefix length, so there is no single "best" match without
+// a VNI. The map is absent on non-native-vpc nodes, which is not an error.
+func lookupVNIEntries(ip net.IP) []vniEntry {
+	dump := make(map[string][]string)
+	if err := ipcache.IPCacheVniMap(nil).Dump(dump); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			Fatalf("unable to dump native-vpc IPCache: %s\n", err)
+		}
+		return nil
+	}
+
+	var matches []vniEntry
+	for key, value := range dump {
+		prefixStr, _, found := strings.Cut(key, "@vni:")
+		if !found {
+			continue
+		}
+		_, subnet, err := net.ParseCIDR(prefixStr)
+		if err != nil {
+			log.Warn(
+				"unable to parse native-vpc ipcache entry as a CIDR",
+				logfields.Error, err,
+				logfields.Entry, key,
+			)
+			continue
+		}
+		if subnet.Contains(ip) {
+			matches = append(matches, vniEntry{key: key, value: value})
+		}
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].key < matches[j].key })
+	return matches
 }
 
 // getLPMValue calculates the longest prefix matching ip amongst the

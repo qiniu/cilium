@@ -21,6 +21,7 @@ var Cell = cell.Module(
 	cell.Provide(NewListener),
 	cell.ProvidePrivate(
 		func(reg *metrics.Registry) Map { return ipcacheMap.IPCacheMap(reg) },
+		func(reg *metrics.Registry) VniMap { return ipcacheMap.IPCacheVniMap(reg) },
 		func(agent monitorAgent.Agent) monitorNotify { return agent },
 	),
 

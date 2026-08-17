@@ -12,6 +12,7 @@ import (
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/identity"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/mac"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/option"
@@ -126,6 +127,10 @@ type EndpointFrontend interface {
 	SkipMasqueradeV4() bool
 	// SkipMasqueradeV6 indicates whether this endpoint should skip IPv6 masquerade for remote traffic
 	SkipMasqueradeV6() bool
+	// GetVNIID is the native-vpc scope of the endpoint, 0 when it is not in a
+	// VPC. The endpoint map is keyed by address alone, so the scope decides
+	// whether this endpoint may be represented in it at all.
+	GetVNIID() uint64
 }
 
 // getBPFKeys returns all keys which should represent this endpoint in the BPF
@@ -240,6 +245,27 @@ func (v *EndpointInfo) String() string {
 func (v *EndpointInfo) New() bpf.MapValue { return &EndpointInfo{} }
 
 func (m *lxcMap) WriteEndpoint(f EndpointFrontend) error {
+	// An endpoint that lives in a VPC is not representable here: the key is the
+	// address alone, so the entries of two endpoints that share an address in
+	// different VPCs are the same entry, and the second one written destroys
+	// the first. The datapath already refuses to use this map for such an
+	// endpoint (bpf_lxc takes the local-delivery fast path only when its
+	// compiled VNI is zero), so there is nothing to represent - writing would
+	// only produce a shared, wrong answer to "which endpoint owns this
+	// address?".
+	if f.GetVNIID() != 0 {
+		// An entry may exist from an agent that predates this rule. Remove it,
+		// but only if this endpoint is the one it names: another VPC's endpoint
+		// may legitimately own it.
+		id := uint16(f.GetID())
+		for _, key := range m.getBPFKeys(f) {
+			if owned, exists := m.ownsEntry(key, id); owned && exists {
+				_ = m.bpfMap.Delete(key)
+			}
+		}
+		return nil
+	}
+
 	info, err := m.getBPFValue(f)
 	if err != nil {
 		return err
@@ -259,6 +285,35 @@ func (m *lxcMap) WriteEndpoint(f EndpointFrontend) error {
 	}
 
 	return nil
+}
+
+// ownsEntry reports whether the entry currently stored under key belongs to
+// the given endpoint id (or does not exist at all).
+//
+// cilium_lxc is keyed by the bare IP. In native-vpc mode two endpoints of
+// different VPCs may legitimately share an IP on the same node, in which case
+// the last writer wins. Deleting such a key unconditionally on endpoint
+// teardown would remove the *other* VPC's entry, so deletion is made
+// compare-and-delete. The map is not authoritative for the native-vpc pod
+// datapath (bpf_lxc skips the endpoint-map fast path when the endpoint has a
+// VNI, and kube-ovn owns the host and tunnel datapath); it is kept for
+// diagnostics and for the non-overlapping majority of entries.
+// ownsEntry reports whether the entry under key is the one this endpoint wrote,
+// and whether it exists at all. An endpoint may only remove what it owns: with
+// native-vpc the key is shared by every endpoint that has this address, whatever
+// VPC it is in.
+func (m *lxcMap) ownsEntry(key *EndpointKey, id uint16) (owned, exists bool) {
+	value, err := m.bpfMap.Lookup(key)
+	if err != nil {
+		// Missing (or unreadable) entry: nothing of another endpoint can be
+		// destroyed by proceeding, and there is nothing to remove either.
+		return true, false
+	}
+	info, ok := value.(*EndpointInfo)
+	if !ok {
+		return true, true
+	}
+	return info.LxcID == id, true
 }
 
 // addHostEntry adds a special endpoint which represents the local host
@@ -286,7 +341,24 @@ func (m *lxcMap) DeleteEntry(addr netip.Addr) error {
 
 func (m *lxcMap) DeleteElement(logger *slog.Logger, f EndpointFrontend) []error {
 	var errors []error
+	id := uint16(f.GetID())
 	for _, k := range m.getBPFKeys(f) {
+		if option.Config.EnableNativeVPC {
+			owned, exists := m.ownsEntry(k, id)
+			if !exists {
+				// An endpoint in a VPC never wrote one (see WriteEndpoint), so
+				// its removal is complete before it starts. Reporting a missing
+				// key as a failure would make every such deletion look broken.
+				continue
+			}
+			if !owned {
+				logger.Debug("skipping endpoint map deletion of an entry owned by another endpoint",
+					logfields.Key, k.String(),
+					logfields.EndpointID, id,
+				)
+				continue
+			}
+		}
 		if err := m.bpfMap.Delete(k); err != nil {
 			errors = append(errors, fmt.Errorf("unable to delete key %v from %s: %w", k, bpf.MapPath(logger, mapName), err))
 		}

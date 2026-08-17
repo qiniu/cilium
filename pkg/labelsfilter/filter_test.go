@@ -13,6 +13,7 @@ import (
 
 	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/option"
 )
 
 func TestFilterLabels(t *testing.T) {
@@ -71,6 +72,36 @@ func TestFilterLabels(t *testing.T) {
 	// Making sure we are deep copying the labels
 	allLabels["id.lizards"] = labels.NewLabel("id.lizards", "web", "I can change this and doesn't affect any one")
 	require.Equal(t, wanted, filtered)
+}
+
+func TestNativeVPCMandatoryIdentityLabelsInWhitelistMode(t *testing.T) {
+	oldEnable := option.Config.EnableNativeVPC
+	t.Cleanup(func() { option.Config.EnableNativeVPC = oldEnable })
+	option.Config.EnableNativeVPC = true
+
+	// Inclusive entries enable whitelist mode. Explicit ignore rules for the
+	// two mandatory sources must not override their security invariants.
+	err := ParseLabelPrefixCfg(hivetest.Logger(t), []string{
+		"k8s:app",
+		labels.LabelSourceVNI + ":!.*",
+		labels.LabelSourceReserved + ":!.*",
+	}, nil, "")
+	require.NoError(t, err)
+
+	input := labels.Labels{
+		"app":             labels.NewLabel("app", "web", labels.LabelSourceK8s),
+		labels.VNIKey:     labels.NewLabel(labels.VNIKey, "36", labels.LabelSourceVNI),
+		labels.IDNameInit: labels.NewLabel(labels.IDNameInit, "", labels.LabelSourceReserved),
+		"other":           labels.NewLabel("other", "ignored", labels.LabelSourceK8s),
+	}
+	identityLabels, infoLabels := Filter(input)
+
+	require.Contains(t, identityLabels, "app")
+	require.Contains(t, identityLabels, labels.VNIKey,
+		"the VNI label must remain an identity label in whitelist mode")
+	require.Contains(t, identityLabels, labels.IDNameInit,
+		"reserved labels must remain identity labels in whitelist mode")
+	require.Contains(t, infoLabels, "other")
 }
 
 func TestDefaultFilterLabels(t *testing.T) {

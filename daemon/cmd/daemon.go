@@ -5,6 +5,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	agentK8s "github.com/cilium/cilium/daemon/k8s"
@@ -29,7 +30,48 @@ const (
 	AutoCIDR = "auto"
 )
 
+// nativeVPCDatapathCompatibility rejects the datapath features whose state is
+// keyed by the bare IP (service backends, socket LB, egress gateway source
+// IPs, NAT tuples, encryption peer selection). With overlapping VPC subnets
+// they would silently mix two VPCs, so they must fail at startup rather than
+// in a data-dependent way. See Documentation/network/native-vpc.rst.
+func nativeVPCDatapathCompatibility(params daemonConfigParams) error {
+	if !params.DaemonConfig.EnableNativeVPC {
+		return nil
+	}
+	switch {
+	case params.KPRConfig.KubeProxyReplacement:
+		return errors.New("native-vpc mode is incompatible with kube-proxy replacement: service backends are keyed by (IP, port), so pods of different VPCs sharing an IP collapse into one backend")
+	case params.KPRConfig.EnableSocketLB:
+		return errors.New("native-vpc mode is incompatible with socket LB (--bpf-lb-sock): socket-level translation happens before the VPC scope is known")
+	case params.DaemonConfig.EnableEgressGateway:
+		return errors.New("native-vpc mode is incompatible with the egress gateway: its policies select traffic by the bare source IP")
+	case params.DaemonConfig.EnableSRv6:
+		return errors.New("native-vpc mode is incompatible with SRv6: the VRF mapping selects traffic by the bare source IP")
+	case params.DaemonConfig.EnableVTEP:
+		return errors.New("native-vpc mode is incompatible with the VTEP integration: its mappings are keyed by bare CIDRs")
+	case params.DaemonConfig.EnableBPFMasquerade:
+		return errors.New("native-vpc mode is incompatible with BPF masquerade: kube-ovn owns SNAT, and the NAT maps are keyed by the bare tuple")
+	case params.IPSecConfig.Enabled(), params.WireguardConfig.Enabled():
+		return errors.New("native-vpc mode is incompatible with Cilium encryption (IPsec/WireGuard): peer selection is keyed by the bare IP")
+	case params.ClusterInfo.ID != 0 && params.ClusterMesh.ClusterMeshConfig != "":
+		// A VNI is a tunnel key of this cluster's OVN, so it says nothing about
+		// another cluster. Remote addresses therefore arrive either without a
+		// scope - landing in the unscoped ipcache, which is what the local
+		// datapath falls back to and which must hold no address that a VPC also
+		// uses - or with a number that means something else where it came from.
+		return errors.New("native-vpc mode is incompatible with cluster mesh: a VNI identifies a VPC of this cluster only, so remote addresses cannot be scoped and would be resolved from the unscoped ipcache")
+	}
+	return nil
+}
+
 func initAndValidateDaemonConfig(params daemonConfigParams) error {
+	// Native-vpc: overlapping IPs across VPCs are only safe on the planes that
+	// key their state by (VNI, IP).
+	if err := nativeVPCDatapathCompatibility(params); err != nil {
+		return err
+	}
+
 	// WireGuard and IPSec are mutually exclusive.
 	if params.IPSecConfig.Enabled() && params.WireguardConfig.Enabled() {
 		return fmt.Errorf("WireGuard (--%s) cannot be used with IPsec (--%s)", wgTypes.EnableWireguard, datapath.EnableIPSec)

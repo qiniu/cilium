@@ -7,11 +7,14 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"slices"
+	"strconv"
 	"sync/atomic"
 
 	"github.com/cilium/hive/cell"
 
 	agentK8s "github.com/cilium/cilium/daemon/k8s"
+	"github.com/cilium/cilium/pkg/annotation"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	hubblemetrics "github.com/cilium/cilium/pkg/hubble/metrics"
@@ -136,6 +139,24 @@ func (k *K8sCiliumEndpointsWatcher) ciliumEndpointsInit(ctx context.Context) {
 	}()
 }
 
+// ciliumEndpointVNI returns the native-vpc VNI carried in the CiliumEndpoint
+// annotation (written by the endpoint's managing agent), or 0 when the
+// endpoint is not a native-vpc endpoint.
+func ciliumEndpointVNI(endpoint *types.CiliumEndpoint) uint32 {
+	if endpoint == nil || endpoint.Annotations == nil {
+		return 0
+	}
+	vniStr, ok := endpoint.Annotations[annotation.CiliumEndpointNativeVPCVNI]
+	if !ok || vniStr == "" {
+		return 0
+	}
+	vni, err := strconv.ParseUint(vniStr, 10, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(vni)
+}
+
 func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types.CiliumEndpoint) {
 	var namedPortsChanged bool
 	defer func() {
@@ -143,29 +164,30 @@ func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types
 			k.policyManager.TriggerPolicyUpdates("Named ports added or updated")
 		}
 	}()
-	var ipsAdded []string
+	// keysAdded holds the ipcache keys written below rather than the bare
+	// addresses they are built from. An entry is identified by the (VNI, IP)
+	// pair, so "is this address still present?" cannot be answered by comparing
+	// addresses alone: an endpoint that keeps its address while moving to
+	// another VPC still has to lose the entry of the VPC it left, otherwise the
+	// old scope keeps resolving that address to an endpoint that no longer
+	// belongs to it - and another VPC may legitimately own the same address.
+	//
+	// KeyWithVNI is the identity function when native-vpc is off, so outside
+	// that mode the comparison is exactly the address comparison it replaces.
+	var keysAdded []string
 	if oldEndpoint != nil && oldEndpoint.Networking != nil {
-		// Delete the old IP addresses from the IP cache
+		oldVNI := ciliumEndpointVNI(oldEndpoint)
 		defer func() {
 			for _, oldPair := range oldEndpoint.Networking.Addressing {
-				v4Added, v6Added := false, false
-				for _, ipAdded := range ipsAdded {
-					if ipAdded == oldPair.IPV4 {
-						v4Added = true
+				for _, oldIP := range []string{oldPair.IPV4, oldPair.IPV6} {
+					if oldIP == "" {
+						continue
 					}
-					if ipAdded == oldPair.IPV6 {
-						v6Added = true
+					oldKey := ipcache.KeyWithVNI(oldIP, oldVNI)
+					if slices.Contains(keysAdded, oldKey) {
+						continue
 					}
-				}
-				if !v4Added {
-					portsChanged := k.ipcache.DeleteOnMetadataMatch(oldPair.IPV4, source.CustomResource, endpoint.Namespace, endpoint.Name)
-					if portsChanged {
-						namedPortsChanged = true
-					}
-				}
-				if !v6Added {
-					portsChanged := k.ipcache.DeleteOnMetadataMatch(oldPair.IPV6, source.CustomResource, endpoint.Namespace, endpoint.Name)
-					if portsChanged {
+					if k.ipcache.DeleteOnMetadataMatch(oldKey, source.CustomResource, endpoint.Namespace, endpoint.Name) {
 						namedPortsChanged = true
 					}
 				}
@@ -223,20 +245,31 @@ func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types
 		}
 	}
 
+	vni := ciliumEndpointVNI(endpoint)
+	// In native-vpc mode a CEP without a VNI is an error (the endpoint-create
+	// path rejects such pods). Skip registration instead of writing a plain-IP
+	// entry that collides with overlapping VPC subnets.
+	if option.Config.EnableNativeVPC && vni == 0 {
+		k.logger.Error("native-vpc CiliumEndpoint is missing a valid VNI annotation; skipping ipcache registration",
+			logfields.K8sPodName, endpoint.Namespace+"/"+endpoint.Name,
+		)
+		return
+	}
+
 	for _, pair := range endpoint.Networking.Addressing {
 		if pair.IPV4 != "" {
-			ipsAdded = append(ipsAdded, pair.IPV4)
-			portsChanged, _ := k.ipcache.Upsert(pair.IPV4, nodeIP, encryptionKey, k8sMeta,
-				ipcache.Identity{ID: id, Source: source.CustomResource})
+			keysAdded = append(keysAdded, ipcache.KeyWithVNI(pair.IPV4, vni))
+			portsChanged, _ := k.ipcache.Upsert(ipcache.KeyWithVNI(pair.IPV4, vni), nodeIP, encryptionKey, k8sMeta,
+				ipcache.Identity{ID: id, Source: source.CustomResource, Vni: vni})
 			if portsChanged {
 				namedPortsChanged = true
 			}
 		}
 
 		if pair.IPV6 != "" {
-			ipsAdded = append(ipsAdded, pair.IPV6)
-			portsChanged, _ := k.ipcache.Upsert(pair.IPV6, nodeIP, encryptionKey, k8sMeta,
-				ipcache.Identity{ID: id, Source: source.CustomResource})
+			keysAdded = append(keysAdded, ipcache.KeyWithVNI(pair.IPV6, vni))
+			portsChanged, _ := k.ipcache.Upsert(ipcache.KeyWithVNI(pair.IPV6, vni), nodeIP, encryptionKey, k8sMeta,
+				ipcache.Identity{ID: id, Source: source.CustomResource, Vni: vni})
 			if portsChanged {
 				namedPortsChanged = true
 			}
@@ -249,14 +282,16 @@ func (k *K8sCiliumEndpointsWatcher) endpointDeleted(endpoint *types.CiliumEndpoi
 		namedPortsChanged := false
 		for _, pair := range endpoint.Networking.Addressing {
 			if pair.IPV4 != "" {
-				portsChanged := k.ipcache.DeleteOnMetadataMatch(pair.IPV4, source.CustomResource, endpoint.Namespace, endpoint.Name)
+				vni := ciliumEndpointVNI(endpoint)
+				portsChanged := k.ipcache.DeleteOnMetadataMatch(ipcache.KeyWithVNI(pair.IPV4, vni), source.CustomResource, endpoint.Namespace, endpoint.Name)
 				if portsChanged {
 					namedPortsChanged = true
 				}
 			}
 
 			if pair.IPV6 != "" {
-				portsChanged := k.ipcache.DeleteOnMetadataMatch(pair.IPV6, source.CustomResource, endpoint.Namespace, endpoint.Name)
+				vni := ciliumEndpointVNI(endpoint)
+				portsChanged := k.ipcache.DeleteOnMetadataMatch(ipcache.KeyWithVNI(pair.IPV6, vni), source.CustomResource, endpoint.Namespace, endpoint.Name)
 				if portsChanged {
 					namedPortsChanged = true
 				}

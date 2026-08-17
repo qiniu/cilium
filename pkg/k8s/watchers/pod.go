@@ -46,7 +46,9 @@ import (
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
+	"github.com/cilium/cilium/pkg/nativevpc"
 	"github.com/cilium/cilium/pkg/node"
+	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/source"
@@ -575,6 +577,24 @@ func (k *K8sPodWatcher) deleteK8sPodV1(pod *slim_corev1.Pod) error {
 	return err
 }
 
+// podVNI returns the Virtual Network Identifier (VNI) of the pod in
+// native-vpc mode, read from the pod's tunnel_key annotation
+// (option.Config.NativeVPCVNIAnnotation, e.g. ovn.kubernetes.io/tunnel_key).
+// Returns 0 when native-vpc mode is disabled or the annotation is missing or
+// invalid, in which case the pod uses the plain cluster-wide IP scheme.
+// podVNI returns the native-vpc VNI of a pod for the cache-plane
+// registration. It uses the single shared decision table (nativevpc), so the
+// pod watcher can never register an ipcache entry under a VNI that endpoint
+// creation would have rejected. A missing or invalid annotation yields 0,
+// which the callers treat as "do not register a VPC-scoped entry".
+func podVNI(pod *slim_corev1.Pod) uint32 {
+	vni, res, _ := nativevpc.VNIFromPod(pod)
+	if res != nativevpc.Valid {
+		return 0
+	}
+	return uint32(vni)
+}
+
 func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPodIPs, newPodIPs k8sTypes.IPSlice) error {
 	if newPod.Spec.HostNetwork {
 		k.logger.Debug("Pod is using host networking",
@@ -586,23 +606,78 @@ func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPo
 
 	var namedPortsChanged bool
 
+	// VNI (from the tunnel_key annotation) used to scope ipcache entries in
+	// native-vpc mode. Zero for non-native-vpc pods.
+	vni := podVNI(newPod)
+
+	// A managed endpoint deliberately does not follow annotation drift: its VNI
+	// is an identity and datapath dimension that only a recreation can change
+	// (see Endpoint.SyncVNIFromPodAnnotation). Announcing the annotation's scope
+	// here would publish the address in a VPC that no endpoint is in, so the
+	// endpoint's own scope wins whenever there is one. A zero VNI is never taken
+	// from the endpoint: that direction would merge the address back into the
+	// shared plain-IP scope.
+	//
+	// For a pod scheduled on this node the endpoint is the authority even when
+	// it is not known yet - pod events arrive before endpoint restore completes,
+	// and the annotation read here may be one the endpoint is going to refuse.
+	// The placeholder entry is then simply left to the endpoint, which registers
+	// the real one under the scope it was admitted with.
+	deferToEndpoint := false
+	if option.Config.EnableNativeVPC {
+		switch eps := k.endpointManager.GetEndpointsByPodName(k8sUtils.GetObjNamespaceName(&newPod.ObjectMeta)); {
+		case len(eps) > 0:
+			if epVNI := uint32(eps[0].GetVNIID()); epVNI != 0 {
+				vni = epVNI
+			}
+		case newPod.Spec.NodeName == nodeTypes.GetName():
+			deferToEndpoint = true
+		}
+	}
+
+	// In native-vpc mode every non-hostNetwork pod must carry a non-zero VNI
+	// (the OVN subnet's tunnel key). A missing/zero VNI is an error: registering
+	// nothing under the plain-IP scheme would collide with overlapping VPC
+	// subnets. The endpoint-create path rejects such pods too; this guards
+	// already-running pods that cannot be re-created (e.g. created by an
+	// out-of-date kube-ovn before the tunnel_key backfill).
+	if option.Config.EnableNativeVPC && vni == 0 {
+		k.logger.Error("native-vpc pod is missing a valid tunnel_key annotation; skipping ipcache registration",
+			logfields.K8sPodName, newPod.Namespace+"/"+newPod.Name,
+		)
+		return nil
+	}
+
 	ipSliceEqual := oldPodIPs != nil && oldPodIPs.DeepEqual(&newPodIPs)
 
+	// An entry is identified by its (VNI, IP) key, so an unchanged address set
+	// does not imply an unchanged set of entries: a pod that moves to another
+	// VPC keeps its address, and the entry of the VPC it left has to go. The
+	// keys are therefore compared, and the old ones are rebuilt with the VNI
+	// they were written under - deleting them with the new VNI would target an
+	// entry that never existed and leave the real one behind.
+	oldVNI := podVNI(oldPod)
+	newKeys := make([]string, 0, len(newPodIPs))
+	for _, podIP := range newPodIPs {
+		newKeys = append(newKeys, ipcache.KeyWithVNI(podIP, vni))
+	}
+	keySliceEqual := ipSliceEqual && oldVNI == vni
+
 	defer func() {
-		if !ipSliceEqual {
-			// delete all IPs that were not added regardless if the insertion of the
+		if !keySliceEqual {
+			// delete all keys that were not added regardless if the insertion of the
 			// entry in the ipcache map was successful or not because we will not
 			// receive any other event with these old IP addresses.
 			for _, oldPodIP := range oldPodIPs {
-				var found bool
-				if slices.Contains(newPodIPs, oldPodIP) {
-					found = true
+				oldKey := ipcache.KeyWithVNI(oldPodIP, oldVNI)
+				if slices.Contains(newKeys, oldKey) {
+					continue
 				}
-				if !found {
-					npc := k.ipcache.Delete(oldPodIP, source.Kubernetes)
-					if npc {
-						namedPortsChanged = true
-					}
+				// Match on the pod as well: the address may already have been
+				// handed to another pod, whose entry must not be removed here.
+				npc := k.ipcache.DeleteOnMetadataMatch(oldKey, source.Kubernetes, newPod.Namespace, newPod.Name)
+				if npc {
+					namedPortsChanged = true
 				}
 			}
 		}
@@ -616,9 +691,10 @@ func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPo
 	specEqual := oldPod != nil && newPod.Spec.DeepEqual(&oldPod.Spec)
 	hostIPEqual := oldPod != nil && newPod.Status.HostIP == oldPod.Status.HostIP
 
-	// if spec, host IPs, and pod IPs are the same there no need to perform the remaining
-	// operations
-	if specEqual && hostIPEqual && ipSliceEqual {
+	// if spec, host IPs, and pod keys are the same there no need to perform the
+	// remaining operations. A VPC change makes the keys differ even when every
+	// address is unchanged, and the new key still has to be written.
+	if specEqual && hostIPEqual && keySliceEqual {
 		return nil
 	}
 
@@ -656,12 +732,19 @@ func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPo
 
 	var errs []string
 	for _, podIP := range newPodIPs {
+		if deferToEndpoint {
+			break
+		}
 		// Initial mapping of podIP <-> hostIP <-> identity. The mapping is
 		// later updated once the allocator has determined the real identity.
 		// If the endpoint remains unmanaged, the identity remains untouched.
-		npc, err := k.ipcache.Upsert(podIP, hostIP, hostKey, k8sMeta, ipcache.Identity{
+		// In native-vpc mode the entry is keyed by IP+VNI (from the
+		// tunnel_key annotation) so that overlapping IPs in different VPCs
+		// can coexist.
+		npc, err := k.ipcache.Upsert(ipcache.KeyWithVNI(podIP, vni), hostIP, hostKey, k8sMeta, ipcache.Identity{
 			ID:     identity.ReservedIdentityUnmanaged,
 			Source: source.Kubernetes,
+			Vni:    vni,
 		})
 		if npc {
 			namedPortsChanged = true
@@ -714,7 +797,8 @@ func (k *K8sPodWatcher) deletePodHostData(pod *slim_corev1.Pod) (bool, error) {
 		// a small race condition exists here as deletion could occur in
 		// parallel based on another event but it doesn't matter as the
 		// identity is going away
-		id, exists := k.ipcache.LookupByIP(podIP)
+		ipKey := ipcache.KeyWithVNI(podIP, podVNI(pod))
+		id, exists := k.ipcache.LookupByIP(ipKey)
 		if !exists {
 			skipped = true
 			errs = append(errs, fmt.Sprintf("identity for IP %s does not exist in case", podIP))
@@ -727,7 +811,7 @@ func (k *K8sPodWatcher) deletePodHostData(pod *slim_corev1.Pod) (bool, error) {
 			continue
 		}
 
-		k.ipcache.DeleteOnMetadataMatch(podIP, source.Kubernetes, pod.Namespace, pod.Name)
+		k.ipcache.DeleteOnMetadataMatch(ipKey, source.Kubernetes, pod.Namespace, pod.Name)
 	}
 
 	if len(errs) != 0 {

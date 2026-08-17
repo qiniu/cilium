@@ -27,13 +27,21 @@ type Map interface {
 	Delete(key bpf.MapKey) error
 }
 
+// VniMap is the native-vpc VNI-scoped ipcache BPF map (cilium_ipcache_vni).
+type VniMap Map
+
 // BPFListener implements the ipcache.IPIdentityMappingBPFListener
 // interface with an IPCache store that is backed by BPF maps.
 type BPFListener struct {
 	logger *slog.Logger
 	// bpfMap is the BPF map that this listener will update when events are
-	// received from the IPCache.
+	// received from the IPCache (plain cluster-wide ipcache).
 	bpfMap Map
+
+	// bpfVniMap is the native-vpc VNI-scoped ipcache map. Entries with a
+	// non-zero VNI are written here instead of bpfMap so that overlapping IPs
+	// from different VPCs can coexist.
+	bpfVniMap VniMap
 
 	// monitorNotify is used to notify the monitor about ipcache updates
 	monitorNotify monitorNotify
@@ -43,10 +51,11 @@ type BPFListener struct {
 }
 
 // NewListener returns a new listener to push IPCache entries into BPF maps.
-func NewListener(m Map, mn monitorNotify, tunnelConf tunnel.Config, logger *slog.Logger) *BPFListener {
+func NewListener(m Map, vniMap VniMap, mn monitorNotify, tunnelConf tunnel.Config, logger *slog.Logger) *BPFListener {
 	return &BPFListener{
 		logger:        logger,
 		bpfMap:        m,
+		bpfVniMap:     vniMap,
 		monitorNotify: mn,
 		tunnelConf:    tunnelConf,
 	}
@@ -79,11 +88,11 @@ func (l *BPFListener) notifyMonitor(modType ipcache.CacheModification,
 	switch modType {
 	case ipcache.Upsert:
 		msg := monitorAPI.IPCacheUpsertedMessage(cidr.String(), newIdentity, oldIdentityPtr,
-			newHostIP, oldHostIP, encryptKey, k8sNamespace, k8sPodName)
+			newHostIP, oldHostIP, encryptKey, k8sNamespace, k8sPodName, newID.Vni)
 		l.monitorNotify.SendEvent(monitorAPI.MessageTypeAgent, msg)
 	case ipcache.Delete:
 		msg := monitorAPI.IPCacheDeletedMessage(cidr.String(), newIdentity, oldIdentityPtr,
-			newHostIP, oldHostIP, encryptKey, k8sNamespace, k8sPodName)
+			newHostIP, oldHostIP, encryptKey, k8sNamespace, k8sPodName, newID.Vni)
 		l.monitorNotify.SendEvent(monitorAPI.MessageTypeAgent, msg)
 	}
 }
@@ -114,9 +123,20 @@ func (l *BPFListener) OnIPIdentityCacheChange(modType ipcache.CacheModification,
 	// pkg/datapath instead of in the daemon directly so that the code is more
 	// logically located.
 
-	// Update BPF Maps.
-
-	key := ipcacheMap.NewKey(cidr.IP, cidr.Mask, uint16(cidrCluster.ClusterID()))
+	// Update BPF Maps. Entries with a non-zero VNI (native-vpc mode) go to the
+	// VNI-scoped map so that overlapping IPs from different VPCs can coexist.
+	// All other entries use the plain cluster-wide ipcache map.
+	targetMap := Map(l.bpfMap)
+	var (
+		key    ipcacheMap.Key
+		vniKey ipcacheMap.VniKey
+	)
+	if newID.Vni > 0 && l.bpfVniMap != nil {
+		targetMap = l.bpfVniMap
+		vniKey = ipcacheMap.NewVniKey(cidr.IP, cidr.Mask, newID.Vni)
+	} else {
+		key = ipcacheMap.NewKey(cidr.IP, cidr.Mask, uint16(cidrCluster.ClusterID()))
+	}
 
 	switch modType {
 	case ipcache.Upsert:
@@ -141,7 +161,12 @@ func (l *BPFListener) OnIPIdentityCacheChange(modType ipcache.CacheModification,
 		}
 		value := ipcacheMap.NewValue(uint32(newID.ID), tunnelEndpoint, encryptKey,
 			ipcacheMap.RemoteEndpointInfoFlags(endpointFlags))
-		err := l.bpfMap.Update(&key, &value)
+		var err error
+		if newID.Vni > 0 && l.bpfVniMap != nil {
+			err = targetMap.Update(&vniKey, &value)
+		} else {
+			err = targetMap.Update(&key, &value)
+		}
 		if err != nil {
 			scopedLog.Warn(
 				"unable to update bpf map",
@@ -151,7 +176,12 @@ func (l *BPFListener) OnIPIdentityCacheChange(modType ipcache.CacheModification,
 			)
 		}
 	case ipcache.Delete:
-		err := l.bpfMap.Delete(&key)
+		var err error
+		if newID.Vni > 0 && l.bpfVniMap != nil {
+			err = targetMap.Delete(&vniKey)
+		} else {
+			err = targetMap.Delete(&key)
+		}
 		if err != nil {
 			scopedLog.Warn(
 				"unable to delete from bpf map",

@@ -880,6 +880,10 @@ message IPCacheNotification {
     uint32 encrypt_key = 6;
     string namespace = 7;
     string pod_name = 8;
+    // vni is the native-vpc VNI (Virtual Network Identifier) of the ipcache
+    // entry, so monitor/hubble events can distinguish overlapping IPs from
+    // different VPCs.
+    uint32 vni = 9;
 }
 
 message ServiceUpsertNotificationAddr {

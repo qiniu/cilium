@@ -187,7 +187,25 @@ type restoredIPRule struct {
 }
 
 // map from EP IPs to *Endpoint
-type restoredEPs map[netip.Addr]*endpoint.Endpoint
+// restoredEPs maps a bare endpoint IP to the restored endpoints using it.
+// Native-vpc: several endpoints on this node may share the same IP with
+// different VNIs, so the value is a small slice rather than a single pointer;
+// the bare-IP lookup only resolves when exactly one restored endpoint uses
+// the IP (never guessing a VNI under overlap).
+type restoredEPs map[netip.Addr][]*endpoint.Endpoint
+
+// appendRestoredEP adds ep to the per-IP restored endpoint list, replacing a
+// previous entry with the same endpoint ID (RestoreRules may be re-invoked
+// for the same endpoint) instead of duplicating it.
+func appendRestoredEP(eps []*endpoint.Endpoint, ep *endpoint.Endpoint) []*endpoint.Endpoint {
+	for i, old := range eps {
+		if old.ID == ep.ID {
+			eps[i] = ep
+			return eps
+		}
+	}
+	return append(eps, ep)
+}
 
 // asIPRule returns a new restore.IPRule representing the rules, including the provided IP map.
 func asIPRule(r *regexp.Regexp, IPs map[restore.RuleIPOrCIDR]struct{}) restore.IPRule {
@@ -361,10 +379,10 @@ func (p *DNSProxy) RestoreRules(ep *endpoint.Endpoint) {
 	p.Lock()
 	defer p.Unlock()
 	if ep.IPv4.IsValid() {
-		p.restoredEPs[ep.IPv4] = ep
+		p.restoredEPs[ep.IPv4] = appendRestoredEP(p.restoredEPs[ep.IPv4], ep)
 	}
 	if ep.IPv6.IsValid() {
-		p.restoredEPs[ep.IPv6] = ep
+		p.restoredEPs[ep.IPv6] = appendRestoredEP(p.restoredEPs[ep.IPv6], ep)
 	}
 	if ep.IsHost() {
 		p.restoredHost = ep
@@ -412,9 +430,17 @@ func (p *DNSProxy) RestoreRules(ep *endpoint.Endpoint) {
 func (p *DNSProxy) removeRestoredRulesLocked(endpointID uint64) {
 	if _, exists := p.restored[endpointID]; exists {
 		// Remove IP->ID mappings for the restored EP
-		for ip, ep := range p.restoredEPs {
-			if ep.ID == uint16(endpointID) {
+		for ip, eps := range p.restoredEPs {
+			kept := eps[:0]
+			for _, ep := range eps {
+				if ep.ID != uint16(endpointID) {
+					kept = append(kept, ep)
+				}
+			}
+			if len(kept) == 0 {
 				delete(p.restoredEPs, ip)
+			} else {
+				p.restoredEPs[ip] = kept
 			}
 		}
 		for _, rule := range p.restored[endpointID] {
@@ -737,10 +763,12 @@ func shutdownServers(logger *slog.Logger, dnsServers []*dns.Server) {
 // LookupEndpointByIP wraps LookupRegisteredEndpoint by falling back to an restored EP, if available
 func (p *DNSProxy) LookupEndpointByIP(ip netip.Addr) (endpoint *endpoint.Endpoint, isHost bool, err error) {
 	if endpoint, isHost, err = p.proxyLookupHandler.LookupRegisteredEndpoint(ip); err != nil {
-		// Check restored endpoints
-		var found bool
-		if endpoint, found = p.restoredEPs[ip]; found {
-			return endpoint, endpoint.IsHost(), nil
+		// Check restored endpoints. Only resolve when the bare IP maps to
+		// exactly one restored endpoint: with native-vpc IP overlap the DNS
+		// proxy cannot tell which VNI the connection belongs to, so it fails
+		// closed rather than applying another VPC's restored rules.
+		if eps := p.restoredEPs[ip]; len(eps) == 1 {
+			return eps[0], eps[0].IsHost(), nil
 		}
 		if isHost && p.restoredHost != nil {
 			return p.restoredHost, true, nil
@@ -997,7 +1025,11 @@ func (p *DNSProxy) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
 
 	// Ignore invalid IP - getter will handle invalid value.
 	targetServerID := identity.GetWorldIdentityFromIP(targetServer.Addr())
-	if serverSecID, exists := p.proxyLookupHandler.LookupSecIDByIP(targetServer.Addr()); !exists {
+	// The DNS proxy only has the target's bare IP. Use the explicit
+	// unambiguous lookup so a single native-vpc entry can be resolved without
+	// weakening the generic key-exact ipcache semantics; overlapping IPs stay
+	// ambiguous and correctly fall back to WORLD instead of guessing a VPC.
+	if serverSecID, exists := p.proxyLookupHandler.LookupSecIDByIPUnambiguous(targetServer.Addr()); !exists {
 		scopedLog.Debug(
 			"cannot find server ip in ipcache, defaulting to WORLD",
 			logfields.Server, targetServer.Addr(),

@@ -151,6 +151,7 @@ type FQDNMapping struct {
 	SourceIdentity uint32                 `protobuf:"varint,4,opt,name=source_identity,json=sourceIdentity,proto3" json:"source_identity,omitempty"` // Identity of the client making the DNS request
 	SourceIp       []byte                 `protobuf:"bytes,5,opt,name=source_ip,json=sourceIp,proto3" json:"source_ip,omitempty"`                    // IP address of the client making the DNS request
 	ResponseCode   uint32                 `protobuf:"varint,6,opt,name=response_code,json=responseCode,proto3" json:"response_code,omitempty"`       // DNS Response code as specified in RFC2316
+	Vni            uint32                 `protobuf:"varint,7,opt,name=vni,proto3" json:"vni,omitempty"`                                             // Native-vpc VNI of the source endpoint; zero means non-VPC
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -223,6 +224,13 @@ func (x *FQDNMapping) GetSourceIp() []byte {
 func (x *FQDNMapping) GetResponseCode() uint32 {
 	if x != nil {
 		return x.ResponseCode
+	}
+	return 0
+}
+
+func (x *FQDNMapping) GetVni() uint32 {
+	if x != nil {
+		return x.Vni
 	}
 	return 0
 }
@@ -522,6 +530,7 @@ type EndpointInfo struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            uint64                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
 	Ip            [][]byte               `protobuf:"bytes,2,rep,name=ip,proto3" json:"ip,omitempty"`
+	Vni           uint32                 `protobuf:"varint,3,opt,name=vni,proto3" json:"vni,omitempty"` // Native-vpc VNI; zero means non-VPC endpoint.
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -568,6 +577,13 @@ func (x *EndpointInfo) GetIp() [][]byte {
 		return x.Ip
 	}
 	return nil
+}
+
+func (x *EndpointInfo) GetVni() uint32 {
+	if x != nil {
+		return x.Vni
+	}
+	return 0
 }
 
 // Cilium Identity ID to IP prefix mapping
@@ -631,14 +647,15 @@ const file_standalone_dns_proxy_standalone_dns_proxy_proto_rawDesc = "" +
 	"\x13PolicyStateResponse\x12<\n" +
 	"\bresponse\x18\x01 \x01(\x0e2 .standalonednsproxy.ResponseCodeR\bresponse\x12\x1d\n" +
 	"\n" +
-	"request_id\x18\x02 \x01(\tR\trequestId\"\xbb\x01\n" +
+	"request_id\x18\x02 \x01(\tR\trequestId\"\xcd\x01\n" +
 	"\vFQDNMapping\x12\x12\n" +
 	"\x04fqdn\x18\x01 \x01(\tR\x04fqdn\x12\x1b\n" +
 	"\trecord_ip\x18\x02 \x03(\fR\brecordIp\x12\x10\n" +
 	"\x03ttl\x18\x03 \x01(\rR\x03ttl\x12'\n" +
 	"\x0fsource_identity\x18\x04 \x01(\rR\x0esourceIdentity\x12\x1b\n" +
 	"\tsource_ip\x18\x05 \x01(\fR\bsourceIp\x12#\n" +
-	"\rresponse_code\x18\x06 \x01(\rR\fresponseCode\"U\n" +
+	"\rresponse_code\x18\x06 \x01(\rR\fresponseCode\x12\x10\n" +
+	"\x03vni\x18\a \x01(\rR\x03vni\"U\n" +
 	"\x15UpdateMappingResponse\x12<\n" +
 	"\bresponse\x18\x01 \x01(\x0e2 .standalonednsproxy.ResponseCodeR\bresponse\"\x8d\x01\n" +
 	"\tDNSServer\x12.\n" +
@@ -659,10 +676,11 @@ const file_standalone_dns_proxy_standalone_dns_proxy_proto_rawDesc = "" +
 	"\x1aidentity_to_prefix_mapping\x18\x04 \x03(\v2+.standalonednsproxy.IdentityToPrefixMappingR\x17identityToPrefixMapping\"~\n" +
 	"\x19IdentityToEndpointMapping\x12\x1a\n" +
 	"\bidentity\x18\x01 \x01(\rR\bidentity\x12E\n" +
-	"\rendpoint_info\x18\x02 \x03(\v2 .standalonednsproxy.EndpointInfoR\fendpointInfo\".\n" +
+	"\rendpoint_info\x18\x02 \x03(\v2 .standalonednsproxy.EndpointInfoR\fendpointInfo\"@\n" +
 	"\fEndpointInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x04R\x02id\x12\x0e\n" +
-	"\x02ip\x18\x02 \x03(\fR\x02ip\"M\n" +
+	"\x02ip\x18\x02 \x03(\fR\x02ip\x12\x10\n" +
+	"\x03vni\x18\x03 \x01(\rR\x03vni\"M\n" +
 	"\x17IdentityToPrefixMapping\x12\x1a\n" +
 	"\bidentity\x18\x01 \x01(\rR\bidentity\x12\x16\n" +
 	"\x06prefix\x18\x02 \x03(\fR\x06prefix*\x9f\x02\n" +

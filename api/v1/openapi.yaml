@@ -3459,6 +3459,12 @@ definitions:
       encryptKey:
         description: The context ID for the encryption session
         type: integer
+      vniID:
+        description: Native-vpc VNI of the entry; 0 means not VPC-scoped
+        type: integer
+        format: int64
+        minimum: 0
+        maximum: 16777215
       metadata:
         "$ref": "#/definitions/IPListEntryMetadata"
   IPListEntryMetadata:

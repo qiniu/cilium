@@ -2253,10 +2253,39 @@ func (c *DaemonConfig) Validate(vp *viper.Viper) error {
 		return err
 	}
 
-	if c.EnableNativeVPC && c.NativeVPCVNIAnnotation == "" {
-		return fmt.Errorf("native-vpc mode is enabled but --%s is empty", NativeVPCVNIAnnotationName)
+	if err := c.validateNativeVPC(); err != nil {
+		return err
 	}
 
+	return nil
+}
+
+func (c *DaemonConfig) validateNativeVPC() error {
+	if !c.EnableNativeVPC {
+		return nil
+	}
+	if c.NativeVPCVNIAnnotation == "" {
+		return fmt.Errorf("native-vpc mode is enabled but --%s is empty", NativeVPCVNIAnnotationName)
+	}
+	if c.TunnelingEnabled() {
+		return fmt.Errorf("native-vpc mode requires --%s=%s: kube-ovn owns the host/tunnel datapath and Cilium bpf_overlay uses a plain-IP ipcache", RoutingMode, RoutingModeNative)
+	}
+	if c.EnableCiliumEndpointSlice {
+		// CiliumEndpointSlice packs endpoints as CoreCiliumEndpoint, which
+		// carries no object metadata and therefore cannot transport the
+		// native-vpc VNI annotation. Remote endpoints would silently be
+		// registered without a VNI (or skipped), breaking identity resolution
+		// across nodes.
+		return fmt.Errorf("native-vpc mode is incompatible with --%s: CiliumEndpointSlice cannot carry the per-endpoint VNI", EnableCiliumEndpointSlice)
+	}
+	if c.EnableEndpointRoutes {
+		// A per-endpoint route is a kernel route to the address, and the
+		// routing table has no notion of a VPC: the endpoints sharing an
+		// address would install one route between them, so the last one to
+		// regenerate would receive the traffic of all of them and the first
+		// CNI DEL would remove the route the others still need.
+		return fmt.Errorf("native-vpc mode is incompatible with --%s: a per-endpoint route is keyed by address alone, which overlapping VPC subnets make ambiguous", EnableEndpointRoutes)
+	}
 	return nil
 }
 

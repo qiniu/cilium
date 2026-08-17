@@ -16,6 +16,10 @@ type EndpointInfoSource interface {
 	GetIPv4Address() string
 	GetIPv6Address() string
 	GetNamedPort(ingress bool, name string, proto u8proto.U8proto) uint16
+	// GetVNIID reports the native-vpc scope of the endpoint, 0 when it is not
+	// in a VPC. The proxy identifies an endpoint by address, so the scope is
+	// what says whether that address is unambiguous.
+	GetVNIID() uint64
 }
 
 // EndpointUpdater returns information about an endpoint being proxied and

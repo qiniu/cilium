@@ -176,6 +176,18 @@ static __always_inline int __per_packet_lb_svc_xlate_4(void *ctx, struct iphdr *
 	fraginfo = ipfrag_encode_ipv4(ip4);
 	l4_off = ETH_HLEN + ipv4_hdrlen(ip4);
 
+	/* Native-vpc: never translate a service address for a VPC endpoint.
+	 * Service backends are keyed by (IP, port) with no VPC scope, and the
+	 * backend address would be resolved by kube-ovn inside the *sender's*
+	 * VPC - i.e. a client of one VPC could be redirected to the pod that
+	 * happens to own the same IP in its own VPC. kube-ovn (or kube-proxy)
+	 * owns service load balancing in this mode; leave the packet untouched.
+	 * This mirrors the endpoint-map fast path, which is skipped for the same
+	 * reason.
+	 */
+	if (CONFIG(native_vpc_vni) > 0)
+		goto skip_service_lookup;
+
 	ret = lb4_extract_tuple(ctx, ip4, fraginfo, l4_off, &tuple);
 	if (IS_ERR(ret)) {
 		if (ret == DROP_UNSUPP_SERVICE_PROTO || ret == DROP_UNKNOWN_L4)
@@ -348,6 +360,12 @@ static __always_inline int __per_packet_lb_svc_xlate_6(void *ctx, struct ipv6hdr
 		return ret;
 
 	l4_off = ETH_HLEN + ret;
+
+	/* Native-vpc: never translate a service address for a VPC endpoint
+	 * (see the IPv4 twin for the rationale).
+	 */
+	if (CONFIG(native_vpc_vni) > 0)
+		goto skip_service_lookup;
 
 	ret = lb6_extract_tuple(ctx, ip6, fraginfo, l4_off, &tuple);
 	if (IS_ERR(ret)) {
@@ -734,7 +752,14 @@ ipv6_forward_to_destination(struct __ctx_buff *ctx, struct ipv6hdr *ip6,
 	set_identity_mark(ctx, SECLABEL_IPV6, MARK_MAGIC_IDENTITY);
 #endif
 
-	if (is_defined(ENABLE_ROUTING) || hairpin_flow || is_defined(ENABLE_HOST_ROUTING)) {
+	/* In native-vpc mode, skip the local-endpoint fast path. Different VPCs may
+	 * reuse the same IP on this node, and the endpoint map is keyed by IP only,
+	 * so a local delivery lookup would be ambiguous. Hand the packet to the
+	 * stack instead; kube-ovn delivers it on the correct VPC (by VNI), and the
+	 * destination ingress resolves the source with its own VNI.
+	 */
+	if (CONFIG(native_vpc_vni) == 0 &&
+	    (is_defined(ENABLE_ROUTING) || hairpin_flow || is_defined(ENABLE_HOST_ROUTING))) {
 		const struct endpoint_info *ep;
 		union v6addr daddr;
 
@@ -872,7 +897,15 @@ static __always_inline int handle_ipv6_from_lxc(struct __ctx_buff *ctx, __u32 *d
 			same_subnet_id = (src_subnet_id == dst_subnet_id) && (src_subnet_id != 0);
 		}
 
-		info = lookup_ip6_remote_endpoint(daddr, 0);
+		/* VNI-first: a stale/foreign plain entry for the same IP must not
+		 * shadow the correct VNI-scoped identity (native-vpc only).
+		 */
+		info = NULL;
+		if (CONFIG(native_vpc_vni) > 0)
+			info = ipcache_lookup6_vni(&cilium_ipcache_vni, daddr,
+						   V6_CACHE_KEY_LEN, CONFIG(native_vpc_vni));
+		if (!info)
+			info = lookup_ip6_remote_endpoint(daddr, 0);
 		if (info) {
 			*dst_sec_identity = info->sec_identity;
 			skip_tunnel = (info->flag_skip_tunnel) || same_subnet_id;
@@ -1210,8 +1243,13 @@ ipv4_forward_to_destination(struct __ctx_buff *ctx, struct iphdr *ip4,
 	 * the ipv4_local_delivery() function to enforce ingress policies for
 	 * that endpoint.
 	 */
-	if (is_defined(ENABLE_ROUTING) || hairpin_flow ||
-	    is_defined(ENABLE_HOST_ROUTING)) {
+	/* In native-vpc mode, skip the local-endpoint fast path (see the IPv6
+	 * twin above for the rationale: same IP may exist in multiple VPCs on
+	 * this node and the endpoint map is keyed by IP only).
+	 */
+	if (CONFIG(native_vpc_vni) == 0 &&
+	    (is_defined(ENABLE_ROUTING) || hairpin_flow ||
+	     is_defined(ENABLE_HOST_ROUTING))) {
 		__be32 daddr = ip4->daddr;
 		const struct endpoint_info *ep;
 
@@ -1442,7 +1480,15 @@ static __always_inline int handle_ipv4_from_lxc(struct __ctx_buff *ctx, __u32 *d
 	}
 
 	/* Determine the destination category for policy fallback. */
-	info = lookup_ip4_remote_endpoint(ip4->daddr, cluster_id);
+	/* VNI-first: a stale/foreign plain entry for the same IP must not
+	 * shadow the correct VNI-scoped identity (native-vpc only).
+	 */
+	info = NULL;
+	if (CONFIG(native_vpc_vni) > 0)
+		info = ipcache_lookup4_vni(&cilium_ipcache_vni, ip4->daddr,
+					   V4_CACHE_KEY_LEN, CONFIG(native_vpc_vni));
+	if (!info)
+		info = lookup_ip4_remote_endpoint(ip4->daddr, cluster_id);
 	if (info) {
 		*dst_sec_identity = info->sec_identity;
 		skip_tunnel = (info->flag_skip_tunnel) || same_subnet_id;
@@ -2082,7 +2128,15 @@ int tail_ipv6_to_endpoint(struct __ctx_buff *ctx)
 		const union v6addr *src = (union v6addr *)&ip6->saddr;
 		const struct remote_endpoint_info *info;
 
-		info = lookup_ip6_remote_endpoint(src, 0);
+		/* In native-vpc mode, resolve the source against the VNI-scoped
+		 * ipcache using this endpoint's own VNI first (see IPv4 twin).
+		 */
+		info = NULL;
+		if (CONFIG(native_vpc_vni) > 0)
+			info = ipcache_lookup6_vni(&cilium_ipcache_vni, src,
+						   V6_CACHE_KEY_LEN, CONFIG(native_vpc_vni));
+		if (!info)
+			info = lookup_ip6_remote_endpoint(src, 0);
 		if (info != NULL) {
 			__u32 sec_identity = info->sec_identity;
 
@@ -2400,7 +2454,25 @@ int tail_ipv4_to_endpoint(struct __ctx_buff *ctx)
 	if (identity_is_reserved(src_sec_identity)) {
 		const struct remote_endpoint_info *info;
 
-		info = lookup_ip4_remote_endpoint(ip4->saddr, 0);
+		/* In native-vpc mode, resolve the source against the VNI-scoped
+		 * ipcache using this endpoint's own VNI first. This correctly
+		 * attributes same-VPC peers (the common case) even when their IP
+		 * is not present in the plain ipcache due to overlapping VPC
+		 * subnets.
+		 *
+		 * Inter-VPC traffic never reaches this endpoint: whether two VPCs
+		 * can talk is decided by kube-ovn's forwarding plane (logical
+		 * router / ACL), which drops it by default (VPC peering is not
+		 * supported). A VNI-map miss therefore only occurs for non-VPC
+		 * sources (default-subnet pods, nodes, world), which are resolved
+		 * via the plain ipcache below.
+		 */
+		info = NULL;
+		if (CONFIG(native_vpc_vni) > 0)
+			info = ipcache_lookup4_vni(&cilium_ipcache_vni, ip4->saddr,
+						   V4_CACHE_KEY_LEN, CONFIG(native_vpc_vni));
+		if (!info)
+			info = lookup_ip4_remote_endpoint(ip4->saddr, 0);
 		if (info != NULL) {
 			__u32 sec_identity = info->sec_identity;
 

@@ -19,6 +19,7 @@ Checkpatch
 Cheng
 Chewbacca
 Chun
+CiliumEndpoint
 Clientset
 Cloudflare
 ConnectX
@@ -137,8 +138,11 @@ Uncompress
 Uncordon
 VM
 VMware
+VNI
+VNIID
 VNet
 VPC
+VPCs
 Vagrantcloud
 Vagrantfile
 Vagrantfiles
@@ -151,9 +155,11 @@ Yunsong
 Zannoni
 Zhou
 aarch
+accesslog
 addr
 agentNotReadyTaintKey
 aggregationInterval
+alertable
 alibabacloud
 allocatable
 allocateLoadBalancerNodePorts
@@ -187,6 +193,9 @@ awk
 aws
 backend
 backends
+backfill
+backfilled
+backfills
 backoff
 backport
 backported
@@ -234,6 +243,7 @@ cgroup
 cgroups
 chainingTarget
 cheatsheet
+checksums
 ci
 cidr
 cidrs
@@ -346,6 +356,7 @@ enet
 enetc
 eni
 enqueuing
+epinfo
 etcd
 etcdinit
 eth
@@ -363,12 +374,16 @@ externallyCreated
 extraConfig
 facto
 failover
+fallbacks
+falsy
 fcfs
 fec
 fieldAggregate
 filesystem
 filesystems
 firewalling
+flowlog
+flowpb
 fortio
 fqdn
 fromCIDR
@@ -385,6 +400,7 @@ gcc
 gcp
 geneve
 getpeername
+getters
 gettingstarted
 github
 gke
@@ -410,6 +426,8 @@ healthz
 helloworld
 herokuapp
 hexData
+hostIP
+hostNetwork
 hostPath
 hostPort
 hostname
@@ -508,6 +526,7 @@ kubespray
 kvstore
 kvstoremesh
 kvstores
+labelsContext
 lan
 latencies
 lbipam
@@ -572,6 +591,7 @@ memcd
 microservice
 microservices
 minikube
+misclassified
 misconfiguration
 misconfigured
 misconfigures
@@ -585,6 +605,7 @@ mtk
 mtls
 mtu
 mul
+multi
 multicast
 multicluster
 multicore
@@ -640,9 +661,11 @@ originatingTLS
 os
 oseq
 otx
+ovn
 pahole
 parentRefs
 parsable
+parseVNIFromPod
 parserfactory
 parsers
 passthrough
@@ -672,6 +695,7 @@ preloaded
 preloading
 prem
 prepended
+preprocessing
 prepulls
 prerequirement
 prestop
@@ -719,6 +743,7 @@ repo
 repos
 reproducibility
 reqid
+requeues
 requireIPv
 resizable
 resync
@@ -757,6 +782,7 @@ sid
 sig
 skb
 snat
+socketLB
 socknat
 spinlock
 srv
@@ -790,6 +816,7 @@ supergalatic
 superset
 suricate
 svc
+synchronizer
 syscall
 sysctl
 sysctls
@@ -804,6 +831,7 @@ tcplife
 tcptop
 tcptracer
 tcx
+teardown
 templating
 terminatingTLS
 terminationGracePeriodSeconds
@@ -818,12 +846,14 @@ tiefighter
 tls
 toCIDR
 toCIDRSet
+toEndpoints
 toFQDN
 toFQDNs
 toGroups
 tofqdns
 tolerations
 toolchain
+toolchains
 topologies
 toto
 traceparent
@@ -831,6 +861,7 @@ tracepoint
 tracepoints
 tracestate
 transpiling
+truthy
 tsne
 tunables
 tunings
@@ -845,7 +876,9 @@ unapplied
 unaudited
 uncommented
 uncordon
+underlay
 unencrypted
+unescaped
 unexported
 unicast
 uninline
@@ -855,6 +888,9 @@ unmanaged
 unmarshalled
 unmigrated
 unpaginated
+unparsable
+unpinned
+unscoped
 unselect
 unsettable
 untriaged
@@ -863,6 +899,9 @@ unwinded
 upgradeCompatibility
 uplink
 uprobes
+upsert
+upsertLocal
+upserts
 upstreamed
 uptime
 uretprobes
@@ -913,5 +952,3 @@ xwing
 yaml
 zsh
 ztunnel
-falsy
-truthy

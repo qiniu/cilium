@@ -635,7 +635,16 @@ func (ep *Endpoint) fromSerializedEndpoint(r *serializableEndpoint) {
 	ep.IPv6IPAMPool = r.IPv6IPAMPool
 	ep.IPv4 = r.IPv4
 	ep.IPv4IPAMPool = r.IPv4IPAMPool
-	ep.VNIID = r.VNIID
+	// Native-vpc: only restore the VNI scope while the mode is enabled. If the
+	// mode was turned off, a restored non-zero VNI would leave the endpoint
+	// half configured - VNI-scoped endpoint identifiers and ipcache keys, a
+	// non-zero CONFIG(native_vpc_vni) in bpf_lxc, but no VNI-scoped ipcache map
+	// for the agent to write to - so peers would resolve it as world. Dropping
+	// it makes the downgrade deterministic: the endpoint returns to the plain
+	// scheme on every plane.
+	if option.Config.EnableNativeVPC {
+		ep.VNIID = r.VNIID
+	}
 	ep.nodeMAC = r.NodeMAC
 	ep.SecurityIdentity = r.SecurityIdentity
 	ep.DNSRules = r.DNSRules

@@ -566,6 +566,7 @@ L7 information for HTTP flows. It corresponds to Cilium&#39;s [accesslog.LogReco
 | encrypt_key | [uint32](#uint32) |  |  |
 | namespace | [string](#string) |  |  |
 | pod_name | [string](#string) |  |  |
+| vni | [uint32](#uint32) |  | vni is the native-vpc VNI (Virtual Network Identifier) of the ipcache entry, so monitor/hubble events can distinguish overlapping IPs from different VPCs. |
 
 
 

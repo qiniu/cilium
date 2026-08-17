@@ -8,11 +8,26 @@ import (
 
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/cilium/cilium/pkg/annotation"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	cilium_v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	"github.com/cilium/cilium/pkg/k8s/types"
 )
+
+// nativeVPCCEPAnnotations returns the subset of the CiliumEndpoint annotations
+// that the CEP handlers need. Only the native-vpc VNI annotation is kept: it is
+// the (VNI, IP) scope used to register the endpoint IP in the VNI-scoped
+// ipcache, so dropping it would make every remote endpoint of a native-vpc
+// cluster unresolvable. All other annotations are dropped to keep the informer
+// cache small.
+func nativeVPCCEPAnnotations(annotations map[string]string) map[string]string {
+	vni, ok := annotations[annotation.CiliumEndpointNativeVPCVNI]
+	if !ok {
+		return nil
+	}
+	return map[string]string{annotation.CiliumEndpointNativeVPCVNI: vni}
+}
 
 // AnnotationsEqual returns whether the annotation with any key in
 // relevantAnnotations is equal in anno1 and anno2.
@@ -138,10 +153,11 @@ func TransformToCiliumEndpoint(obj any) (any, error) {
 				Namespace:       concreteObj.ObjectMeta.Namespace,
 				UID:             concreteObj.ObjectMeta.UID,
 				ResourceVersion: concreteObj.ObjectMeta.ResourceVersion,
-				// We don't need to store labels nor annotations because
-				// they are not used by the CEP handlers.
+				// We don't need to store labels because they are not used by
+				// the CEP handlers. Of the annotations, only the native-vpc VNI
+				// is kept (see nativeVPCCEPAnnotations).
 				Labels:      nil,
-				Annotations: nil,
+				Annotations: nativeVPCCEPAnnotations(concreteObj.ObjectMeta.Annotations),
 				// OwnerReferences is needed for ztunnel xDS to extract Pod UID.
 				OwnerReferences: slim_metav1.SlimOwnerReferences(concreteObj.ObjectMeta.OwnerReferences),
 			},
@@ -176,10 +192,11 @@ func TransformToCiliumEndpoint(obj any) (any, error) {
 					Namespace:       ciliumEndpoint.ObjectMeta.Namespace,
 					UID:             ciliumEndpoint.ObjectMeta.UID,
 					ResourceVersion: ciliumEndpoint.ObjectMeta.ResourceVersion,
-					// We don't need to store labels nor annotations because
-					// they are not used by the CEP handlers.
+					// We don't need to store labels because they are not used by
+					// the CEP handlers. Of the annotations, only the native-vpc VNI
+					// is kept (see nativeVPCCEPAnnotations).
 					Labels:      nil,
-					Annotations: nil,
+					Annotations: nativeVPCCEPAnnotations(ciliumEndpoint.ObjectMeta.Annotations),
 					// OwnerReferences is needed for ztunnel xDS to extract Pod UID.
 					OwnerReferences: slim_metav1.SlimOwnerReferences(ciliumEndpoint.ObjectMeta.OwnerReferences),
 				},

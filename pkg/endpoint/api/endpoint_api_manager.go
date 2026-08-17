@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"maps"
 	"net"
-	"strconv"
 	"sync"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,6 +35,7 @@ import (
 	"github.com/cilium/cilium/pkg/labelsfilter"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/mac"
+	"github.com/cilium/cilium/pkg/nativevpc"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/resiliency"
 	"github.com/cilium/cilium/pkg/time"
@@ -177,6 +177,15 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 	m.endpointCreations.NewCreateRequest(ep, cancel)
 	defer m.endpointCreations.EndCreateRequest(ep)
 	nativeVPCEnabled := option.Config.EnableNativeVPC && option.Config.NativeVPCVNIAnnotation != ""
+	// The pod annotation is the single source of truth for the VNI. A value
+	// supplied through the API/CNI request is untrusted: it is only accepted if
+	// it matches what the annotation says (checked after the pod is fetched),
+	// so it can neither invent a VPC scope nor satisfy the mandatory-VNI gate
+	// when the annotation could not be read.
+	requestedVNI := ep.VNIID
+	if nativeVPCEnabled {
+		ep.VNIID = 0
+	}
 
 	identityLbls := maps.Clone(apiLabels)
 
@@ -227,8 +236,7 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 
 			// For native-vpc mode, read VNI from Pod annotation before conflict detection.
 			if nativeVPCEnabled && pod != nil {
-				vniAnnotationKey := option.Config.NativeVPCVNIAnnotation
-				parsedVNI, err := parseVNIFromPod(pod, vniAnnotationKey, m.logger)
+				parsedVNI, err := parseVNIFromPod(pod, m.logger)
 				if err != nil {
 					return invalidDataError(ep, err)
 				}
@@ -240,6 +248,10 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 						logfields.VNIID, ep.VNIID,
 					)
 				} else {
+					// Only reachable for hostNetwork pods (parseVNIFromPod returns
+					// unsetVNI for them); any other missing/invalid VNI is an error
+					// propagated by parseVNIFromPod above. VNIID=0 keeps hostNetwork
+					// endpoints on the plain-IP scheme (they are not in any VPC).
 					ep.VNIID = 0
 				}
 			}
@@ -270,6 +282,16 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 				ep.SetMac(mac)
 			}
 		}
+	}
+
+	if err := requireVNI(nativeVPCEnabled, ep.VNIID, ep.IsHost(), ep.K8sNamespaceAndPodNameIsSet(), pod); err != nil {
+		return invalidDataError(ep, fmt.Errorf("native-vpc endpoint %s/%s: %w", ep.K8sNamespace, ep.K8sPodName, err))
+	}
+
+	if nativeVPCEnabled && requestedVNI != 0 && requestedVNI != ep.VNIID {
+		return invalidDataError(ep, fmt.Errorf(
+			"native-vpc endpoint %s/%s: requested VNI %d does not match the pod annotation %q (%d); the annotation is the single source of truth",
+			ep.K8sNamespace, ep.K8sPodName, requestedVNI, option.Config.NativeVPCVNIAnnotation, ep.VNIID))
 	}
 
 	// Build checkIDs for IP conflict detection
@@ -569,37 +591,65 @@ func (m *endpointAPIManager) ModifyEndpointIdentityLabelsFromAPI(id string, add,
 }
 
 const unsetVNI = int64(-1)
-const maxVNI = (1 << 24) - 1
 
-// parseVNIFromPod extracts and validates the VNI from the Pod annotation.
-// Returns unsetVNI if no VNI annotation is present or if the Pod is using host networking.
-// Returns an error if the annotation value is invalid or not greater than 0.
-func parseVNIFromPod(pod *slim_corev1.Pod, vniAnnotationKey string, logger *slog.Logger) (int64, error) {
-	if pod.Spec.HostNetwork {
-		// Skip VNI for hostNetwork pods - they use host network stack directly,
-		// not overlay network, so VNI-based isolation is not applicable.
-		logger.Debug("Skipping VNI for hostNetwork pod",
+// requireVNI enforces the native-vpc control-plane invariant: every endpoint
+// of a non-hostNetwork Kubernetes pod must have a VNI by the time it is
+// created.
+//
+// The VNI can only be read from the pod annotation. If the pod store and the
+// apiserver were both unavailable, the Kubernetes block of CreateEndpoint is
+// skipped with a warning, and the endpoint would otherwise be created on the
+// plain-IP scheme: registered under the bare "ipv4:" identifier (colliding
+// with the same IP in another VPC), without the VNI identity label, with
+// CONFIG(native_vpc_vni)=0 in bpf_lxc and without any VNI-scoped ipcache
+// entry. That is exactly the non-deterministic "partially reachable" state
+// this mode exists to prevent, so the endpoint is rejected instead and the CNI
+// ADD is retried by the kubelet.
+//
+// Endpoints that are not Kubernetes pods (host endpoint, ingress endpoint,
+// non-k8s workloads) are not in any VPC and keep VNI 0.
+func requireVNI(nativeVPCEnabled bool, vni uint64, isHostEndpoint, isK8sPod bool, pod *slim_corev1.Pod) error {
+	if !nativeVPCEnabled || vni > 0 || isHostEndpoint || !isK8sPod {
+		return nil
+	}
+	if pod != nil && pod.Spec.HostNetwork {
+		// hostNetwork pods use the host stack and are not in any VPC.
+		return nil
+	}
+	if pod == nil {
+		return fmt.Errorf("no VNI: pod metadata is unavailable, so the annotation %q could not be read",
+			option.Config.NativeVPCVNIAnnotation)
+	}
+	return fmt.Errorf("no VNI: the annotation %q was not applied", option.Config.NativeVPCVNIAnnotation)
+}
+
+// parseVNIFromPod extracts and validates the VNI from the Pod annotation using
+// the single shared decision table (pkg/nativevpc), so that endpoint creation,
+// endpoint restore and the pod watcher can never disagree about a pod's scope.
+//
+// It returns unsetVNI for hostNetwork pods (they use the host network stack
+// directly and are not part of any overlay network).
+//
+// For any other pod a missing, empty, non-numeric, zero or out-of-range
+// tunnel_key annotation is an ERROR in native-vpc mode: the OVN subnet always
+// carries a non-zero tunnel key (kube-ovn waits for it before allocating pod
+// IPs), so such a value means misconfiguration or an out-of-date kube-ovn.
+// Rejecting the endpoint here is deliberate: silently degrading to the plain
+// IP scheme would collide with overlapping VPC subnets and cause
+// non-deterministic policy verdicts.
+func parseVNIFromPod(pod *slim_corev1.Pod, logger *slog.Logger) (int64, error) {
+	vni, res, err := nativevpc.VNIFromPod(pod)
+	switch res {
+	case nativevpc.Disabled, nativevpc.HostNetwork:
+		logger.Debug("Skipping VNI for pod that is not in any VPC",
 			logfields.K8sPodName, pod.Namespace+"/"+pod.Name,
 		)
 		return unsetVNI, nil
+	case nativevpc.Absent:
+		return 0, fmt.Errorf("native-vpc pod %s/%s is missing tunnel_key annotation %q: a non-zero VNI is mandatory for every non-hostNetwork pod",
+			pod.Namespace, pod.Name, option.Config.NativeVPCVNIAnnotation)
+	case nativevpc.Invalid:
+		return 0, fmt.Errorf("native-vpc pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
-
-	vniStr, ok := pod.Annotations[vniAnnotationKey]
-	if !ok {
-		return unsetVNI, nil
-	}
-
-	// VNI annotation exists, parse it
-	parsedVNI, err := strconv.ParseInt(vniStr, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid VNI annotation %q value %q: %w", vniAnnotationKey, vniStr, err)
-	}
-	if parsedVNI <= 0 {
-		return 0, fmt.Errorf("VNI annotation %q has invalid value %d", vniAnnotationKey, parsedVNI)
-	}
-	if parsedVNI > maxVNI {
-		return 0, fmt.Errorf("VNI annotation %q value %d exceeds maximum (%d)", vniAnnotationKey, parsedVNI, maxVNI)
-	}
-
-	return parsedVNI, nil
+	return int64(vni), nil
 }

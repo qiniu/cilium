@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 
 	"github.com/go-openapi/runtime/middleware"
@@ -134,12 +135,13 @@ func (r *IpamPostIpamIPHandler) Handle(params ipamapi.PostIpamIPParams) middlewa
 }
 
 func (r *IpamDeleteIpamIPHandler) Handle(params ipamapi.DeleteIpamIPParams) middleware.Responder {
-	// Release of an IP that is in use is not allowed
-	if ep := r.EndpointManager.LookupIPv4(params.IP); ep != nil {
-		return api.Error(ipamapi.DeleteIpamIPFailureCode, fmt.Errorf("IP is in use by endpoint %d", ep.ID))
-	}
-	if ep := r.EndpointManager.LookupIPv6(params.IP); ep != nil {
-		return api.Error(ipamapi.DeleteIpamIPFailureCode, fmt.Errorf("IP is in use by endpoint %d", ep.ID))
+	// Release of an IP that is in use is not allowed. In native-vpc mode the
+	// endpoint may only be indexed under its (VNI, IP) key, so use the
+	// VNI-agnostic "in use" lookup rather than the bare-IP index.
+	if addr, err := netip.ParseAddr(params.IP); err == nil {
+		if ep := endpointmanager.LookupIPAnyVNI(r.EndpointManager, addr); ep != nil {
+			return api.Error(ipamapi.DeleteIpamIPFailureCode, fmt.Errorf("IP is in use by endpoint %d", ep.ID))
+		}
 	}
 
 	ip := net.ParseIP(params.IP)

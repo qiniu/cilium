@@ -19,6 +19,7 @@ import (
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	"github.com/cilium/cilium/pkg/labelsfilter"
+	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -139,6 +140,14 @@ func TestParseVNIFromPod(t *testing.T) {
 	logger := hivetest.Logger(t)
 	vniKey := "your-cni.io/vni"
 
+	// The shared parser (pkg/nativevpc) is config driven.
+	prevEnabled, prevKey := option.Config.EnableNativeVPC, option.Config.NativeVPCVNIAnnotation
+	option.Config.EnableNativeVPC = true
+	t.Cleanup(func() {
+		option.Config.EnableNativeVPC = prevEnabled
+		option.Config.NativeVPCVNIAnnotation = prevKey
+	})
+
 	tests := []struct {
 		name          string
 		pod           *slim_corev1.Pod
@@ -170,8 +179,20 @@ func TestParseVNIFromPod(t *testing.T) {
 					},
 				},
 			},
-			key:         vniKey,
-			expectedVNI: unsetVNI,
+			key:           vniKey,
+			expectedError: `native-vpc pod / is missing tunnel_key annotation "your-cni.io/vni": a non-zero VNI is mandatory for every non-hostNetwork pod`,
+		},
+		{
+			name: "Empty annotation value",
+			pod: &slim_corev1.Pod{
+				ObjectMeta: slim_metav1.ObjectMeta{
+					Annotations: map[string]string{
+						vniKey: "",
+					},
+				},
+			},
+			key:           vniKey,
+			expectedError: `native-vpc pod / is missing tunnel_key annotation "your-cni.io/vni": a non-zero VNI is mandatory for every non-hostNetwork pod`,
 		},
 		{
 			name: "Valid VNI",
@@ -195,7 +216,7 @@ func TestParseVNIFromPod(t *testing.T) {
 				},
 			},
 			key:           vniKey,
-			expectedError: `invalid VNI annotation "your-cni.io/vni" value "abc": strconv.ParseInt: parsing "abc": invalid syntax`,
+			expectedError: `native-vpc pod /: annotation "your-cni.io/vni" value "abc" is not a number: strconv.ParseUint: parsing "abc": invalid syntax`,
 		},
 		{
 			name: "Invalid VNI (zero)",
@@ -207,7 +228,7 @@ func TestParseVNIFromPod(t *testing.T) {
 				},
 			},
 			key:           vniKey,
-			expectedError: `VNI annotation "your-cni.io/vni" has invalid value 0`,
+			expectedError: `native-vpc pod /: annotation "your-cni.io/vni" is 0: kube-ovn only ever writes a non-zero tunnel_key`,
 		},
 		{
 			name: "Invalid VNI (negative)",
@@ -219,7 +240,7 @@ func TestParseVNIFromPod(t *testing.T) {
 				},
 			},
 			key:           vniKey,
-			expectedError: `VNI annotation "your-cni.io/vni" has invalid value -1`,
+			expectedError: `native-vpc pod /: annotation "your-cni.io/vni" value "-1" is not a number: strconv.ParseUint: parsing "-1": invalid syntax`,
 		},
 		{
 			name: "Invalid VNI (exceeds max)",
@@ -231,13 +252,14 @@ func TestParseVNIFromPod(t *testing.T) {
 				},
 			},
 			key:           vniKey,
-			expectedError: `VNI annotation "your-cni.io/vni" value 16777216 exceeds maximum (16777215)`,
+			expectedError: `native-vpc pod /: annotation "your-cni.io/vni" value 16777216 exceeds the maximum VNI (16777215)`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			vni, err := parseVNIFromPod(tt.pod, tt.key, logger)
+			option.Config.NativeVPCVNIAnnotation = tt.key
+			vni, err := parseVNIFromPod(tt.pod, logger)
 			if tt.expectedError != "" {
 				assert.Error(t, err)
 				assert.EqualError(t, err, tt.expectedError)
@@ -245,6 +267,52 @@ func TestParseVNIFromPod(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.expectedVNI, vni)
 			}
+		})
+	}
+}
+
+// TestRequireVNI pins the native-vpc control-plane invariant: an endpoint of a
+// non-hostNetwork Kubernetes pod must never be created without a VNI, in
+// particular when the pod metadata could not be fetched (that path only logs a
+// warning and would otherwise fall back to the plain-IP scheme).
+func TestRequireVNI(t *testing.T) {
+	prev := option.Config.NativeVPCVNIAnnotation
+	option.Config.NativeVPCVNIAnnotation = "ovn.kubernetes.io/tunnel_key"
+	t.Cleanup(func() { option.Config.NativeVPCVNIAnnotation = prev })
+
+	hostNetworkPod := &slim_corev1.Pod{Spec: slim_corev1.PodSpec{HostNetwork: true}}
+	pod := &slim_corev1.Pod{}
+
+	for _, tc := range []struct {
+		name      string
+		nativeVPC bool
+		vni       uint64
+		isHost    bool
+		isK8sPod  bool
+		pod       *slim_corev1.Pod
+		wantErr   string
+	}{
+		{name: "native-vpc disabled", isK8sPod: true, pod: pod},
+		{name: "vni resolved", nativeVPC: true, vni: 36, isK8sPod: true, pod: pod},
+		{name: "host endpoint", nativeVPC: true, isHost: true},
+		{name: "not a k8s pod", nativeVPC: true},
+		{name: "hostNetwork pod", nativeVPC: true, isK8sPod: true, pod: hostNetworkPod},
+		{
+			name: "pod metadata unavailable", nativeVPC: true, isK8sPod: true, pod: nil,
+			wantErr: "pod metadata is unavailable",
+		},
+		{
+			name: "pod without annotation", nativeVPC: true, isK8sPod: true, pod: pod,
+			wantErr: "was not applied",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := requireVNI(tc.nativeVPC, tc.vni, tc.isHost, tc.isK8sPod, tc.pod)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
 		})
 	}
 }

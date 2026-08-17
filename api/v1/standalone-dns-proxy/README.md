@@ -75,6 +75,7 @@ cilium endpoint ipaddress and ID
 | ----- | ---- | ----- | ----------- |
 | id | [uint64](#uint64) |  |  |
 | ip | [bytes](#bytes) | repeated |  |
+| vni | [uint32](#uint32) |  | Native-vpc VNI; zero means non-VPC endpoint. |
 
 
 
@@ -95,6 +96,7 @@ FQDN-IP mapping goalstate sent from SDP to agent
 | source_identity | [uint32](#uint32) |  | Identity of the client making the DNS request |
 | source_ip | [bytes](#bytes) |  | IP address of the client making the DNS request |
 | response_code | [uint32](#uint32) |  | DNS Response code as specified in RFC2316 |
+| vni | [uint32](#uint32) |  | Native-vpc VNI of the source endpoint; zero means non-VPC |
 
 
 

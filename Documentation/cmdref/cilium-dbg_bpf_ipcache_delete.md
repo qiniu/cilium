@@ -19,6 +19,7 @@ cilium bpf ipcache delete 10.244.3.110/32 --clusterid 1
 ```
       --clusterid uint16   Cluster ID
   -h, --help               help for delete
+      --vni uint32         native-vpc VNI of the entry (0 = the unscoped ipcache)
 ```
 
 ### Options inherited from parent commands
