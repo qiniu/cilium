@@ -516,13 +516,15 @@ func TestSyncVNIFromPodAnnotation(t *testing.T) {
 		require.Equal(t, uint64(36), ep.GetVNIID())
 	})
 
-	t.Run("missing annotation resolves to native scheme", func(t *testing.T) {
+	t.Run("missing annotation keeps the last known VNI", func(t *testing.T) {
 		ep := newEndpoint()
+		ep.logger.Store(hivetest.Logger(t))
 		ep.VNIID = 36
-		require.True(t, ep.SyncVNIFromPodAnnotation(&corev1.Pod{
+		require.False(t, ep.SyncVNIFromPodAnnotation(&corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default", Annotations: map[string]string{}},
 		}))
-		require.Zero(t, ep.GetVNIID(), "absent annotation follows cilium native logic (plain IP scheme)")
+		require.Equal(t, uint64(36), ep.GetVNIID(),
+			"downgrading to the plain scheme would merge the endpoint with the same IP in another VPC")
 	})
 
 	t.Run("missing annotation with VNI 0 is a no-op", func(t *testing.T) {
@@ -533,34 +535,30 @@ func TestSyncVNIFromPodAnnotation(t *testing.T) {
 		require.Zero(t, ep.GetVNIID())
 	})
 
-	t.Run("zero annotation is an error and falls back to native", func(t *testing.T) {
-		ep := newEndpoint()
-		ep.logger.Store(hivetest.Logger(t))
-		ep.VNIID = 36
-		require.True(t, ep.SyncVNIFromPodAnnotation(podWith("0", false)))
-		require.Zero(t, ep.GetVNIID(), "a zero tunnel_key violates the kube-ovn guarantee; fall back to native")
-	})
+	for _, broken := range []string{"0", "abc", "16777216"} {
+		t.Run("broken annotation "+broken+" keeps the last known VNI", func(t *testing.T) {
+			ep := newEndpoint()
+			ep.logger.Store(hivetest.Logger(t))
+			ep.VNIID = 36
+			require.False(t, ep.SyncVNIFromPodAnnotation(podWith(broken, false)))
+			require.Equal(t, uint64(36), ep.GetVNIID(),
+				"a broken tunnel_key is reported, but must not merge the endpoint into the plain scope")
+		})
 
-	t.Run("invalid annotation is an error and falls back to native", func(t *testing.T) {
-		ep := newEndpoint()
-		ep.logger.Store(hivetest.Logger(t))
-		ep.VNIID = 36
-		require.True(t, ep.SyncVNIFromPodAnnotation(podWith("abc", false)))
-		require.Zero(t, ep.GetVNIID())
-	})
-
-	t.Run("out-of-range annotation is an error and falls back to native", func(t *testing.T) {
-		ep := newEndpoint()
-		ep.logger.Store(hivetest.Logger(t))
-		ep.VNIID = 36
-		require.True(t, ep.SyncVNIFromPodAnnotation(podWith("16777216", false)))
-		require.Zero(t, ep.GetVNIID())
-	})
+		t.Run("broken annotation "+broken+" on a fresh endpoint stays native", func(t *testing.T) {
+			ep := newEndpoint()
+			ep.logger.Store(hivetest.Logger(t))
+			require.False(t, ep.SyncVNIFromPodAnnotation(podWith(broken, false)))
+			require.Zero(t, ep.GetVNIID())
+		})
+	}
 
 	t.Run("hostNetwork pod resolves to native scheme without error", func(t *testing.T) {
 		ep := newEndpoint()
+		ep.logger.Store(hivetest.Logger(t))
 		ep.VNIID = 36
-		require.True(t, ep.SyncVNIFromPodAnnotation(podWith("36", true)))
+		require.True(t, ep.SyncVNIFromPodAnnotation(podWith("36", true)),
+			"hostNetwork is an authoritative not-in-any-VPC signal and may reset the scope")
 		require.Zero(t, ep.GetVNIID())
 	})
 

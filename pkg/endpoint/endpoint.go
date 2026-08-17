@@ -869,18 +869,23 @@ const legacyVPCLabelSource = "vpc"
 // (option.Config.NativeVPCVNIAnnotation) and returns whether it changed.
 //
 // Decision table (the annotation is the single source of truth):
-//   - annotation absent   -> native scheme (VNIID = 0). This is the normal
-//     case for hostNetwork pods and non-OVN (e.g. vlan) subnets, which are
-//     never part of an overlay VPC. kube-ovn guarantees that every
-//     non-hostNetwork OVN pod carries a non-zero tunnel_key before CNI ADD,
-//     so an absent annotation on an OVN pod only occurs for legacy pods that
-//     predate the kube-ovn backfill.
+//   - annotation absent   -> native scheme (VNIID = 0) **only for an endpoint
+//     that has no VNI yet**. This is the normal case for hostNetwork pods and
+//     non-OVN (e.g. vlan) subnets, which are never part of an overlay VPC.
+//     kube-ovn guarantees that every non-hostNetwork OVN pod carries a
+//     non-zero tunnel_key before CNI ADD, so an absent annotation on an OVN
+//     pod only occurs for legacy pods that predate the kube-ovn backfill, for
+//     a stale pod object, or for an operator/kube-ovn error.
 //   - annotation present, valid (> 0, <= MaxVNI) -> VNIID = the value.
-//   - annotation present, 0 or unparsable/out-of-range -> ERROR. A zero
-//     tunnel_key violates the kube-ovn guarantee (kube-ovn never writes 0;
-//     its allocation gate and backfill only ever persist a non-zero key). The
-//     endpoint falls back to the native scheme (VNIID = 0) and the operator
-//     must investigate the kube-ovn side.
+//   - annotation present, 0 or unparsable/out-of-range -> ERROR.
+//
+// A non-zero VNI is never downgraded to 0 by a missing or broken annotation:
+// dropping the VNI would move the endpoint into the shared plain-IP scope,
+// where it collides with the same IP in another VPC and gets a foreign
+// identity - the exact failure this mode prevents. Keeping the last known VNI
+// is the fail-closed direction (at worst the endpoint stays isolated), and the
+// condition is reported as an error. A pod that legitimately leaves a VPC is
+// recreated by kube-ovn, which creates a new endpoint.
 //
 // Fallback strategy: if a running pod is ever missing its tunnel_key
 // annotation, restart kube-ovn-controller first (its init flow backfills the
@@ -906,7 +911,13 @@ func (e *Endpoint) SyncVNIFromPodAnnotation(pod *slim_corev1.Pod) bool {
 		parsed uint64
 		valid  bool
 		broken bool // annotation present but 0 / unparsable / out of range
+		// hostNetwork is an immutable, structural "not in any VPC" signal, as
+		// opposed to an annotation that can transiently disappear.
+		hostNetwork bool
 	)
+	if pod != nil && pod.Spec.HostNetwork {
+		hostNetwork = true
+	}
 	if pod != nil && !pod.Spec.HostNetwork {
 		if vniStr, ok := pod.Annotations[option.Config.NativeVPCVNIAnnotation]; ok {
 			if v, err := strconv.ParseUint(strings.TrimSpace(vniStr), 10, 64); err == nil && v > 0 && v <= MaxVNI {
@@ -919,7 +930,7 @@ func (e *Endpoint) SyncVNIFromPodAnnotation(pod *slim_corev1.Pod) bool {
 
 	if broken {
 		e.getLogger().Error(
-			"Invalid tunnel_key annotation on native-vpc pod (violates the kube-ovn guarantee: only a non-zero key is ever written); falling back to the native (non-VPC) scheme",
+			"Invalid tunnel_key annotation on native-vpc pod (violates the kube-ovn guarantee: only a non-zero key is ever written)",
 			logfields.K8sPodName, pod.Namespace+"/"+pod.Name,
 			logfields.Annotation, pod.Annotations[option.Config.NativeVPCVNIAnnotation],
 		)
@@ -929,10 +940,23 @@ func (e *Endpoint) SyncVNIFromPodAnnotation(pod *slim_corev1.Pod) bool {
 	defer e.unlock()
 
 	// Decision table: absent -> native (0); present+valid -> parsed;
-	// present+broken -> native (0) with the error logged above.
+	// present+broken -> keep the current scope with the error logged above.
 	newVNI := uint64(0)
 	if valid {
 		newVNI = parsed
+	}
+
+	// Never downgrade a VPC endpoint into the shared plain-IP scope because the
+	// annotation is missing or broken: that would merge it with the same IP in
+	// another VPC. Keep the last known VNI and report. A hostNetwork pod is the
+	// one authoritative "no VPC" signal and may reset the scope.
+	if newVNI == 0 && e.VNIID != 0 && !hostNetwork {
+		e.getLogger().Error(
+			"Native-vpc pod has no usable tunnel_key annotation; keeping the last known VNI to preserve VPC isolation",
+			logfields.VNIID, e.VNIID,
+			logfields.K8sPodName, e.GetK8sNamespaceAndPodName(),
+		)
+		return false
 	}
 
 	// VNI is an identity/datapath dimension. Once an endpoint is ready, changing

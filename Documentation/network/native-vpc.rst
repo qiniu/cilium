@@ -76,9 +76,17 @@ annotation is the single source of truth):
 * annotation present and **valid** (``0 < VNI <= 16777215``) -> ``VNIID`` is
   set to the annotation value;
 * annotation present and **0 / unparsable / out of range** -> an error is
-  logged and the pod falls back to the native scheme. A zero tunnel_key
-  violates the kube-ovn guarantee (kube-ovn only ever writes a non-zero key),
-  so the kube-ovn side must be investigated.
+  logged. A zero tunnel_key violates the kube-ovn guarantee (kube-ovn only
+  ever writes a non-zero key), so the kube-ovn side must be investigated.
+
+An endpoint that already has a VNI is never downgraded to the plain scheme by a
+missing or broken annotation: that would merge it with the same IP in another
+VPC and give it a foreign identity. The last known VNI is kept (fail closed;
+at worst the endpoint stays isolated) and the condition is logged as an error.
+Endpoint *creation* is stricter still: a non-hostNetwork pod without a usable
+annotation is rejected, so the CNI ADD is retried instead of creating an
+endpoint outside any VPC. The single authoritative "not in any VPC" signal is
+``pod.spec.hostNetwork``, which is immutable, unlike an annotation.
 
 When ``VNIID`` drops to 0 (annotation removed or broken), the endpoint also
 loses its ``vni:io-cilium-native-vpc-vni=<vni>`` identity label: the
@@ -482,6 +490,61 @@ below:
 | assembly (hive graph)       | verified by TestAgentCell + compile-time       |
 |                             | assertions on the optional interfaces          |
 +-----------------------------+------------------------------------------------+
+
+Ordered sign-off
+----------------
+
+The planes are reviewed in data-flow order. Each one is signed off on three
+axes: **completeness** (every read/write site of the plane is covered),
+**correctness** (keys match, unsafe fallbacks fail closed) and
+**compatibility** (non-native-vpc deployments are unaffected, and upgrades /
+restarts converge).
+
++----+----------------------+---------------------------------------------------+
+| #  | Plane                | Sign-off                                          |
++====+======================+===================================================+
+| 1  | control              | complete; correct (creation and restore both fail |
+|    |                      | closed: a missing annotation rejects the endpoint |
+|    |                      | resp. keeps the last VNI); compatible (VNIID is   |
+|    |                      | serialized, so a restart converges even without   |
+|    |                      | the pod store; inert when the mode is off)        |
++----+----------------------+---------------------------------------------------+
+| 2  | cache                | complete; correct (write/delete symmetry and      |
+|    |                      | per-IP index proven by test); compatible (a zero  |
+|    |                      | VNI produces byte-identical keys and no index)    |
++----+----------------------+---------------------------------------------------+
+| 3  | forwarding           | complete; correct (VNI map first, plain fallback  |
+|    |                      | for non-VPC, endpoint-map fast path skipped);     |
+|    |                      | compatible (the VNI map is pruned from the        |
+|    |                      | program by the loader's reachability analysis     |
+|    |                      | when native_vpc_vni == 0, so non-native-vpc nodes |
+|    |                      | never even create it; map flags match the C side) |
++----+----------------------+---------------------------------------------------+
+| 4  | policy               | complete for identity-based selection; correct    |
+|    |                      | (the identity key includes the VNI label, proven  |
+|    |                      | by test); boundaries: CIDR/FQDN prefixes and the  |
+|    |                      | host-namespace L7 proxy                           |
++----+----------------------+---------------------------------------------------+
+| 5  | conntrack / NAT      | **incomplete by design** (the CT key has no VNI); |
+|    |                      | the precondition is detected and reported; NAT is |
+|    |                      | inert because its features are rejected           |
++----+----------------------+---------------------------------------------------+
+| 6  | service / LB         | rejected at startup (test-covered both ways)      |
++----+----------------------+---------------------------------------------------+
+| 7  | encryption / egress  | rejected at startup (test-covered both ways)      |
+|    | gateway / masquerade |                                                   |
++----+----------------------+---------------------------------------------------+
+| 8  | observability        | complete; correct (every enrichment lookup is     |
+|    |                      | (VNI, IP)- or id-keyed); compatible (the extra    |
+|    |                      | endpoint lookup is skipped when the mode is off)  |
++----+----------------------+---------------------------------------------------+
+| 9  | lifecycle            | restart converges (serialized VNI + annotation    |
+|    |                      | re-read + CEP backfill); upgrade requires all     |
+|    |                      | agents first; downgrade ignores the annotation    |
++----+----------------------+---------------------------------------------------+
+| 10 | assembly (hive)      | TestAgentCell + compile-time assertions on the    |
+|    |                      | optional interfaces                               |
++----+----------------------+---------------------------------------------------+
 
 Method
 ------

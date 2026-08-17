@@ -5,6 +5,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	agentK8s "github.com/cilium/cilium/daemon/k8s"
@@ -29,26 +30,35 @@ const (
 	AutoCIDR = "auto"
 )
 
+// nativeVPCDatapathCompatibility rejects the datapath features whose state is
+// keyed by the bare IP (service backends, socket LB, egress gateway source
+// IPs, NAT tuples, encryption peer selection). With overlapping VPC subnets
+// they would silently mix two VPCs, so they must fail at startup rather than
+// in a data-dependent way. See Documentation/network/native-vpc.rst.
+func nativeVPCDatapathCompatibility(params daemonConfigParams) error {
+	if !params.DaemonConfig.EnableNativeVPC {
+		return nil
+	}
+	switch {
+	case params.KPRConfig.KubeProxyReplacement:
+		return errors.New("native-vpc mode is incompatible with kube-proxy replacement: service backends are keyed by (IP, port), so pods of different VPCs sharing an IP collapse into one backend")
+	case params.KPRConfig.EnableSocketLB:
+		return errors.New("native-vpc mode is incompatible with socket LB (--bpf-lb-sock): socket-level translation happens before the VPC scope is known")
+	case params.DaemonConfig.EnableEgressGateway:
+		return errors.New("native-vpc mode is incompatible with the egress gateway: its policies select traffic by the bare source IP")
+	case params.DaemonConfig.EnableBPFMasquerade:
+		return errors.New("native-vpc mode is incompatible with BPF masquerade: kube-ovn owns SNAT, and the NAT maps are keyed by the bare tuple")
+	case params.IPSecConfig.Enabled(), params.WireguardConfig.Enabled():
+		return errors.New("native-vpc mode is incompatible with Cilium encryption (IPsec/WireGuard): peer selection is keyed by the bare IP")
+	}
+	return nil
+}
+
 func initAndValidateDaemonConfig(params daemonConfigParams) error {
 	// Native-vpc: overlapping IPs across VPCs are only safe on the planes that
-	// key their state by (VNI, IP). Datapath features whose state is keyed by
-	// the bare IP (service backends, socket LB, egress gateway source IPs,
-	// encryption peer selection) would silently mix two VPCs, so they are
-	// rejected here rather than failing in a data-dependent way.
-	// See Documentation/network/native-vpc.rst.
-	if params.DaemonConfig.EnableNativeVPC {
-		switch {
-		case params.KPRConfig.KubeProxyReplacement:
-			return fmt.Errorf("native-vpc mode is incompatible with kube-proxy replacement: service backends are keyed by (IP, port), so pods of different VPCs sharing an IP collapse into one backend")
-		case params.KPRConfig.EnableSocketLB:
-			return fmt.Errorf("native-vpc mode is incompatible with socket LB (--bpf-lb-sock): socket-level translation happens before the VPC scope is known")
-		case params.DaemonConfig.EnableEgressGateway:
-			return fmt.Errorf("native-vpc mode is incompatible with the egress gateway: its policies select traffic by the bare source IP")
-		case params.DaemonConfig.EnableBPFMasquerade:
-			return fmt.Errorf("native-vpc mode is incompatible with BPF masquerade: kube-ovn owns SNAT, and the NAT maps are keyed by the bare tuple")
-		case params.IPSecConfig.Enabled(), params.WireguardConfig.Enabled():
-			return fmt.Errorf("native-vpc mode is incompatible with Cilium encryption (IPsec/WireGuard): peer selection is keyed by the bare IP")
-		}
+	// key their state by (VNI, IP).
+	if err := nativeVPCDatapathCompatibility(params); err != nil {
+		return err
 	}
 
 	// WireGuard and IPSec are mutually exclusive.

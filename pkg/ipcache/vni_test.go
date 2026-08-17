@@ -349,3 +349,83 @@ func TestLookupByIdentityAndHostStripVNI(t *testing.T) {
 	require.Len(t, cidrs, 1)
 	require.Equal(t, "192.168.1.2/32", cidrs[0].String())
 }
+
+// TestPlainModeUnaffected is the compatibility guard for the cache plane: with
+// VNI 0 (every non-native-vpc deployment and every non-VPC entity) the ipcache
+// must behave exactly as before - plain keys, no VNI index, plain lookups
+// resolving, and no VNI leaking into the identity.
+func TestPlainModeUnaffected(t *testing.T) {
+	s := setupIPCacheTestSuite(t)
+	ip := "10.0.0.1"
+	addr := netip.MustParseAddr(ip)
+
+	require.Equal(t, ip, KeyWithVNI(ip, 0), "a zero VNI must not change the key")
+
+	_, err := s.IPIdentityCache.Upsert(ip, net.ParseIP("10.58.55.23"), 0, &K8sMetadata{
+		Namespace: "ns", PodName: "pod",
+	}, Identity{ID: identity.NumericIdentity(1234), Source: source.Kubernetes})
+	require.NoError(t, err)
+
+	got, ok := s.IPIdentityCache.LookupByIP(ip)
+	require.True(t, ok)
+	require.Zero(t, got.Vni)
+	id, ok := s.IPIdentityCache.LookupSecIDByIP(addr)
+	require.True(t, ok)
+	require.Equal(t, identity.NumericIdentity(1234), id.ID)
+	require.NotNil(t, s.IPIdentityCache.GetK8sMetadata(addr))
+
+	s.IPIdentityCache.mutex.RLock()
+	require.Empty(t, s.IPIdentityCache.ipToVNIKeys, "no VNI index entries for plain upserts")
+	s.IPIdentityCache.mutex.RUnlock()
+
+	// The VNI-scoped readers must not answer for a plain entry.
+	_, ok = s.IPIdentityCache.LookupSecIDByIPForVNI(addr, 36)
+	require.False(t, ok)
+	require.Nil(t, s.IPIdentityCache.GetK8sMetadataForVNI(addr, 36))
+
+	// ... and the plain delete must clean everything up.
+	s.IPIdentityCache.Delete(ip, source.Kubernetes)
+	_, ok = s.IPIdentityCache.LookupByIP(ip)
+	require.False(t, ok)
+}
+
+// TestVNIWriteDeleteSymmetry checks question 3 of the audit method for the
+// cache plane: the delete key is identical to the write key, deleting one VPC
+// never affects the other, and the per-IP VNI index is cleaned up exactly.
+func TestVNIWriteDeleteSymmetry(t *testing.T) {
+	s := setupIPCacheTestSuite(t)
+	ip := "192.168.1.2"
+	addr := netip.MustParseAddr(ip)
+
+	for _, vni := range []uint32{36, 17} {
+		_, err := s.IPIdentityCache.Upsert(KeyWithVNI(ip, vni), nil, 0, &K8sMetadata{
+			Namespace: "ns", PodName: "pod",
+		}, Identity{ID: identity.NumericIdentity(20000 + vni), Source: source.CustomResource, Vni: vni})
+		require.NoError(t, err)
+	}
+
+	s.IPIdentityCache.mutex.RLock()
+	require.Len(t, s.IPIdentityCache.ipToVNIKeys[ip], 2)
+	s.IPIdentityCache.mutex.RUnlock()
+
+	// Deleting VPC 36 must leave VPC 17 fully intact.
+	s.IPIdentityCache.Delete(KeyWithVNI(ip, 36), source.CustomResource)
+	_, ok := s.IPIdentityCache.LookupSecIDByIPForVNI(addr, 36)
+	require.False(t, ok)
+	got, ok := s.IPIdentityCache.LookupSecIDByIPForVNI(addr, 17)
+	require.True(t, ok)
+	require.Equal(t, identity.NumericIdentity(20017), got.ID)
+	require.NotNil(t, s.IPIdentityCache.GetK8sMetadataForVNI(addr, 17))
+
+	// With a single VNI left the IP is unambiguous again.
+	got, ok = s.IPIdentityCache.LookupSecIDByIPUnambiguous(addr)
+	require.True(t, ok)
+	require.Equal(t, identity.NumericIdentity(20017), got.ID)
+
+	s.IPIdentityCache.Delete(KeyWithVNI(ip, 17), source.CustomResource)
+	s.IPIdentityCache.mutex.RLock()
+	require.NotContains(t, s.IPIdentityCache.ipToVNIKeys, ip, "the per-IP VNI index must be emptied")
+	s.IPIdentityCache.mutex.RUnlock()
+	_, ok = s.IPIdentityCache.LookupSecIDByIPUnambiguous(addr)
+	require.False(t, ok)
+}
