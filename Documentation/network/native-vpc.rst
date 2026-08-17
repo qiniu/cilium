@@ -608,11 +608,42 @@ identity label, a CiliumEndpoint annotation, and endpoint-manager identifiers.
 |                                               | native routing required, CES rejected            |
 +-----------------------------------------------+--------------------------------------------------+
 
+Seams
+~~~~~
+
+*Upstream* (kube-ovn -> Cilium): the ``tunnel_key`` annotation is read by three
+different planes - endpoint creation and restore (control), the pod watcher
+(cache) and, through them, the datapath and observability planes. They now
+share **one** decision table, ``pkg/nativevpc.VNIFromPod``, so a value cannot be
+accepted by one reader and rejected by another. Before, the pod watcher used
+its own parser without a range check, so an out-of-range ``tunnel_key`` would
+register a VPC-scoped ipcache entry under a VNI that no endpoint had.
+
+The API/CNI endpoint-creation request also carries a ``vni-id`` field. It is
+untrusted: the value is only accepted if it matches the annotation, so it can
+neither invent a VPC scope nor satisfy the mandatory-VNI gate when the
+annotation could not be read.
+
+*Downstream* (control -> cache/forwarding/observability): a VNI change is
+propagated by replacing state, never by mutating it in place:
+
+* the identity-sync controller captures the VNI at registration time, so the
+  old controller's ``StopFunc`` deletes exactly the key its ``DoFunc`` wrote
+  (``<ip>@vni:N``) instead of leaking it;
+* the endpoint-manager references are replaced from a snapshot of the
+  previously registered identifiers;
+* the CiliumEndpoint annotation carries the VNI to the cache plane of the other
+  nodes.
+
 Defects found and fixed during this audit: the CEP informer transform dropped
 the annotation (remote endpoints silently lost their VNI); the CEP backfill
 patch used an unescaped JSON Pointer (the whole patch, including the status
 update, failed); endpoint creation fell back to the plain-IP scheme when the
-pod metadata was unavailable instead of failing closed.
+pod metadata was unavailable instead of failing closed; endpoint restore
+*downgraded* a VPC endpoint to the plain scheme when the annotation was
+transiently missing; the three annotation parsers disagreed on validity; the
+API-supplied ``vni-id`` bypassed the "annotation is the single source of truth"
+invariant.
 
 Cache plane
 -----------

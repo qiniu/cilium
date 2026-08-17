@@ -140,6 +140,14 @@ func TestParseVNIFromPod(t *testing.T) {
 	logger := hivetest.Logger(t)
 	vniKey := "your-cni.io/vni"
 
+	// The shared parser (pkg/nativevpc) is config driven.
+	prevEnabled, prevKey := option.Config.EnableNativeVPC, option.Config.NativeVPCVNIAnnotation
+	option.Config.EnableNativeVPC = true
+	t.Cleanup(func() {
+		option.Config.EnableNativeVPC = prevEnabled
+		option.Config.NativeVPCVNIAnnotation = prevKey
+	})
+
 	tests := []struct {
 		name          string
 		pod           *slim_corev1.Pod
@@ -208,7 +216,7 @@ func TestParseVNIFromPod(t *testing.T) {
 				},
 			},
 			key:           vniKey,
-			expectedError: `invalid VNI annotation "your-cni.io/vni" value "abc": strconv.ParseInt: parsing "abc": invalid syntax`,
+			expectedError: `native-vpc pod /: annotation "your-cni.io/vni" value "abc" is not a number: strconv.ParseUint: parsing "abc": invalid syntax`,
 		},
 		{
 			name: "Invalid VNI (zero)",
@@ -220,7 +228,7 @@ func TestParseVNIFromPod(t *testing.T) {
 				},
 			},
 			key:           vniKey,
-			expectedError: `VNI annotation "your-cni.io/vni" has invalid value 0`,
+			expectedError: `native-vpc pod /: annotation "your-cni.io/vni" is 0: kube-ovn only ever writes a non-zero tunnel_key`,
 		},
 		{
 			name: "Invalid VNI (negative)",
@@ -232,7 +240,7 @@ func TestParseVNIFromPod(t *testing.T) {
 				},
 			},
 			key:           vniKey,
-			expectedError: `VNI annotation "your-cni.io/vni" has invalid value -1`,
+			expectedError: `native-vpc pod /: annotation "your-cni.io/vni" value "-1" is not a number: strconv.ParseUint: parsing "-1": invalid syntax`,
 		},
 		{
 			name: "Invalid VNI (exceeds max)",
@@ -244,13 +252,14 @@ func TestParseVNIFromPod(t *testing.T) {
 				},
 			},
 			key:           vniKey,
-			expectedError: `VNI annotation "your-cni.io/vni" value 16777216 exceeds maximum (16777215)`,
+			expectedError: `native-vpc pod /: annotation "your-cni.io/vni" value 16777216 exceeds the maximum VNI (16777215)`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			vni, err := parseVNIFromPod(tt.pod, tt.key, logger)
+			option.Config.NativeVPCVNIAnnotation = tt.key
+			vni, err := parseVNIFromPod(tt.pod, logger)
 			if tt.expectedError != "" {
 				assert.Error(t, err)
 				assert.EqualError(t, err, tt.expectedError)

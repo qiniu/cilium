@@ -54,6 +54,7 @@ import (
 	"github.com/cilium/cilium/pkg/metrics"
 	monitoragent "github.com/cilium/cilium/pkg/monitor/agent"
 	"github.com/cilium/cilium/pkg/monitor/notifications"
+	"github.com/cilium/cilium/pkg/nativevpc"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/proxy/accesslog"
@@ -855,7 +856,10 @@ func (e *Endpoint) GetVNIID() uint64 {
 
 // MaxVNI is the upper bound for native-vpc VNI (Virtual Network Identifier)
 // values: the VNI space is 24 bits (VXLAN/Geneve VNI).
-const MaxVNI = uint64(1<<24) - 1
+// MaxVNI is the upper bound for native-vpc VNI (Virtual Network Identifier)
+// values. It is an alias of nativevpc.MaxVNI, which is the single definition
+// of the native-vpc annotation semantics.
+const MaxVNI = nativevpc.MaxVNI
 
 // legacyVPCLabelSource was used by the initial native-vpc implementation to
 // encode a subnet VNI as "vpc:vpc=<vni>". This was semantically wrong: VPC is
@@ -914,23 +918,22 @@ func (e *Endpoint) SyncVNIFromPodAnnotation(pod *slim_corev1.Pod) bool {
 		// hostNetwork is an immutable, structural "not in any VPC" signal, as
 		// opposed to an annotation that can transiently disappear.
 		hostNetwork bool
+		parseErr    error
 	)
-	if pod != nil && pod.Spec.HostNetwork {
-		hostNetwork = true
-	}
-	if pod != nil && !pod.Spec.HostNetwork {
-		if vniStr, ok := pod.Annotations[option.Config.NativeVPCVNIAnnotation]; ok {
-			if v, err := strconv.ParseUint(strings.TrimSpace(vniStr), 10, 64); err == nil && v > 0 && v <= MaxVNI {
-				parsed, valid = v, true
-			} else {
-				broken = true
-			}
-		}
+	vni, res, err := nativevpc.VNIFromPod(pod)
+	switch res {
+	case nativevpc.Valid:
+		parsed, valid = vni, true
+	case nativevpc.Invalid:
+		broken, parseErr = true, err
+	case nativevpc.NotInVPC:
+		hostNetwork = pod != nil && pod.Spec.HostNetwork
 	}
 
 	if broken {
 		e.getLogger().Error(
 			"Invalid tunnel_key annotation on native-vpc pod (violates the kube-ovn guarantee: only a non-zero key is ever written)",
+			logfields.Error, parseErr,
 			logfields.K8sPodName, pod.Namespace+"/"+pod.Name,
 			logfields.Annotation, pod.Annotations[option.Config.NativeVPCVNIAnnotation],
 		)

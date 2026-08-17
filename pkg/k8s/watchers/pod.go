@@ -21,7 +21,6 @@ import (
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"strconv"
 
 	agentK8s "github.com/cilium/cilium/daemon/k8s"
 	"github.com/cilium/cilium/pkg/annotation"
@@ -47,6 +46,7 @@ import (
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
+	"github.com/cilium/cilium/pkg/nativevpc"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
@@ -581,19 +581,14 @@ func (k *K8sPodWatcher) deleteK8sPodV1(pod *slim_corev1.Pod) error {
 // (option.Config.NativeVPCVNIAnnotation, e.g. ovn.kubernetes.io/tunnel_key).
 // Returns 0 when native-vpc mode is disabled or the annotation is missing or
 // invalid, in which case the pod uses the plain cluster-wide IP scheme.
+// podVNI returns the native-vpc VNI of a pod for the cache-plane
+// registration. It uses the single shared decision table (nativevpc), so the
+// pod watcher can never register an ipcache entry under a VNI that endpoint
+// creation would have rejected. A missing or invalid annotation yields 0,
+// which the callers treat as "do not register a VPC-scoped entry".
 func podVNI(pod *slim_corev1.Pod) uint32 {
-	if !option.Config.EnableNativeVPC || option.Config.NativeVPCVNIAnnotation == "" {
-		return 0
-	}
-	if pod == nil {
-		return 0
-	}
-	vniStr, ok := pod.Annotations[option.Config.NativeVPCVNIAnnotation]
-	if !ok || vniStr == "" {
-		return 0
-	}
-	vni, err := strconv.ParseUint(vniStr, 10, 32)
-	if err != nil {
+	vni, res, _ := nativevpc.VNIFromPod(pod)
+	if res != nativevpc.Valid {
 		return 0
 	}
 	return uint32(vni)

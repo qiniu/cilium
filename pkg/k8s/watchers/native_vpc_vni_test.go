@@ -69,3 +69,39 @@ func TestCiliumEndpointVNI(t *testing.T) {
 	// nil.
 	require.Zero(t, ciliumEndpointVNI(nil))
 }
+
+// TestPodVNIMatchesControlPlane pins the control/cache seam: the pod watcher
+// must classify a pod exactly like endpoint creation does. Any value that
+// endpoint creation rejects must yield VNI 0 here (no VPC-scoped ipcache
+// entry), never a VPC scope that no endpoint has.
+func TestPodVNIMatchesControlPlane(t *testing.T) {
+	prevEnabled, prevKey := option.Config.EnableNativeVPC, option.Config.NativeVPCVNIAnnotation
+	option.Config.EnableNativeVPC = true
+	option.Config.NativeVPCVNIAnnotation = "ovn.kubernetes.io/tunnel_key"
+	t.Cleanup(func() {
+		option.Config.EnableNativeVPC = prevEnabled
+		option.Config.NativeVPCVNIAnnotation = prevKey
+	})
+
+	pod := func(value string) *slim_corev1.Pod {
+		return &slim_corev1.Pod{
+			ObjectMeta: slim_metav1.ObjectMeta{
+				Name: "p", Namespace: "ns",
+				Annotations: map[string]string{option.Config.NativeVPCVNIAnnotation: value},
+			},
+		}
+	}
+
+	require.Equal(t, uint32(36), podVNI(pod("36")))
+	require.Equal(t, uint32(36), podVNI(pod(" 36 ")), "whitespace is tolerated like on the control plane")
+	require.Equal(t, uint32(16777215), podVNI(pod("16777215")))
+
+	// Values rejected by endpoint creation must not become a cache-plane scope.
+	for _, bad := range []string{"0", "-1", "abc", "16777216", "4294967295", ""} {
+		require.Zero(t, podVNI(pod(bad)), "value %q must not yield a VPC scope", bad)
+	}
+	require.Zero(t, podVNI(nil))
+
+	option.Config.EnableNativeVPC = false
+	require.Zero(t, podVNI(pod("36")), "inert when native-vpc is disabled")
+}
