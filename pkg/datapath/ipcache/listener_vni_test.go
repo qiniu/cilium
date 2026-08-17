@@ -54,7 +54,7 @@ func TestBPFListenerVNIRouting(t *testing.T) {
 		Vni:    0,
 	}, 0, nil, 0)
 	require.Len(t, v2.updates, 1)
-	require.Len(t, vni.updates, 0)
+	require.Empty(t, vni.updates)
 	_, ok := v2.updates[0].(*ipcacheMap.Key)
 	require.True(t, ok, "plain entry must use ipcacheMap.Key")
 

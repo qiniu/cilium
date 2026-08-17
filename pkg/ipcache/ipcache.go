@@ -11,6 +11,9 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"strconv"
+	"strings"
+
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/counter"
@@ -26,8 +29,6 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/source"
 	"github.com/cilium/cilium/pkg/types"
-	"strconv"
-	"strings"
 )
 
 // Identity is the identity representation of an IP<->Identity cache.

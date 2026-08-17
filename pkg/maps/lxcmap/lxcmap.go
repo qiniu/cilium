@@ -12,6 +12,7 @@ import (
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/identity"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/mac"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/option"
@@ -317,8 +318,8 @@ func (m *lxcMap) DeleteElement(logger *slog.Logger, f EndpointFrontend) []error 
 		// overlapping IP in another VPC) currently owns.
 		if option.Config.EnableNativeVPC && !m.ownsEntry(k, id) {
 			logger.Debug("skipping endpoint map deletion of an entry owned by another endpoint",
-				"key", k.String(),
-				"endpointID", id,
+				logfields.Key, k.String(),
+				logfields.EndpointID, id,
 			)
 			continue
 		}

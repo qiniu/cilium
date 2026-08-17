@@ -5,7 +5,6 @@ package loader
 
 import (
 	"bytes"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -34,7 +33,7 @@ func TestWrap(t *testing.T) {
 	err = cfg.WriteTemplateConfig(&templateBuffer, &localNodeConfig, template)
 	require.NoError(t, err)
 	require.Equal(t, realEPBuffer.String(), templateBuffer.String())
-	require.False(t, strings.Contains(templateBuffer.String(), "NATIVE_VPC_VNI"),
+	require.NotContains(t, templateBuffer.String(), "NATIVE_VPC_VNI",
 		"VNI must be load-time .rodata.config data, not a template define")
 
 	// Runtime configuration must carry the real endpoint VNI, while the

@@ -717,9 +717,7 @@ func (mgr *endpointManager) updateIDReferenceLocked(ep *endpoint.Endpoint) {
 
 func cloneIdentifiers(in endpointid.Identifiers) endpointid.Identifiers {
 	out := make(endpointid.Identifiers, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
+	maps.Copy(out, in)
 	return out
 }
 
