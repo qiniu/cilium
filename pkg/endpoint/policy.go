@@ -1084,6 +1084,7 @@ func (e *Endpoint) runIPIdentitySync(endpointIP netip.Addr) {
 					K8sServiceAccount: k8sServiceAccount,
 					NPM:               e.GetK8sPorts(),
 					Vni:               vni,
+					EndpointID:        e.ID,
 				}
 
 				if err := e.kvstoreSyncher.Upsert(ctx, params); err != nil {
@@ -1097,7 +1098,7 @@ func (e *Endpoint) runIPIdentitySync(endpointIP netip.Addr) {
 				// pod can be given it, and that pod's endpoint registers the
 				// same (VNI, IP). Name the pod this entry belongs to so the
 				// removal cannot take the new owner's entry with it.
-				if err := e.kvstoreSyncher.Delete(ctx, ip, vni, e.K8sNamespace, e.K8sPodName); err != nil {
+				if err := e.kvstoreSyncher.Delete(ctx, ip, vni, e.K8sNamespace, e.K8sPodName, e.ID); err != nil {
 					return fmt.Errorf("unable to delete endpoint IP '%s' from ipcache: %w", ip, err)
 				}
 				return nil

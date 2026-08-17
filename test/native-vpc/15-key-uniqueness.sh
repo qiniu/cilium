@@ -221,6 +221,51 @@ else
   fail "could not stop the agent for the outage check"
 fi
 
+log "a pod that comes back keeps its own mapping"
+# Two shapes of restart, with different consequences. A container that restarts
+# in place keeps its sandbox, so no CNI call happens and nothing may move. A pod
+# that is recreated goes through CNI DEL and ADD, and because Cilium's teardown
+# outlives the DEL, the previous endpoint's removal can arrive after the new one
+# has registered the same (VNI, IP) - the entry that survives must be the new
+# one's.
+RESTART_NS=vpc-b
+before_restart=$(fwd_keys "$SERVER_IP")
+cid=$(crictl ps -o json 2>/dev/null | python3 -c "
+import json,sys
+for c in json.load(sys.stdin).get('containers',[]):
+    l=c.get('labels',{})
+    if l.get('io.kubernetes.pod.namespace')=='${RESTART_NS}' and l.get('io.kubernetes.pod.name')=='server':
+        print(c['id']); break
+" 2>/dev/null)
+if [[ -n "$cid" ]]; then
+  crictl stop "$cid" >/dev/null 2>&1
+  for _ in $(seq 30); do
+    [[ "$(kubectl -n "$RESTART_NS" get pod server -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)" != "0" ]] && break
+    sleep 2
+  done
+  sleep 5
+  assert_eq "$(kubectl -n "$RESTART_NS" get pod server -o jsonpath='{.status.podIP}')" "$SERVER_IP" \
+    "the restarted container keeps its address"
+  assert_eq "$before_restart" "$(fwd_keys "$SERVER_IP")" \
+    "an in-place container restart moves nothing"
+else
+  warn "container of ${RESTART_NS}/server not found, skipping the in-place restart check"
+fi
+
+# Recreate under the same name on the same address: namespace, name, address and
+# VNI are all unchanged, so only the endpoint tells the two apart.
+ep_before=$(control_ids "$SERVER_IP")
+kubectl -n "$VICTIM" delete pod server --wait=true --timeout=120s >/dev/null 2>&1
+make_victim_server
+ep_after=$(control_ids "$SERVER_IP")
+assert_eq "3" "$(cache_keys "$SERVER_IP" | grep -c .)" "the address is back in three VPCs"
+fwd_keys "$SERVER_IP" | grep -q "@vni:${VICTIM_VNI}$" \
+  && pass "the recreated pod owns ${SERVER_IP}@vni:${VICTIM_VNI}" \
+  || fail "the recreated pod has no entry: a late teardown removed it"
+[[ "$ep_before" != "$ep_after" ]] \
+  && pass "it is a different endpoint (${ep_before} -> ${ep_after})" \
+  || fail "the endpoint did not change, so the check proves nothing"
+
 log "the host stack holds no resource keyed by a shared address"
 # A per-endpoint route is a kernel route to the address, and the routing table
 # has no notion of a VPC: the pods sharing an address would install one route

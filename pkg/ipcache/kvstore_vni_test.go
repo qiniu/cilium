@@ -48,7 +48,7 @@ func TestIPIdentitySynchronizerLocalFallbackVNI(t *testing.T) {
 	require.Equal(t, source.Local, ipc.upserts[0].id.Source)
 
 	// Delete must remove the same VNI-encoded key.
-	err = sync.Delete(t.Context(), "192.168.1.2", 36, "ns", "pod")
+	err = sync.Delete(t.Context(), "192.168.1.2", 36, "ns", "pod", 1)
 	require.NoError(t, err)
 	require.Len(t, ipc.deletes, 1)
 	require.Equal(t, KeyWithVNI("192.168.1.2", 36), ipc.deletes[0])
@@ -86,12 +86,12 @@ func TestIPIdentitySynchronizerKVStoreVNI(t *testing.T) {
 	require.Equal(t, uint64(36), pair.Vni)
 
 	// Deleting with the wrong VNI must not remove the entry (same IP, other VPC).
-	require.NoError(t, sync.Delete(t.Context(), "192.168.1.2", 17, "ns", "pod"))
+	require.NoError(t, sync.Delete(t.Context(), "192.168.1.2", 17, "ns", "pod", 1))
 	_, ok = client.store[ipKey]
 	require.True(t, ok, "entry of VPC 36 must survive deletion of VPC 17")
 
 	// Deleting with the right VNI removes it.
-	require.NoError(t, sync.Delete(t.Context(), "192.168.1.2", 36, "ns", "pod"))
+	require.NoError(t, sync.Delete(t.Context(), "192.168.1.2", 36, "ns", "pod", 1))
 	_, ok = client.store[ipKey]
 	require.False(t, ok, "entry of VPC 36 must be removed by its own deletion")
 }
@@ -208,10 +208,46 @@ func TestSynchronizerDeleteLeavesTheNewOwnerAlone(t *testing.T) {
 	sync := newIPIdentitySynchronizer(hivetest.Logger(t), kvstore.SetupDummy(t, kvstore.DisabledBackendName), spy)
 
 	// The predecessor tears down after the address has been handed on.
-	require.NoError(t, sync.Delete(t.Context(), "192.168.1.2", 36, "ns", "predecessor"))
+	require.NoError(t, sync.Delete(t.Context(), "192.168.1.2", 36, "ns", "predecessor", 1))
 	require.Empty(t, spy.deletes, "the entry of the pod holding the address must survive")
 
 	// The owner removing its own entry still works.
-	require.NoError(t, sync.Delete(t.Context(), "192.168.1.2", 36, "ns", "successor"))
+	require.NoError(t, sync.Delete(t.Context(), "192.168.1.2", 36, "ns", "successor", 2))
 	require.Equal(t, []string{"192.168.1.2@vni:36"}, spy.deletes)
+}
+
+// TestSynchronizerDeleteAfterSameNameRestart covers the case the pod metadata
+// cannot describe: a pod that comes back under its own name, on its own
+// address, in its own VPC.
+//
+// CNI DEL returns before the endpoint's controllers have finished stopping, so
+// the new endpoint can register the address before the old one's teardown gets
+// to run. Namespace, name, address and VNI are then all identical, and the only
+// thing that differs is which endpoint registered the entry. Losing it would
+// leave the running pod unresolvable by (VNI, IP), with no bare-address entry
+// to fall back on.
+func TestSynchronizerDeleteAfterSameNameRestart(t *testing.T) {
+	spy := newLocalIPCacheSpy()
+	sync := newIPIdentitySynchronizer(hivetest.Logger(t), kvstore.SetupDummy(t, kvstore.DisabledBackendName), spy)
+	params := func(epID uint16) *UpsertParams {
+		return &UpsertParams{
+			IP:           netip.MustParseAddr("10.99.0.11"),
+			ID:           1234,
+			Vni:          5,
+			K8sNamespace: "vpc-a",
+			K8sPodName:   "server",
+			EndpointID:   epID,
+		}
+	}
+
+	require.NoError(t, sync.Upsert(t.Context(), params(100)))
+	// The pod comes back with the same name and address; a new endpoint
+	// registers it while the previous one is still being torn down.
+	require.NoError(t, sync.Upsert(t.Context(), params(101)))
+
+	require.NoError(t, sync.Delete(t.Context(), "10.99.0.11", 5, "vpc-a", "server", 100))
+	require.Empty(t, spy.deletes, "the entry now belongs to the endpoint that came back")
+
+	require.NoError(t, sync.Delete(t.Context(), "10.99.0.11", 5, "vpc-a", "server", 101))
+	require.Equal(t, []string{"10.99.0.11@vni:5"}, spy.deletes, "its own teardown still removes it")
 }

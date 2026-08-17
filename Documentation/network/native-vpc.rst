@@ -771,6 +771,18 @@ one flat key space - correct when the entries live in two different BPF maps.
 The Go and C key layouts are pinned by a test on the real invariant: the LPM
 static prefix must equal the bit offset of the IP inside the key data.
 
+Ordering, because it decides which of these guards is load-bearing. A container
+that restarts in place keeps its pod sandbox, so no CNI call happens at all and
+nothing here is touched - the endpoint, its identifiers and its ipcache entry
+are the same objects before and after. A pod that is recreated does go through
+CNI DEL and CNI ADD, and the two are ordered per pod by kubelet, with the
+address only becoming free for another pod once DEL has returned. What is *not* ordered
+that way is Cilium's own teardown: the endpoint stops its controllers with
+RemoveAll rather than waiting for them, so CNI DEL returns while the removal of
+the ipcache entry is still pending. The new endpoint can therefore register the
+address before the old one's teardown reaches it, and every guard described
+here exists for that window.
+
 An address outlives the pod that used it. Once released it can be given to
 another pod, whose endpoint registers the same (VNI, IP) key, while the
 previous endpoint is still being torn down on its own schedule. Every removal
@@ -779,6 +791,14 @@ watchers already matched on the pod, and the local identity synchronizer now
 does the same, so a late teardown cannot take the entry of whoever holds the
 address now. For an endpoint in a VPC that matters more than elsewhere, because
 losing the scoped entry leaves no bare-address entry to fall back on.
+
+Naming the pod is not always enough: a pod that comes back under its own name,
+on its own address, in its own VPC has the same namespace, name, address and
+VNI as the endpoint it replaces, and only a different endpoint. The
+synchronizer therefore records which endpoint registered each key and refuses a
+removal from any other, which is the same shape as the precondition upstream
+already puts on deleting a CiliumEndpoint - it deletes by UID rather than by
+name for exactly this reason.
 
 The endpoint manager's identifier index follows the same rule from both ends.
 An endpoint in a VPC registers ``vni-ipv4:<vni>:<ip>`` and no bare-address

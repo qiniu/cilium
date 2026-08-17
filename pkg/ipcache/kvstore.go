@@ -78,6 +78,12 @@ type IPIdentitySynchronizer struct {
 
 	// ipc is the local ipcache used as a fallback when the kvstore is disabled.
 	ipc LocalIPCache
+
+	// owners records which endpoint last registered each key, so that a
+	// teardown can tell whether the entry it is about to remove is still its
+	// own. An address is reusable and a pod can come back under its own name,
+	// so nothing in the entry itself distinguishes the endpoint that wrote it.
+	owners lock.Map[string, uint16]
 }
 
 func NewIPIdentitySynchronizer(logger *slog.Logger, client kvstore.Client, ipc LocalIPCache) *IPIdentitySynchronizer {
@@ -105,6 +111,11 @@ type UpsertParams struct {
 	// non-zero, the local ipcache entry (kvstore-disabled path) is keyed by
 	// IP+VNI.
 	Vni uint64
+	// EndpointID identifies the endpoint this entry is registered for. It is
+	// what tells two endpoints apart when everything else about them matches -
+	// a pod recreated under the same name on the same address produces the same
+	// namespace, name, address and VNI, and only a different endpoint.
+	EndpointID uint16
 }
 
 // Upsert updates / inserts the provided IP->Identity mapping into the kvstore.
@@ -195,11 +206,15 @@ func (s *IPIdentitySynchronizer) upsertLocal(params *UpsertParams) error {
 	}
 	vni := uint32(params.Vni)
 
+	key := KeyWithVNI(params.IP.String(), vni)
 	_, err := s.ipc.Upsert(
-		KeyWithVNI(params.IP.String(), vni),
+		key,
 		hostIP, params.Key, k8sMeta,
 		Identity{ID: params.ID, Source: source.Local, Vni: vni},
 	)
+	if err == nil {
+		s.owners.Store(key, params.EndpointID)
+	}
 	return err
 }
 
@@ -217,13 +232,30 @@ func (s *IPIdentitySynchronizer) upsertLocal(params *UpsertParams) error {
 // endpoint registers the same (VNI, IP) key. Removing the entry then would
 // take the new owner's entry away, so the removal only applies while the entry
 // still describes the pod it was created for.
-func (s *IPIdentitySynchronizer) Delete(ctx context.Context, ip string, vni uint64, namespace, podName string) error {
-	ipKey := path.Join(IPIdentitiesPath, AddressSpace, KeyWithVNI(ip, uint32(vni)))
+func (s *IPIdentitySynchronizer) Delete(ctx context.Context, ip string, vni uint64, namespace, podName string, endpointID uint16) error {
+	key := KeyWithVNI(ip, uint32(vni))
+	ipKey := path.Join(IPIdentitiesPath, AddressSpace, key)
 	s.tracker.Delete(ipKey)
 
 	if !s.client.IsEnabled() {
 		if s.ipc != nil {
-			s.ipc.DeleteOnMetadataMatch(KeyWithVNI(ip, uint32(vni)), source.Local, namespace, podName)
+			// Skip only when both sides are known and disagree: an unknown
+			// owner (nothing recorded, or a caller that does not identify
+			// itself) must not turn a legitimate removal into a leak.
+			if owner, known := s.owners.Load(key); known && owner != 0 && endpointID != 0 && owner != endpointID {
+				// The address has been registered again by another endpoint -
+				// a pod recreated on it, possibly under the same name. Its
+				// entry is the live one; this teardown has nothing left to do.
+				if s.logger != nil {
+					s.logger.Debug("Skipping removal of an ipcache entry owned by another endpoint",
+						logfields.IPAddr, key,
+						logfields.EndpointID, endpointID,
+					)
+				}
+				return nil
+			}
+			s.ipc.DeleteOnMetadataMatch(key, source.Local, namespace, podName)
+			s.owners.Delete(key)
 		}
 		return nil
 	}
