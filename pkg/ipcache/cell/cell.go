@@ -37,6 +37,11 @@ var Cell = cell.Module(
 
 	cell.Provide(
 		newIPCache,
+		// The local-ipcache fallback of the identity synchronizer takes an
+		// interface: hive can only build it if a constructor returns it, so
+		// provide the adapter explicitly. Without this the whole agent object
+		// graph fails with "missing type: ipcache.LocalIPCache".
+		func(ipc *ipcache.IPCache) ipcache.LocalIPCache { return ipc },
 		ipcache.NewLocalIPIdentityWatcher,
 		ipcache.NewIPIdentitySynchronizer,
 		newIPCacheAPIHandler,

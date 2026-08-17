@@ -25,7 +25,7 @@ import (
 func TestIPIdentitySynchronizerLocalFallbackVNI(t *testing.T) {
 	client := kvstore.SetupDummy(t, kvstore.DisabledBackendName)
 	ipc := newLocalIPCacheSpy()
-	sync := NewIPIdentitySynchronizer(nil, client, ipc)
+	sync := newIPIdentitySynchronizer(nil, client, ipc)
 
 	ip := netip.MustParseAddr("192.168.1.2")
 	hostIP := netip.MustParseAddr("10.58.55.23")
@@ -59,7 +59,7 @@ func TestIPIdentitySynchronizerLocalFallbackVNI(t *testing.T) {
 // collided with overlapping VPC subnets).
 func TestIPIdentitySynchronizerKVStoreVNI(t *testing.T) {
 	client := &fakeKVStoreClient{enabled: true, store: map[string][]byte{}}
-	sync := NewIPIdentitySynchronizer(hivetest.Logger(t), client, nil)
+	sync := newIPIdentitySynchronizer(hivetest.Logger(t), client, nil)
 
 	ip := netip.MustParseAddr("192.168.1.2")
 	hostIP := netip.MustParseAddr("10.58.55.23")

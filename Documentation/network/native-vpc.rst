@@ -407,6 +407,11 @@ Requirements
   does not match key"). Mixed-version native-vpc operation is unsupported.
   Clustermesh peers must not consume this VPC-scoped address space (VPC is not
   ClusterMesh; see the consumer checklist).
+* The following features are **rejected at agent startup** in native-vpc mode,
+  because their state is keyed by the bare IP and would silently mix two VPCs:
+  kube-proxy replacement, socket LB (``--bpf-lb-sock``), the egress gateway,
+  BPF masquerade, IPsec and WireGuard. Service load balancing is left to
+  kube-proxy or kube-ovn, and kube-ovn performs SNAT.
 * CiliumEndpoint CRD mode is required and **CiliumEndpointSlice must stay
   disabled** (``--enable-cilium-endpoint-slice=false``, the default). A CES
   packs endpoints as ``CoreCiliumEndpoint``, which carries no object metadata
@@ -441,6 +446,42 @@ The consumer checklist above is organised by data structure. This section is
 the *process* view used to sign off the feature: the four planes are audited
 one by one, every file that reads or writes an IP-keyed structure in that plane
 is enumerated, and each item is answered with the same four questions.
+
+The ten planes
+--------------
+
+The narrative in this document uses four planes (control, cache, forwarding,
+observability) because those are the ones that had to be *changed* to carry the
+VNI. A complete review needs six more, which are covered by their own sections
+below:
+
++-----------------------------+------------------------------------------------+
+| Plane                       | (VNI, IP) status                               |
++=============================+================================================+
+| control                     | VNI-scoped                                     |
++-----------------------------+------------------------------------------------+
+| cache                       | VNI-scoped                                     |
++-----------------------------+------------------------------------------------+
+| forwarding                  | VNI-scoped (cilium_lxc is not authoritative)   |
++-----------------------------+------------------------------------------------+
+| observability               | VNI-scoped                                     |
++-----------------------------+------------------------------------------------+
+| policy                      | VNI-scoped through identities; CIDR/FQDN and   |
+|                             | the L7 proxy are boundaries                    |
++-----------------------------+------------------------------------------------+
+| conntrack / NAT             | **not** VNI-scoped: known limitation, detected |
+|                             | and reported at runtime                        |
++-----------------------------+------------------------------------------------+
+| service / load balancing    | not VNI-scoped: rejected at startup            |
++-----------------------------+------------------------------------------------+
+| encryption / egress gateway | not VNI-scoped: rejected at startup            |
+| / masquerade                |                                                |
++-----------------------------+------------------------------------------------+
+| lifecycle (upgrade, repair) | procedural, see Recovery procedure             |
++-----------------------------+------------------------------------------------+
+| assembly (hive graph)       | verified by TestAgentCell + compile-time       |
+|                             | assertions on the optional interfaces          |
++-----------------------------+------------------------------------------------+
 
 Method
 ------
@@ -601,6 +642,119 @@ header Cilium never sees under kube-ovn); socket-level flows had no VNI and
 could be enriched with a foreign VPC's pod; debug events did not report the
 VNI; ``cilium-dbg bpf ipcache get`` could not see VNI entries.
 
+Policy plane
+------------
+
+Scope: identity allocation, selectors, the per-endpoint policy map and the L7
+proxy.
+
+* The policy map (``cilium_policy_v2``) is keyed by **identity**, not by IP, and
+  identities are VNI-distinct in native-vpc mode (the VNI identity label is a
+  mandatory identity label, see ``pkg/labelsfilter``). Two pods of different
+  VPCs therefore never share a policy-map entry even with identical IPs and
+  identical Kubernetes labels.
+* ``fromEndpoints``/``toEndpoints`` selectors resolve through the identity
+  layer and are consequently VNI-scoped as well.
+* ``fromCIDR``/``toCIDR`` and FQDN identities are keyed by the bare prefix; see
+  `CIDR/FQDN boundary`_. They are correct for destinations outside the VPC
+  address space (the normal use) and cannot distinguish two VPCs that overlap
+  on the same prefix.
+* **L7 proxy (deployment boundary).** A redirected connection is proxied from
+  the host network namespace to the original destination address. With
+  overlapping VPC subnets the host cannot resolve which VPC that address
+  belongs to, so L7 policy (HTTP rules, and the DNS proxy when the DNS server
+  itself lives in a VPC subnet) must not be applied to VPC-internal
+  destinations. L7 policy toward destinations outside the VPC address space is
+  unaffected.
+
+Assembly (hive) plane
+---------------------
+
+Scope: the object graph itself. Native-vpc adds dependencies between cells
+(the identity synchronizer needs the local ipcache, the Hubble parsers need the
+VNI-aware getters), and there are two failure modes that no package-level test
+catches:
+
+* a constructor parameter type that no cell provides makes the **entire agent**
+  fail to start (``missing type: ...``). This happened with the local-ipcache
+  interface of the identity synchronizer and is now covered by
+  ``go test ./daemon/cmd/ -run TestAgentCell``;
+* an *optional* interface that the production type stops implementing silently
+  degrades the consumer to a bare-IP path. All of them now have compile-time
+  assertions (``pkg/hubble/parser/cell``, ``pkg/endpointmanager``).
+
+Conntrack and NAT plane
+-----------------------
+
+Scope: ``cilium_ct4/6_global``, the NAT maps and the datapath state derived
+from them.
+
+**This is the one plane where the (VNI, IP) pair cannot be expressed today.**
+The CT key is the bare 5-tuple (``struct ipv4_ct_tuple``: addresses, ports,
+protocol, direction flags); upstream only extends it with a *cluster* scope
+(``cilium_per_cluster_ct_*``, a statically sized map-of-maps for ClusterMesh),
+which does not generalise to hundreds of logical switches.
+
+Consequences to be aware of:
+
+* Two local endpoints of different VPCs that share an IP can share a CT entry
+  if they also talk to the same peer address, port and protocol with the same
+  ephemeral source port. The shared entry carries the connection state and the
+  peer identity, so the second connection can be treated as established (policy
+  is only evaluated on the first packet of a connection) and reply packets can
+  be attributed to the peer identity of the other VPC.
+* The agent detects and reports the precondition: whenever a local endpoint is
+  exposed with an IP that another local endpoint already uses in a different
+  VNI, a warning naming both endpoint ids is logged. No overlap on a node means
+  no CT ambiguity on that node.
+* The NAT maps are inert in the supported configuration: BPF masquerade,
+  kube-proxy replacement and socket LB are rejected at startup (see below), and
+  kube-ovn performs SNAT itself.
+
+A future fix requires either a VNI field in the CT tuple (a change to the
+core datapath key layout shared by CT, NAT, DSR and service handling) or a
+per-VNI map-of-maps with dynamic inner-map management. Neither is part of this
+feature.
+
+Service and load-balancing plane
+--------------------------------
+
+Scope: service frontends, backends and their BPF maps.
+
+Backends are keyed by ``(IP, port, protocol)``, so two pods of different VPCs
+sharing an IP would collapse into a single backend entry and receive each
+other's traffic. Native-vpc therefore **rejects kube-proxy replacement and
+socket LB at startup**; service load balancing is left to kube-proxy (or to
+kube-ovn), which resolves backends in the VPC's own routing domain.
+
+Encryption, egress gateway and masquerade plane
+-----------------------------------------------
+
+All of these select traffic or peers by the bare IP:
+
+* the egress gateway matches the source IP of a pod,
+* BPF masquerade and the NAT maps work on the bare tuple,
+* IPsec and WireGuard select the peer by node/endpoint IP.
+
+They are rejected at startup together with the LB features above, so that an
+unsupported combination fails immediately and deterministically instead of
+mixing two VPCs at runtime:
+
+.. code-block:: shell-session
+
+    $ cilium-agent --enable-native-vpc ... --kube-proxy-replacement
+    level=fatal msg="native-vpc mode is incompatible with kube-proxy replacement: ..."
+
+Lifecycle plane
+---------------
+
+Scope: upgrade, restart and repair, i.e. the time dimension of the other
+planes. Covered by `Recovery procedure`_ and `Requirements`_: agents must be
+upgraded before native-vpc is enabled (the kvstore IP format is a stable API),
+a missing annotation is repaired by restarting kube-ovn-controller and then
+Cilium, and a VNI change is not hot-applied - the endpoint is re-read on
+restore.
+
 Review and verification gates
 =============================
 
@@ -608,6 +762,15 @@ The four-plane narrative (control/cache/forwarding/observability) describes
 recovery, but is not sufficient for completeness. Review every reader and
 writer in the identity-resolution-chain table above and require the following
 checks before merge:
+
+* The agent object graph must still build. Constructors registered in a hive
+  cell may only take types that some cell provides: an unexported (or simply
+  unprovided) interface parameter makes the *whole agent* fail to start with
+  ``missing type: ...``, and no unit test of the package involved catches it:
+
+  .. code-block:: shell-session
+
+      $ go test ./daemon/cmd/ -run TestAgentCell
 
 * Go build/tests and formatting:
 

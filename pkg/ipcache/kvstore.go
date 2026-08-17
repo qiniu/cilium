@@ -54,9 +54,12 @@ type kvstoreClient interface {
 	Delete(ctx context.Context, key string) error
 }
 
-// localIPCache is the subset of *IPCache used by the kvstore-disabled local
-// fallback path. Kept as an interface for testability.
-type localIPCache interface {
+// LocalIPCache is the subset of *IPCache used by the kvstore-disabled local
+// fallback path. It is exported so that the ipcache cell can provide it
+// explicitly: hive cannot build an interface type that no constructor returns,
+// and an unexported parameter type makes the whole agent object graph fail
+// with "missing type: ipcache.localIPCache".
+type LocalIPCache interface {
 	Upsert(ip string, hostIP net.IP, hostKey uint8, k8sMeta *K8sMetadata, newIdentity Identity) (namedPortsChanged bool, err error)
 	Delete(IP string, source source.Source) (namedPortsChanged bool)
 }
@@ -71,10 +74,16 @@ type IPIdentitySynchronizer struct {
 	tracker lock.Map[string, []byte]
 
 	// ipc is the local ipcache used as a fallback when the kvstore is disabled.
-	ipc localIPCache
+	ipc LocalIPCache
 }
 
-func NewIPIdentitySynchronizer(logger *slog.Logger, client kvstore.Client, ipc localIPCache) *IPIdentitySynchronizer {
+func NewIPIdentitySynchronizer(logger *slog.Logger, client kvstore.Client, ipc LocalIPCache) *IPIdentitySynchronizer {
+	return newIPIdentitySynchronizer(logger, client, ipc)
+}
+
+// newIPIdentitySynchronizer is the package-internal constructor accepting the
+// narrow kvstore client interface used by the tests.
+func newIPIdentitySynchronizer(logger *slog.Logger, client kvstoreClient, ipc LocalIPCache) *IPIdentitySynchronizer {
 	return &IPIdentitySynchronizer{logger: logger, client: client, ipc: ipc}
 }
 

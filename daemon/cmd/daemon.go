@@ -30,6 +30,27 @@ const (
 )
 
 func initAndValidateDaemonConfig(params daemonConfigParams) error {
+	// Native-vpc: overlapping IPs across VPCs are only safe on the planes that
+	// key their state by (VNI, IP). Datapath features whose state is keyed by
+	// the bare IP (service backends, socket LB, egress gateway source IPs,
+	// encryption peer selection) would silently mix two VPCs, so they are
+	// rejected here rather than failing in a data-dependent way.
+	// See Documentation/network/native-vpc.rst.
+	if params.DaemonConfig.EnableNativeVPC {
+		switch {
+		case params.KPRConfig.KubeProxyReplacement:
+			return fmt.Errorf("native-vpc mode is incompatible with kube-proxy replacement: service backends are keyed by (IP, port), so pods of different VPCs sharing an IP collapse into one backend")
+		case params.KPRConfig.EnableSocketLB:
+			return fmt.Errorf("native-vpc mode is incompatible with socket LB (--bpf-lb-sock): socket-level translation happens before the VPC scope is known")
+		case params.DaemonConfig.EnableEgressGateway:
+			return fmt.Errorf("native-vpc mode is incompatible with the egress gateway: its policies select traffic by the bare source IP")
+		case params.DaemonConfig.EnableBPFMasquerade:
+			return fmt.Errorf("native-vpc mode is incompatible with BPF masquerade: kube-ovn owns SNAT, and the NAT maps are keyed by the bare tuple")
+		case params.IPSecConfig.Enabled(), params.WireguardConfig.Enabled():
+			return fmt.Errorf("native-vpc mode is incompatible with Cilium encryption (IPsec/WireGuard): peer selection is keyed by the bare IP")
+		}
+	}
+
 	// WireGuard and IPSec are mutually exclusive.
 	if params.IPSecConfig.Enabled() && params.WireguardConfig.Enabled() {
 		return fmt.Errorf("WireGuard (--%s) cannot be used with IPsec (--%s)", wgTypes.EnableWireguard, datapath.EnableIPSec)

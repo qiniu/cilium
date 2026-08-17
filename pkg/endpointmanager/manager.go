@@ -11,6 +11,7 @@ import (
 	"maps"
 	"net/netip"
 	"runtime"
+	"slices"
 	"sync"
 
 	"github.com/cilium/hive/cell"
@@ -857,12 +858,58 @@ func (mgr *endpointManager) expose(ep *endpoint.Endpoint) error {
 	mgr.updateIDReferenceLocked(ep)
 	mgr.updateReferencesLocked(ep, identifiers)
 	mgr.registeredIdentifiers[ep.ID] = cloneIdentifiers(identifiers)
+	overlapping := mgr.overlappingVNIEndpointsLocked(ep)
 	mgr.mutex.Unlock()
+
+	for ip, ids := range overlapping {
+		// The conntrack and NAT maps are keyed by the bare 5-tuple, so two
+		// endpoints of different VPCs that share an IP on this node can share
+		// a CT entry when they also pick the same peer and ports. Surface the
+		// condition: it is the one plane where the (VNI, IP) pair cannot be
+		// expressed today (see Documentation/network/native-vpc.rst).
+		mgr.logger.Warn(
+			"local endpoints of different VPCs share an IP: conntrack entries are keyed by the bare 5-tuple and may be shared between them",
+			logfields.IPAddr, ip,
+			logfields.EndpointID, ids,
+		)
+	}
 
 	ep.InitEndpointHealth(mgr.health)
 	mgr.RunK8sCiliumEndpointSync(ep, ep.GetReporter("cep-k8s-sync"))
 
 	return nil
+}
+
+// overlappingVNIEndpointsLocked reports, per IP of the given endpoint, the ids
+// of all local endpoints that use the same IP in a different VNI scope.
+// Returns nil (the normal case) when the endpoint's IPs are unique on the node.
+func (mgr *endpointManager) overlappingVNIEndpointsLocked(ep *endpoint.Endpoint) map[string][]uint16 {
+	if !option.Config.EnableNativeVPC {
+		return nil
+	}
+	var out map[string][]uint16
+	for _, addr := range []netip.Addr{ep.IPv4, ep.IPv6} {
+		if !addr.IsValid() {
+			continue
+		}
+		ipStr := addr.Unmap().String()
+		keys := mgr.ipToVNIAuxKeys[ipStr]
+		if len(keys) < 2 {
+			continue
+		}
+		ids := make([]uint16, 0, len(keys))
+		for key := range keys {
+			if other, ok := mgr.endpointsAux[key]; ok {
+				ids = append(ids, other.ID)
+			}
+		}
+		slices.Sort(ids)
+		if out == nil {
+			out = map[string][]uint16{}
+		}
+		out[ipStr] = ids
+	}
+	return out
 }
 
 func (mgr *endpointManager) GetEndpointList(params endpointapi.GetEndpointParams) []*models.Endpoint {
