@@ -480,6 +480,7 @@ Name                                         Labels                             
 ``endpoint_regenerations_total``             ``outcome``                                        Enabled    Count of all endpoint regenerations that have completed
 ``endpoint_regeneration_time_stats_seconds`` ``scope``                                          Enabled    Endpoint regeneration time stats
 ``endpoint_state``                           ``state``                                          Enabled    Count of all endpoints
+``native_vpc_overlapping_ips``                                                                  Enabled    Number of IPs used by more than one local endpoint in different native-vpc VNIs. Alert on ``> 0``: conntrack entries are keyed by the bare 5-tuple, so connections of different VPCs can share CT state on that node (see :ref:`native_vpc`)
 ============================================ ================================================== ========== ========================================================
 
 Services

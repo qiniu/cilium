@@ -14,6 +14,7 @@ import (
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/identity/identitymanager"
 	"github.com/cilium/cilium/pkg/maps/ctmap"
+	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/testutils/identity"
 	testipcache "github.com/cilium/cilium/pkg/testutils/ipcache"
 )
@@ -134,4 +135,59 @@ func TestUpdateReferencesVNIReplacement(t *testing.T) {
 	require.NoError(t, err)
 	require.Same(t, ep, newEP)
 	mgr.WaitEndpointRemoved(ep)
+}
+
+// TestOverlappingIPsMetric pins the conntrack-plane guard: the number of IPs
+// used by more than one local endpoint in different VNIs must be observable,
+// because that is exactly the precondition for two VPCs sharing a conntrack
+// entry (the CT key is the bare 5-tuple, with no VNI).
+func TestOverlappingIPsMetric(t *testing.T) {
+	prev := option.Config.EnableNativeVPC
+	option.Config.EnableNativeVPC = true
+	t.Cleanup(func() { option.Config.EnableNativeVPC = prev })
+
+	s := setupEndpointManagerSuite(t)
+	logger := hivetest.Logger(t)
+	mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+
+	newEP := func(id int64, ip string, vni uint64) *endpoint.Endpoint {
+		model := newTestEndpointModel(int(id), endpoint.StateReady)
+		ep, err := endpoint.NewEndpointFromChangeModel(t.Context(), logger, nil, &endpoint.MockEndpointBuildQueue{}, nil, nil, nil, nil, nil, identitymanager.NewIDManager(logger), nil, nil, s.repo, testipcache.NewMockIPCache(), &endpoint.FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), ctmap.NewFakeGCRunner(), nil, model, fakeTypes.WireguardConfig{}, fakeTypes.IPsecConfig{}, nil, nil)
+		require.NoError(t, err)
+		ep.Start(uint16(model.ID))
+		t.Cleanup(ep.Stop)
+		ep.IPv4 = netip.MustParseAddr(ip)
+		ep.VNIID = vni
+		return ep
+	}
+
+	count := func() int {
+		mgr.mutex.RLock()
+		defer mgr.mutex.RUnlock()
+		var n int
+		for _, keys := range mgr.ipToVNIAuxKeys {
+			if len(keys) > 1 {
+				n++
+			}
+		}
+		return n
+	}
+
+	a := newEP(40, "192.0.2.40", 36)
+	require.NoError(t, mgr.expose(a))
+	require.Zero(t, count(), "a single VNI per IP is not an overlap")
+
+	b := newEP(41, "192.0.2.40", 17)
+	require.NoError(t, mgr.expose(b))
+	require.Equal(t, 1, count(), "the same IP in two VPCs is a CT-collision precondition")
+
+	// A third VPC on the same IP is still one overlapping IP.
+	c := newEP(42, "192.0.2.40", 99)
+	require.NoError(t, mgr.expose(c))
+	require.Equal(t, 1, count())
+
+	mgr.WaitEndpointRemoved(b)
+	mgr.WaitEndpointRemoved(c)
+	require.Zero(t, count(), "the condition clears when the overlap is gone")
+	mgr.WaitEndpointRemoved(a)
 }

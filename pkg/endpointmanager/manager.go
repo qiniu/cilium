@@ -517,6 +517,7 @@ func (mgr *endpointManager) unexpose(ep *endpoint.Endpoint) {
 // and prevents the endpoint from being globally accessible via other packages.
 func (mgr *endpointManager) removeEndpoint(ep *endpoint.Endpoint, conf endpoint.DeleteConfig) []error {
 	mgr.unexpose(ep)
+	mgr.updateOverlappingIPsMetric()
 	result := ep.Delete(conf)
 
 	if !option.Config.DryMode {
@@ -771,6 +772,26 @@ func (mgr *endpointManager) UpdateReferences(ep *endpoint.Endpoint) error {
 	return nil
 }
 
+// updateOverlappingIPsMetric publishes the number of IPs that are used by more
+// than one local endpoint in different VNIs. This is the precondition for
+// conntrack entry sharing between VPCs (the CT key is the bare 5-tuple), so it
+// must be observable rather than only logged. Zero on this node means no CT
+// ambiguity on this node.
+func (mgr *endpointManager) updateOverlappingIPsMetric() {
+	if !option.Config.EnableNativeVPC {
+		return
+	}
+	mgr.mutex.RLock()
+	var overlapping int
+	for _, keys := range mgr.ipToVNIAuxKeys {
+		if len(keys) > 1 {
+			overlapping++
+		}
+	}
+	mgr.mutex.RUnlock()
+	metrics.NativeVPCOverlappingIPs.Set(float64(overlapping))
+}
+
 // removeReferencesLocked removes the mappings from the endpointmanager.
 func (mgr *endpointManager) removeReferencesLocked(identifiers endpointid.Identifiers) {
 	for prefix := range identifiers {
@@ -873,6 +894,7 @@ func (mgr *endpointManager) expose(ep *endpoint.Endpoint) error {
 			logfields.EndpointID, ids,
 		)
 	}
+	mgr.updateOverlappingIPsMetric()
 
 	ep.InitEndpointHealth(mgr.health)
 	mgr.RunK8sCiliumEndpointSync(ep, ep.GetReporter("cep-k8s-sync"))

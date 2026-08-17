@@ -526,8 +526,9 @@ restarts converge).
 |    |                      | host-namespace L7 proxy                           |
 +----+----------------------+---------------------------------------------------+
 | 5  | conntrack / NAT      | **incomplete by design** (the CT key has no VNI); |
-|    |                      | the precondition is detected and reported; NAT is |
-|    |                      | inert because its features are rejected           |
+|    |                      | mitigated by scheduling; the precondition is      |
+|    |                      | exported as cilium_native_vpc_overlapping_ips;    |
+|    |                      | NAT is inert because its features are rejected    |
 +----+----------------------+---------------------------------------------------+
 | 6  | service / LB         | rejected at startup (test-covered both ways)      |
 +----+----------------------+---------------------------------------------------+
@@ -855,26 +856,65 @@ protocol, direction flags); upstream only extends it with a *cluster* scope
 (``cilium_per_cluster_ct_*``, a statically sized map-of-maps for ClusterMesh),
 which does not generalise to hundreds of logical switches.
 
-Consequences to be aware of:
+Failure mode
+~~~~~~~~~~~~
 
-* Two local endpoints of different VPCs that share an IP can share a CT entry
-  if they also talk to the same peer address, port and protocol with the same
-  ephemeral source port. The shared entry carries the connection state and the
-  peer identity, so the second connection can be treated as established (policy
-  is only evaluated on the first packet of a connection) and reply packets can
-  be attributed to the peer identity of the other VPC.
-* The agent detects and reports the precondition: whenever a local endpoint is
-  exposed with an IP that another local endpoint already uses in a different
-  VNI, a warning naming both endpoint ids is logged. No overlap on a node means
-  no CT ambiguity on that node.
+Two local endpoints of different VPCs that share an IP can share a CT entry if
+they also talk to the same peer address, port and protocol with the same
+ephemeral source port. The shared entry carries the connection state, the peer
+identity and any proxy redirect, so:
+
+* the second connection can be treated as established, and Cilium only
+  evaluates policy on the first packet of a connection - i.e. it can bypass the
+  policy of its own VPC;
+* reply packets can be attributed to the peer identity of the other VPC.
+
+**Likelihood.** This is not a rare corner case in the deployments native-vpc
+targets. Mirrored VPCs typically have not only overlapping *pod* subnets but
+also the same service addresses, so two pods that share an IP frequently talk
+to the same destination IP and port; the only remaining degree of freedom is
+the ephemeral source port (roughly 28 000 values), which collides with
+noticeable probability after a few hundred connections. Treat co-scheduling of
+overlapping IPs as unsafe rather than unlikely.
+
+Scope: conntrack state is per node, so the collision requires the two endpoints
+to be **on the same node**.
+
+Mitigations available today
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* **Scheduling.** Do not co-schedule pods with overlapping IPs from different
+  VPCs on the same node (pod anti-affinity, or a kube-ovn/scheduler policy that
+  keeps overlapping subnets on disjoint node sets). This removes the failure
+  mode entirely.
+* **Detection.** The agent detects the precondition - an IP used by more than
+  one local endpoint in different VNIs - and both logs it (with both endpoint
+  ids) and exports it as ``cilium_native_vpc_overlapping_ips``. Alert on
+  ``> 0``: a zero value means there is no CT ambiguity on that node.
 * The NAT maps are inert in the supported configuration: BPF masquerade,
-  kube-proxy replacement and socket LB are rejected at startup (see below), and
-  kube-ovn performs SNAT itself.
+  kube-proxy replacement and socket LB are rejected at startup, and kube-ovn
+  performs SNAT itself.
 
-A future fix requires either a VNI field in the CT tuple (a change to the
-core datapath key layout shared by CT, NAT, DSR and service handling) or a
-per-VNI map-of-maps with dynamic inner-map management. Neither is part of this
-feature.
+Bounded fix plan (follow-up)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The proper fix is per-VNI conntrack state. The hook already exists:
+``select_ct_map4()``/``select_ct_map6()`` in ``bpf_lxc.c`` choose the CT map at
+runtime and already perform a map-in-map lookup for the ClusterMesh case, and a
+missing map is already handled as a fail-closed drop
+(``DROP_CT_NO_MAP_FOUND``). A follow-up therefore needs:
+
+#. a ``HASH_OF_MAPS`` outer map keyed by VNI (the existing per-cluster maps are
+   an ``ARRAY_OF_MAPS`` with statically declared inner maps, which does not
+   scale to many logical switches);
+#. agent-side inner-map lifecycle (create on the first endpoint of a VNI,
+   remove when the last one goes away);
+#. CT garbage collection over the inner maps, reusing the per-cluster GC
+   machinery in ``pkg/maps/ctmap``;
+#. sizing: inner maps divide the CT budget per VNI.
+
+Adding a VNI field to ``struct ipv4_ct_tuple`` instead would touch the key
+layout shared by CT, NAT, DSR and service handling, and is not recommended.
 
 Service and load-balancing plane
 --------------------------------
