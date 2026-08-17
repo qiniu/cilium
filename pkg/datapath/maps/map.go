@@ -20,6 +20,7 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/callsmap"
 	"github.com/cilium/cilium/pkg/maps/cidrmap"
+	ipcachemap "github.com/cilium/cilium/pkg/maps/ipcache"
 	"github.com/cilium/cilium/pkg/maps/ipmasq"
 	"github.com/cilium/cilium/pkg/maps/policymap"
 	"github.com/cilium/cilium/pkg/option"
@@ -202,6 +203,14 @@ func (ms *MapSweeper) RemoveDisabledMaps() {
 
 	if !ms.bwManager.Enabled() {
 		maps = append(maps, "cilium_throttle")
+	}
+
+	if !option.Config.EnableNativeVPC {
+		// The VNI-scoped ipcache only exists in native-vpc mode. Remove a stale
+		// pin left behind by a previous run with the mode enabled, so that a
+		// later re-enable starts from a clean map instead of inheriting entries
+		// of a previous VPC topology.
+		maps = append(maps, ipcachemap.VniName)
 	}
 
 	if !option.Config.EnableHealthDatapath {

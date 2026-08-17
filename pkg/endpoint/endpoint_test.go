@@ -1233,3 +1233,26 @@ func newTestEndpointModel(id int, state State) *models.EndpointChangeRequest {
 		},
 	}
 }
+
+// TestRestoreVNIRespectsMode pins the lifecycle contract for a mode
+// downgrade: a serialized VNI is only restored while native-vpc is enabled.
+// Restoring it with the mode off would leave the endpoint half configured -
+// VNI-scoped identifiers and ipcache keys and a non-zero
+// CONFIG(native_vpc_vni), but no VNI-scoped ipcache map to write to - so peers
+// would resolve it as world.
+func TestRestoreVNIRespectsMode(t *testing.T) {
+	prev := option.Config.EnableNativeVPC
+	t.Cleanup(func() { option.Config.EnableNativeVPC = prev })
+
+	serialized := &serializableEndpoint{VNIID: 36}
+
+	option.Config.EnableNativeVPC = true
+	ep := &Endpoint{}
+	ep.fromSerializedEndpoint(serialized)
+	require.Equal(t, uint64(36), ep.VNIID, "the VNI must survive a restart in native-vpc mode")
+
+	option.Config.EnableNativeVPC = false
+	ep = &Endpoint{}
+	ep.fromSerializedEndpoint(serialized)
+	require.Zero(t, ep.VNIID, "a mode downgrade must return the endpoint to the plain scheme")
+}

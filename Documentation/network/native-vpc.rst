@@ -1082,12 +1082,59 @@ outright (``DROP_FRAG_NOSUPPORT``).
 Lifecycle plane
 ---------------
 
-Scope: upgrade, restart and repair, i.e. the time dimension of the other
-planes. Covered by `Recovery procedure`_ and `Requirements`_: agents must be
-upgraded before native-vpc is enabled (the kvstore IP format is a stable API),
-a missing annotation is repaired by restarting kube-ovn-controller and then
-Cilium, and a VNI change is not hot-applied - the endpoint is re-read on
-restore.
+Scope: upgrade, restart, repair and mode changes, i.e. the time dimension of
+the other planes. The recovery procedure is described above; this section is
+the state-transition matrix.
+
+Agent restart (mode unchanged)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* the endpoint's ``VNIID`` is part of the serialized endpoint, so it survives a
+  restart even when the pod store is unavailable, and it is re-read from the
+  annotation when the pod *is* available;
+* the VNI-scoped ipcache map is recreated at startup and repopulated from the
+  full ipcache dump; endpoints whose BPF programs have not been regenerated yet
+  keep using the previous map object through their existing file descriptor,
+  exactly like the plain ipcache;
+* the CiliumEndpoint VNI annotation is re-asserted (created or backfilled).
+
+Enabling or disabling the mode
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* two map layouts depend on the mode: the fragment key gains a VNI, and the
+  VNI-scoped ipcache exists at all. A pinned map whose properties no longer
+  match is unpinned and recreated by the map loader (an INFO log names the old
+  and new key sizes), and both maps hold only ephemeral state, so nothing is
+  lost;
+* disabling the mode also sweeps a stale ``cilium_ipcache_vni`` pin, so a later
+  re-enable starts from a clean map rather than inheriting entries of a
+  previous VPC topology;
+* a serialized ``VNIID`` is **not** restored while the mode is off. Restoring
+  it would leave the endpoint half configured - VNI-scoped identifiers and
+  ipcache keys plus a non-zero ``CONFIG(native_vpc_vni)``, but no VNI-scoped
+  map for the agent to write to - and peers would resolve it as world. Dropping
+  it returns the endpoint to the plain scheme on every plane;
+* enabling the mode adds the node-level ``ENABLE_NATIVE_VPC`` define, which
+  changes the datapath hash and therefore regenerates all endpoints.
+
+Upgrade and downgrade of the agent
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* all agents must be upgraded before native-vpc is enabled: the kvstore IP
+  identity format is a stable API and an older agent rejects a VNI-scoped key
+  (see `Requirements`_);
+* downgrading to an agent without native-vpc support is safe by construction:
+  the CiliumEndpoint annotation is ignored as an unknown annotation, the
+  serialized ``VNIID`` is an unknown JSON field, and the mode-dependent maps
+  are recreated with the upstream layout.
+
+Repair
+~~~~~~
+
+A missing annotation is repaired by restarting kube-ovn-controller (which
+backfills it) and then Cilium; the VNI is re-read on restore. A VNI change on a
+running endpoint is deliberately not hot-applied, and an annotation that
+disappears never downgrades a running endpoint to the plain scheme.
 
 Review and verification gates
 =============================
