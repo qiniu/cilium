@@ -176,6 +176,18 @@ static __always_inline int __per_packet_lb_svc_xlate_4(void *ctx, struct iphdr *
 	fraginfo = ipfrag_encode_ipv4(ip4);
 	l4_off = ETH_HLEN + ipv4_hdrlen(ip4);
 
+	/* Native-vpc: never translate a service address for a VPC endpoint.
+	 * Service backends are keyed by (IP, port) with no VPC scope, and the
+	 * backend address would be resolved by kube-ovn inside the *sender's*
+	 * VPC - i.e. a client of one VPC could be redirected to the pod that
+	 * happens to own the same IP in its own VPC. kube-ovn (or kube-proxy)
+	 * owns service load balancing in this mode; leave the packet untouched.
+	 * This mirrors the endpoint-map fast path, which is skipped for the same
+	 * reason.
+	 */
+	if (CONFIG(native_vpc_vni) > 0)
+		goto skip_service_lookup;
+
 	ret = lb4_extract_tuple(ctx, ip4, fraginfo, l4_off, &tuple);
 	if (IS_ERR(ret)) {
 		if (ret == DROP_UNSUPP_SERVICE_PROTO || ret == DROP_UNKNOWN_L4)
@@ -348,6 +360,12 @@ static __always_inline int __per_packet_lb_svc_xlate_6(void *ctx, struct ipv6hdr
 		return ret;
 
 	l4_off = ETH_HLEN + ret;
+
+	/* Native-vpc: never translate a service address for a VPC endpoint
+	 * (see the IPv4 twin for the rationale).
+	 */
+	if (CONFIG(native_vpc_vni) > 0)
+		goto skip_service_lookup;
 
 	ret = lb6_extract_tuple(ctx, ip6, fraginfo, l4_off, &tuple);
 	if (IS_ERR(ret)) {

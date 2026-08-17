@@ -530,7 +530,10 @@ restarts converge).
 |    |                      | exported as cilium_native_vpc_overlapping_ips;    |
 |    |                      | NAT is inert because its features are rejected    |
 +----+----------------------+---------------------------------------------------+
-| 6  | service / LB         | rejected at startup (test-covered both ways)      |
+| 6  | service / LB         | rejected at startup (test-covered both ways) and  |
+|    |                      | the datapath skips service translation for VPC    |
+|    |                      | endpoints, since ClusterIP is programmed even     |
+|    |                      | with kube-proxy replacement disabled              |
 +----+----------------------+---------------------------------------------------+
 | 7  | encryption / egress  | rejected at startup (test-covered both ways)      |
 |    | gateway / masquerade |                                                   |
@@ -922,10 +925,65 @@ Service and load-balancing plane
 Scope: service frontends, backends and their BPF maps.
 
 Backends are keyed by ``(IP, port, protocol)``, so two pods of different VPCs
-sharing an IP would collapse into a single backend entry and receive each
-other's traffic. Native-vpc therefore **rejects kube-proxy replacement and
-socket LB at startup**; service load balancing is left to kube-proxy (or to
-kube-ovn), which resolves backends in the VPC's own routing domain.
+sharing an IP collapse into a single backend entry. Worse, a backend address is
+just an IP: whichever pod owns that IP **in the sender's own VPC** is what
+kube-ovn delivers to. Translating a service address for a VPC endpoint can
+therefore silently redirect a client of one tenant to a pod of another.
+
+Native-vpc closes this on two levels:
+
+* **Configuration**: kube-proxy replacement and socket LB are rejected at
+  startup.
+* **Datapath**: disabling kube-proxy replacement is *not* sufficient. Only
+  NodePort and HostPort frontends are gated by it; ClusterIP frontends and
+  their backends are still reflected into the load-balancing tables and
+  programmed into the BPF maps, and ``bpf_lxc`` calls ``lb4_lookup_service()``
+  unconditionally on pod egress. ``bpf_lxc`` therefore skips the service lookup
+  entirely when the endpoint has a VNI (``CONFIG(native_vpc_vni) > 0``),
+  exactly like it skips the endpoint-map fast path. Service load balancing is
+  left to kube-ovn (or kube-proxy), which resolves backends inside the VPC's
+  own routing domain.
+
+Consumers of the load-balancing tables that remain active are VPC-agnostic by
+nature and unaffected: Hubble's service enrichment resolves *frontends*
+(cluster-scoped VIPs, never pod addresses), and the health checker as well as
+NodePort/HostPort reflection are gated by kube-proxy replacement.
+CiliumLocalRedirectPolicy is *not* gated by it, but it redirects to a backend
+address and is therefore ineffective (and would be unsafe) for VPC endpoints
+under the datapath rule above.
+
+Why ``kubeProxyReplacement: false`` is not enough
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This is worth spelling out, because the natural assumption is that disabling
+kube-proxy replacement disables Cilium's service handling:
+
+#. the load-balancing control plane (reflectors, maps, reconciler) is
+   registered unconditionally in the agent, so the BPF service and backend maps
+   are created and populated;
+#. only NodePort, LoadBalancer and HostPort frontends are gated by kube-proxy
+   replacement - **ClusterIP frontends are reflected unconditionally**, i.e.
+   every ClusterIP service of the cluster ends up in the BPF maps;
+#. ``bpf_lxc`` compiles per-packet load balancing whenever socket LB is not
+   *fully* enabled (``#if !defined(ENABLE_SOCKET_LB_FULL) || ...``), and also
+   whenever SCTP support is enabled - both of which hold for a kube-ovn
+   chaining deployment with ``socketLB.enabled: false`` and
+   ``sctp.enabled: true``.
+
+Without the datapath rule above, a pod of VPC B connecting to a ClusterIP
+therefore had its destination rewritten by Cilium to a backend pod address of,
+say, VPC A - and kube-ovn then resolved that address inside VPC B, either
+dropping the packet or delivering it to whatever pod owns the same IP there.
+
+Operators can verify the state on a node with:
+
+.. code-block:: shell-session
+
+    # the maps exist and are populated even with kubeProxyReplacement=false
+    $ cilium-dbg bpf lb list | head
+    # after the fix, traffic from a VPC pod to a ClusterIP must leave the pod
+    # untranslated (kube-ovn / kube-proxy resolves it):
+    $ cilium-dbg monitor --type trace | grep <clusterIP>
 
 Encryption, egress gateway and masquerade plane
 -----------------------------------------------
