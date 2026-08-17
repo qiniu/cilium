@@ -1095,6 +1095,7 @@ Option Value          Description
 ``workload``          Kubernetes pod's workload name and namespace in the form of ``namespace/workload-name``.
 ``workload-name``     Kubernetes pod's workload name (workloads are: Deployment, Statefulset, Daemonset, ReplicationController, CronJob, Job, DeploymentConfig (OpenShift), etc).
 ``app``               Kubernetes pod's app name, derived from pod labels (``app.kubernetes.io/name``, ``k8s-app``, or ``app``).
+``vni``               The native-vpc VNI (kube-ovn ``tunnel_key``) of the endpoint, empty for non-VPC endpoints. See :ref:`native_vpc`.
 ===================== ===================================================================================
 
 When specifying the source and/or destination context, multiple contexts can be
@@ -1128,12 +1129,14 @@ Option Value                   Description
 ``source_workload``            The name of the source pod's workload (Deployment, Statefulset, Daemonset, ReplicationController, CronJob, Job, DeploymentConfig (OpenShift)).
 ``source_workload_kind``       The kind of the source pod's workload, for example, Deployment, Statefulset, Daemonset, ReplicationController, CronJob, Job, DeploymentConfig (OpenShift).
 ``source_app``                 The app name of the source pod, derived from pod labels (``app.kubernetes.io/name``, ``k8s-app``, or ``app``).
+``source_vni``                 The native-vpc VNI of the flow source, empty for non-VPC endpoints. With overlapping VPC subnets this is what separates two flows sharing an IP.
 ``destination_ip``             The destination IP of the flow.
 ``destination_namespace``      The namespace of the pod if the flow destination is from a Kubernetes pod.
 ``destination_pod``            The pod name if the flow destination is from a Kubernetes pod.
 ``destination_workload``       The name of the destination pod's workload (Deployment, Statefulset, Daemonset, ReplicationController, CronJob, Job, DeploymentConfig (OpenShift)).
 ``destination_workload_kind``  The kind of the destination pod's workload, for example, Deployment, Statefulset, Daemonset, ReplicationController, CronJob, Job, DeploymentConfig (OpenShift).
 ``destination_app``            The app name of the source pod, derived from pod labels (``app.kubernetes.io/name``, ``k8s-app``, or ``app``).
+``destination_vni``            The native-vpc VNI of the flow destination, empty for non-VPC endpoints.
 ``traffic_direction``          Identifies the traffic direction of the flow. Possible values are ``ingress``, ``egress`` and ``unknown``.
 ============================== ===============================================================================
 

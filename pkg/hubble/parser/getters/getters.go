@@ -33,6 +33,8 @@ type EndpointGetter interface {
 
 // EndpointGetterVNI is the optional exact endpoint lookup extension for
 // native-vpc flows. Implementations must not infer VNI from a bare IP.
+// A zero VNI selects the plain (non-VPC) scope and is key-exact as well: it
+// resolves only endpoints that are not in any VPC (host, nodes, non-OVN pods).
 type EndpointGetterVNI interface {
 	GetEndpointInfoForVNI(ip netip.Addr, vni uint32) (endpoint EndpointInfo, ok bool)
 }
@@ -55,6 +57,11 @@ type IPGetter interface {
 	// LookupSecIDByIP returns the corresponding security identity that
 	// the specified IP maps to as well as if the corresponding entry exists.
 	LookupSecIDByIP(ip netip.Addr) (ipcache.Identity, bool)
+	// LookupSecIDByIPForVNI returns the identity of the native-vpc VNI-scoped
+	// entry for the given IP. It is key-exact: it never resolves a plain or a
+	// foreign-VPC entry, so a flow whose VNI context is known is never
+	// attributed to another VPC.
+	LookupSecIDByIPForVNI(ip netip.Addr, vni uint32) (ipcache.Identity, bool)
 }
 
 // ServiceGetter fetches service metadata.

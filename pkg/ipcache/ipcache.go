@@ -327,6 +327,21 @@ func (ipc *IPCache) getK8sMetadata(ip string) *K8sMetadata {
 	return nil
 }
 
+// LookupSecIDByIPForVNI resolves the identity of the native-vpc VNI-scoped
+// entry for the given IP (key "<ip>@vni:<vni>"). It is key-exact: it never
+// falls back to the plain (non-VPC) entry or to a shorter prefix, so a caller
+// that knows the VNI of a packet can never be given a foreign VPC's identity.
+// Callers must fall back to the plain lookups explicitly for non-VPC entities
+// (nodes, host, world, CIDRs).
+func (ipc *IPCache) LookupSecIDByIPForVNI(ip netip.Addr, vni uint32) (Identity, bool) {
+	if !ip.IsValid() || vni == 0 {
+		return Identity{}, false
+	}
+	ipc.mutex.RLock()
+	defer ipc.mutex.RUnlock()
+	return ipc.lookupByIPRLocked(KeyWithVNI(ip.String(), vni))
+}
+
 // LookupSecIDByIPUnambiguous is the deliberate exception to the key-exact
 // rule: it additionally resolves a native-vpc VNI-scoped entry when exactly
 // one VPC uses the given IP, and reports a miss when several VPCs overlap on

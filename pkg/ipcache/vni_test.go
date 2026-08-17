@@ -241,3 +241,43 @@ func TestIPCachePlainAndVNIEntryIsolation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint16(81), port)
 }
+
+// TestLookupSecIDByIPForVNI verifies the key-exact (VNI, IP) identity lookup
+// used by the Hubble parsers: it must never resolve a plain entry, a foreign
+// VPC entry, or a shorter prefix for the same IP.
+func TestLookupSecIDByIPForVNI(t *testing.T) {
+	s := setupIPCacheTestSuite(t)
+	ip := "192.168.1.2"
+	addr := netip.MustParseAddr(ip)
+
+	_, err := s.IPIdentityCache.Upsert(KeyWithVNI(ip, 36), nil, 0, nil, Identity{
+		ID: identity.NumericIdentity(21929), Source: source.CustomResource, Vni: 36,
+	})
+	require.NoError(t, err)
+	_, err = s.IPIdentityCache.Upsert(KeyWithVNI(ip, 17), nil, 0, nil, Identity{
+		ID: identity.NumericIdentity(21930), Source: source.CustomResource, Vni: 17,
+	})
+	require.NoError(t, err)
+
+	got, ok := s.IPIdentityCache.LookupSecIDByIPForVNI(addr, 36)
+	require.True(t, ok)
+	require.Equal(t, identity.NumericIdentity(21929), got.ID)
+	require.Equal(t, uint32(36), got.Vni)
+
+	got, ok = s.IPIdentityCache.LookupSecIDByIPForVNI(addr, 17)
+	require.True(t, ok)
+	require.Equal(t, identity.NumericIdentity(21930), got.ID)
+
+	// A VPC that does not use the IP must miss, even though a plain /24 entry
+	// covering it exists (LPM fallbacks are not allowed here).
+	_, err = s.IPIdentityCache.Upsert("192.168.1.0/24", nil, 0, nil, Identity{
+		ID: identity.NumericIdentity(21931), Source: source.Generated,
+	})
+	require.NoError(t, err)
+	_, ok = s.IPIdentityCache.LookupSecIDByIPForVNI(addr, 99)
+	require.False(t, ok)
+
+	// A zero VNI is not a VPC scope.
+	_, ok = s.IPIdentityCache.LookupSecIDByIPForVNI(addr, 0)
+	require.False(t, ok)
+}

@@ -114,6 +114,49 @@ fallback sequence:
      ipcache map (``cilium_ipcache_vni``), keyed by (VNI, IP) so that
      overlapping IPs from different logical switches/VPCs coexist.
 
+Observability: the (VNI, IP) chain in Hubble
+===========================================
+
+Every Hubble flow of a native-vpc endpoint carries its VNI, and every lookup
+Hubble performs to enrich a flow is scoped by (VNI, IP). The chain is:
+
+1. **VNI context of the event.** For L3/L4 events (trace/drop/policy-verdict),
+   the notification carries the id of the local endpoint whose BPF program
+   emitted it. The parser resolves that endpoint by id and takes its
+   ``VNIID``. This is exactly the scope the datapath used: ``bpf_lxc`` resolves
+   the peer of an endpoint in ``cilium_ipcache_vni`` with that endpoint's own
+   ``CONFIG(native_vpc_vni)``. For encapsulated packets that Cilium itself
+   decodes, the overlay VNI of the tunnel header takes precedence.
+   For L7 events the VNI is recorded on the proxy access-log record
+   (``accesslog.EndpointInfo.VNIID``) from the resolved endpoint, or from the
+   unambiguous ipcache entry.
+
+2. **Endpoint resolution.** Local endpoints are looked up with the exact
+   (VNI, IP) key. A miss falls back only to the key-exact *plain* scope, which
+   holds non-VPC entities (host, nodes, non-OVN pods); it never degrades to a
+   bare-IP guess that could select an endpoint of another VPC.
+
+3. **Remote peer resolution.** With a VNI context, the identity and the pod
+   metadata are read from the VNI-scoped ipcache entry (``<ip>@vni:<vni>``).
+   Only if that misses does the plain ipcache answer, which is correct because
+   it contains exactly the non-VPC entities. Without VNI context (for example
+   events emitted by the host datapath), the VNI is recovered from the peer
+   identity's ``vni:io-cilium-native-vpc-vni`` label, which is VNI-distinct by
+   construction.
+
+4. **Flow fields.** ``Endpoint.vni_id`` is set on both flow endpoints for
+   L3/L4 and L7 flows, but only for peers that really resolved inside that VPC
+   scope: a node/world peer of a VPC endpoint keeps ``vni_id = 0``.
+   ``IPCacheNotification.vni`` carries the VNI of ipcache agent events.
+
+5. **Filtering and metrics.** Flows can be filtered by VNI without any new API
+   field, either through the VNI identity label
+   (``--from-label 'vni:io-cilium-native-vpc-vni=36'``) or through the CEL
+   filter (``_flow.source.vni_id == uint(36)``). Hubble metrics accept ``vni``
+   as a source/destination context identifier and ``source_vni`` /
+   ``destination_vni`` as ``labelsContext`` values, so that metrics of two VPCs
+   that share an IP or a pod name do not collapse into one series.
+
 Policy and security-group semantics
 ===================================
 
@@ -250,11 +293,27 @@ Readers (lookup)
 |                                      |           | list has exactly one entry, so restored  |
 |                                      |           | DNS rules never leak across VNIs         |
 +--------------------------------------+-----------+------------------------------------------+
-| Hubble local endpoint                | yes*      | exact VNI lookup when context exists;    |
-|                                      |           | bare-IP single-VNI fallback only;        |
-|                                      |           | overlap falls back to remote resolution  |
+| Hubble VNI context (L3/L4)            | yes       | the emitting endpoint's VNI is read from |
+|                                      |           | the event's endpoint id, exactly like    |
+|                                      |           | bpf_lxc uses CONFIG(native_vpc_vni)      |
 +--------------------------------------+-----------+------------------------------------------+
-| Hubble remote endpoint               | yes       | VNI derived from the identity VNI label  |
+| Hubble local endpoint                | yes       | exact (VNI, IP) lookup; falls back only  |
+|                                      |           | to the key-exact plain scope for non-VPC |
+|                                      |           | peers, never to a bare-IP guess          |
++--------------------------------------+-----------+------------------------------------------+
+| Hubble remote endpoint               | yes       | key-exact (VNI, IP) ipcache identity +   |
+|                                      |           | metadata when the flow has VNI context;  |
+|                                      |           | otherwise VNI from the identity label    |
++--------------------------------------+-----------+------------------------------------------+
+| Hubble sock parser (socketLB)        | yes*      | no VNI context in TraceSock events;      |
+|                                      |           | socketLB is not used with kube-ovn       |
++--------------------------------------+-----------+------------------------------------------+
+| Hubble metrics context               | yes       | ``vni`` context identifier and           |
+|                                      |           | ``source_vni``/``destination_vni``       |
+|                                      |           | labelsContext values                     |
++--------------------------------------+-----------+------------------------------------------+
+| Hubble flow filters                  | yes       | ``vni_id`` is filterable via the CEL     |
+|                                      |           | filter and via the VNI identity label    |
 +--------------------------------------+-----------+------------------------------------------+
 | L7 proxy accesslog (epinfo)          | yes       | records the endpoint's VNI on the log    |
 |                                      |           | record (endpoint VNI, else the           |

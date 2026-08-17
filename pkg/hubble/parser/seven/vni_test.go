@@ -35,6 +35,10 @@ func (g *vniIPGetter) LookupSecIDByIP(netip.Addr) (ipcache.Identity, bool) {
 	return ipcache.Identity{}, false
 }
 
+func (g *vniIPGetter) LookupSecIDByIPForVNI(netip.Addr, uint32) (ipcache.Identity, bool) {
+	return ipcache.Identity{}, false
+}
+
 // TestL7FlowCarriesVNI verifies the observability plane of native-vpc: the L7
 // record carries the (VNI, IP) scope resolved by the proxy, the parser uses it
 // to look up pod metadata with the exact VNI-scoped key, and the resulting

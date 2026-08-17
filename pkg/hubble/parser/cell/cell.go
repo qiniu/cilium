@@ -131,9 +131,11 @@ func (h *payloadGetters) GetEndpointInfo(ip netip.Addr) (endpoint hubbleGetters.
 	return ep, true
 }
 
-// GetEndpointInfoForVNI implements the exact native-vpc endpoint lookup.
+// GetEndpointInfoForVNI implements the exact native-vpc endpoint lookup. A zero
+// VNI is the plain (non-VPC) scope and resolves only endpoints that are not in
+// any VPC; both forms are key-exact and never guess a VNI from a bare IP.
 func (h *payloadGetters) GetEndpointInfoForVNI(ip netip.Addr, vni uint32) (endpoint hubbleGetters.EndpointInfo, ok bool) {
-	if !ip.IsValid() || vni == 0 {
+	if !ip.IsValid() {
 		return nil, false
 	}
 	vniLookup, supported := h.endpointManager.(endpointmanager.EndpointsLookupVNI)

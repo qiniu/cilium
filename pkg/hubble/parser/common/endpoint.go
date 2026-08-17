@@ -152,6 +152,15 @@ func (r *EndpointResolver) ResolveEndpoint(ip netip.Addr, datapathSecurityIdenti
 		if vni > 0 {
 			if vniGetter, supported := r.endpointGetter.(getters.EndpointGetterVNI); supported {
 				epInfo, ok = vniGetter.GetEndpointInfoForVNI(ip, vni)
+				if !ok {
+					// The peer of a VPC endpoint is either in the same VPC
+					// (resolved above, mirroring what bpf_lxc does with the
+					// endpoint's own CONFIG(native_vpc_vni)) or a non-VPC
+					// entity (host, node, non-OVN pod). Only the latter,
+					// key-exact plain scope is an acceptable fallback: a
+					// bare-IP guess could pick an endpoint of another VPC.
+					epInfo, ok = vniGetter.GetEndpointInfoForVNI(ip, 0)
+				}
 			}
 		} else {
 			epInfo, ok = r.endpointGetter.GetEndpointInfo(ip)
@@ -183,22 +192,58 @@ func (r *EndpointResolver) ResolveEndpoint(ip netip.Addr, datapathSecurityIdenti
 	numericIdentity := datapathSecurityIdentity
 	var namespace, podName string
 	var needVNIMetadata bool
+	// contextVNI is the VNI scope the datapath observed for this side of the
+	// flow (0 when the event carries no VNI context). inVPCScope records
+	// whether this peer really resolved inside that scope.
+	contextVNI := context.SrcVNI
+	if ip != context.SrcIP {
+		contextVNI = context.DstVNI
+	}
+	var inVPCScope bool
 	if r.ipGetter != nil {
-		if ipIdentity, ok := r.ipGetter.LookupSecIDByIP(ip); ok {
-			numericIdentity = resolveIdentityConflict(ipIdentity.ID, false)
+		var identityResolved bool
+		if contextVNI > 0 {
+			// Key-exact (VNI, IP) resolution: with overlapping VPC subnets a
+			// plain-IP lookup could return another VPC's entry, or a CIDR
+			// prefix shadowing it.
+			if ipIdentity, ok := r.ipGetter.LookupSecIDByIPForVNI(ip, contextVNI); ok {
+				numericIdentity = resolveIdentityConflict(ipIdentity.ID, false)
+				identityResolved = true
+				inVPCScope = true
+			}
+			if meta := r.ipGetter.GetK8sMetadataForVNI(ip, contextVNI); meta != nil {
+				namespace, podName = meta.Namespace, meta.PodName
+				inVPCScope = true
+			}
 		}
-		if meta := r.ipGetter.GetK8sMetadata(ip); meta != nil {
-			namespace, podName = meta.Namespace, meta.PodName
-		} else {
-			// Native-vpc: the metadata of VNI-scoped entries lives under
-			// "<ip>@vni:<vni>" and is invisible to the plain lookup. Resolve
-			// it below once the identity's VNI identity label yields the VNI.
-			needVNIMetadata = true
+		if !identityResolved {
+			// Non-VPC entities (nodes, host, world, CIDR prefixes) live in the
+			// plain ipcache and are the only entries a bare-IP lookup returns.
+			if ipIdentity, ok := r.ipGetter.LookupSecIDByIP(ip); ok {
+				numericIdentity = resolveIdentityConflict(ipIdentity.ID, false)
+			}
+		}
+		if podName == "" {
+			if meta := r.ipGetter.GetK8sMetadata(ip); meta != nil {
+				namespace, podName = meta.Namespace, meta.PodName
+			} else {
+				// Native-vpc: the metadata of VNI-scoped entries lives under
+				// "<ip>@vni:<vni>" and is invisible to the plain lookup.
+				// Without datapath VNI context it is resolved below, once the
+				// identity's VNI identity label yields the VNI.
+				needVNIMetadata = true
+			}
 		}
 	}
 	var labels []string
 	var clusterName string
+	// Only report a VNI for peers that really are in that VPC scope: the flow's
+	// VNI context must not be pasted onto a non-VPC peer (node, host, world) of
+	// a VPC endpoint.
 	var resolvedVNI uint32
+	if inVPCScope {
+		resolvedVNI = contextVNI
+	}
 	if r.identityGetter != nil {
 		if id, err := r.identityGetter.GetIdentity(numericIdentity); err != nil {
 			r.log.Debug(
