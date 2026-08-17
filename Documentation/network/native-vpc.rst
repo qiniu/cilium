@@ -1156,6 +1156,28 @@ backfills it) and then Cilium; the VNI is re-read on restore. A VNI change on a
 running endpoint is deliberately not hot-applied, and an annotation that
 disappears never downgrades a running endpoint to the plain scheme.
 
+The re-read on restore takes a scope, it does not swap one. An endpoint that
+has no VNI yet adopts the annotation's - that is the backfill the sequence
+above exists for. An endpoint that already has one keeps it even if the
+annotation now names another VPC, and says so in the log. The asymmetry is not
+caution for its own sake: the VNI identity label, the numeric identity, the
+CiliumEndpoint annotation other nodes read and the loaded datapath
+configuration all derive from the VNI, and the re-read derives none of them
+again. Adopting a different scope there publishes the address in a VPC while
+the endpoint's identity still names the previous one, so the address ends up in
+both. Moving a pod between VPCs is therefore a recreation, which is also the
+only form in which every derived value is rebuilt.
+
+The pod watcher follows the same rule from the other side. Its entries are
+placeholders that carry ``reserved:unmanaged`` until the endpoint resolves an
+identity, and their scope is taken from the endpoint when there is one. For a
+pod on this node it defers to the endpoint even before the endpoint exists,
+because pod events are delivered before endpoint restore completes: reading the
+annotation in that window would publish exactly the scope the endpoint is about
+to refuse. Pods on other nodes keep using the annotation, which is the only
+signal available there, and the CiliumEndpoint entry - written from the remote
+endpoint's real VNI - takes precedence over it.
+
 Audit result ledger
 ===================
 
@@ -1221,6 +1243,15 @@ look for when reviewing a change.
 | life      | a mode downgrade left        | state that outlives a mode switch    |
 |           | endpoints half configured    | must be re-evaluated against the     |
 |           |                              | mode, not restored blindly           |
++-----------+------------------------------+--------------------------------------+
+| control   | the restore re-read adopted  | a value that other state is derived  |
+|           | a *different* VNI, moving    | from cannot be swapped in isolation; |
+|           | the endpoint between VPCs    | either rebuild the derived state or  |
+|           | while its identity, its CEP  | refuse the change                    |
+|           | annotation and its datapath  |                                      |
+|           | config still named the old   |                                      |
+|           | one - the address then       |                                      |
+|           | existed in both VPCs         |                                      |
 +-----------+------------------------------+--------------------------------------+
 | control   | both watchers decided        | "does this entry still exist?" is a  |
 |           | whether an old entry         | question about the key, and the key  |

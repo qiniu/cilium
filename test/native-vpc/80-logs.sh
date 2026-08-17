@@ -50,16 +50,20 @@ log "every warning is one of the expected ones"
 #  1. the conntrack overlap notice this feature emits on purpose - the fixture
 #     co-locates overlapping addresses, so it *must* appear;
 #  2. leftover "<id>_next" state directories from endpoint regeneration, which
-#     the restorer skips (upstream behaviour, not related to this feature).
+#     the restorer skips (upstream behaviour, not related to this feature);
+#  3. the refusal to move an endpoint between VPCs on a drifted annotation,
+#     which 55-vni-scope-change.sh provokes on purpose.
 warns=$(kubectl -n "$CILIUM_NS" logs "$AGENT" -c cilium-agent 2>/dev/null | grep 'level=warn' || true)
 total=$(echo "$warns" | grep -c . || true)
 overlap=$(echo "$warns" | grep -c "local endpoints of different VPCs share an IP" || true)
 stale=$(echo "$warns" | grep -c "Couldn't find state, ignoring endpoint" || true)
+scope=$(echo "$warns" | grep -c "Ignoring native-vpc VNI change on an existing endpoint" || true)
 other=$(echo "$warns" | grep -v "local endpoints of different VPCs share an IP" \
-                      | grep -v "Couldn't find state, ignoring endpoint" | grep -c . || true)
-info "warnings: ${total} total = ${overlap} conntrack-overlap + ${stale} stale-state + ${other} other"
+                      | grep -v "Couldn't find state, ignoring endpoint" \
+                      | grep -v "Ignoring native-vpc VNI change on an existing endpoint" | grep -c . || true)
+info "warnings: ${total} total = ${overlap} conntrack-overlap + ${stale} stale-state + ${scope} refused-scope-change + ${other} other"
 assert_eq "0" "${other:-x}" "no unexpected warnings"
-[[ "${other:-0}" != "0" ]] && echo "$warns" | grep -v "share an IP" | grep -v "Couldn't find state" \
+[[ "${other:-0}" != "0" ]] && echo "$warns" | grep -v "share an IP" | grep -v "Couldn't find state" | grep -v "Ignoring native-vpc VNI change" \
   | cut -c1-160 | tail -5 | sed 's/^/    /'
 
 # The overlap warning is not noise: it is the conntrack-plane signal, and the

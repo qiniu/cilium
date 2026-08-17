@@ -976,6 +976,25 @@ func (e *Endpoint) SyncVNIFromPodAnnotation(pod *slim_corev1.Pod) bool {
 		}
 		return false
 	}
+
+	// The same reasoning applies before the endpoint is exposed, with one
+	// exception. Taking a scope for the first time (0 -> N) is the kube-ovn
+	// backfill this re-read exists for: nothing derives from a scope that does
+	// not exist yet. Moving between two scopes is different - the identity
+	// label, the numeric identity, the CiliumEndpoint annotation other nodes
+	// read and the loaded datapath configuration all derive from the VNI, and
+	// none of them is re-derived here. Adopting the new scope would publish the
+	// address in a VPC while the endpoint's identity still says another one, so
+	// the endpoint keeps the scope it was admitted with and a recreation is
+	// what moves a pod between VPCs. A hostNetwork pod is exempt for the same
+	// reason it may reset the scope at all: it is a structural signal, not an
+	// annotation that drifted.
+	if !hostNetwork && e.VNIID != 0 && newVNI != e.VNIID {
+		e.getLogger().Warn("Ignoring native-vpc VNI change on an existing endpoint; recreate the pod to move it between VPCs",
+			logfields.VNIID, e.VNIID,
+			logfields.K8sPodName, e.GetK8sNamespaceAndPodName())
+		return false
+	}
 	if e.VNIID != newVNI {
 		e.VNIID = newVNI
 		return true

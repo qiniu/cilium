@@ -1256,3 +1256,62 @@ func TestRestoreVNIRespectsMode(t *testing.T) {
 	ep.fromSerializedEndpoint(serialized)
 	require.Zero(t, ep.VNIID, "a mode downgrade must return the endpoint to the plain scheme")
 }
+
+// TestSyncVNIFromPodAnnotationScopeChange pins that an endpoint keeps the VPC
+// it was admitted with.
+//
+// The re-read on restore exists so that an endpoint which never had a scope can
+// take one once kube-ovn has written the annotation. Moving an endpoint from
+// one VPC to another is a different operation: the identity label, the numeric
+// identity, the CiliumEndpoint annotation other nodes read and the loaded
+// datapath configuration all derive from the VNI and none of them is re-derived
+// here, so adopting the new scope would publish the address in a VPC while the
+// endpoint's identity still claims another one - the address then exists in
+// both.
+func TestSyncVNIFromPodAnnotationScopeChange(t *testing.T) {
+	prev := option.Config.EnableNativeVPC
+	prevAnn := option.Config.NativeVPCVNIAnnotation
+	option.Config.EnableNativeVPC = true
+	option.Config.NativeVPCVNIAnnotation = "ovn.kubernetes.io/tunnel_key"
+	t.Cleanup(func() {
+		option.Config.EnableNativeVPC = prev
+		option.Config.NativeVPCVNIAnnotation = prevAnn
+	})
+
+	pod := func(vni string, hostNetwork bool) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "p",
+				Namespace:   "ns",
+				Annotations: map[string]string{"ovn.kubernetes.io/tunnel_key": vni},
+			},
+			Spec: corev1.PodSpec{HostNetwork: hostNetwork},
+		}
+	}
+
+	newEP := func() *Endpoint { return &Endpoint{} }
+
+	t.Run("first scope is taken", func(t *testing.T) {
+		ep := newEP()
+		ep.logger.Store(hivetest.Logger(t))
+		require.True(t, ep.SyncVNIFromPodAnnotation(pod("9", false)))
+		require.Equal(t, uint64(9), ep.GetVNIID())
+	})
+
+	t.Run("a different scope is refused", func(t *testing.T) {
+		ep := newEP()
+		ep.logger.Store(hivetest.Logger(t))
+		ep.VNIID = 9
+		require.False(t, ep.SyncVNIFromPodAnnotation(pod("99", false)),
+			"the endpoint must not be moved between VPCs by an annotation alone")
+		require.Equal(t, uint64(9), ep.GetVNIID())
+	})
+
+	t.Run("the same scope is not a change", func(t *testing.T) {
+		ep := newEP()
+		ep.logger.Store(hivetest.Logger(t))
+		ep.VNIID = 9
+		require.False(t, ep.SyncVNIFromPodAnnotation(pod("9", false)))
+		require.Equal(t, uint64(9), ep.GetVNIID())
+	})
+}

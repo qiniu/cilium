@@ -4,6 +4,7 @@
 package watchers
 
 import (
+	"context"
 	"net"
 	"testing"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/cilium/cilium/pkg/annotation"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
+	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/ipcache"
 	ipcacheTypes "github.com/cilium/cilium/pkg/ipcache/types"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
@@ -21,6 +23,7 @@ import (
 	"github.com/cilium/cilium/pkg/k8s/types"
 	k8sTypes "github.com/cilium/cilium/pkg/k8s/types"
 	"github.com/cilium/cilium/pkg/labels"
+	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/source"
 )
@@ -31,6 +34,16 @@ import (
 // testVNIAnnotation stands in for the kube-ovn annotation the deployment
 // configures; the watcher reads whatever key option.Config names.
 const testVNIAnnotation = "ovn.kubernetes.io/tunnel_key"
+
+// fakeEndpointManager answers the pod watcher's question "is there a local
+// endpoint for this pod, and which VPC is it actually in?".
+type fakeEndpointManager struct{ eps []*endpoint.Endpoint }
+
+func (f fakeEndpointManager) GetEndpointsByPodName(string) []*endpoint.Endpoint { return f.eps }
+func (fakeEndpointManager) LookupCEPName(string) *endpoint.Endpoint             { return nil }
+func (fakeEndpointManager) GetEndpoints() []*endpoint.Endpoint                  { return nil }
+func (fakeEndpointManager) GetHostEndpoint() *endpoint.Endpoint                 { return nil }
+func (fakeEndpointManager) UpdatePolicyMaps(context.Context) error              { return nil }
 
 // fakePolicyManager swallows the policy recalculation triggers.
 type fakePolicyManager struct{}
@@ -219,11 +232,12 @@ func TestUpdatePodHostDataVNIChange(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ipc := &recordingIPCache{}
 			w := &K8sPodWatcher{
-				logger:        hivetest.Logger(t),
-				ipcache:       ipc,
-				policyManager: fakePolicyManager{},
-				wgConfig:      fakeTypes.WireguardConfig{},
-				ipsecConfig:   fakeTypes.IPsecConfig{},
+				logger:          hivetest.Logger(t),
+				ipcache:         ipc,
+				policyManager:   fakePolicyManager{},
+				endpointManager: fakeEndpointManager{},
+				wgConfig:        fakeTypes.WireguardConfig{},
+				ipsecConfig:     fakeTypes.IPsecConfig{},
 			}
 
 			oldPod := vniPod("client", tc.oldIP, "192.168.0.1", tc.oldVNI)
@@ -237,4 +251,84 @@ func TestUpdatePodHostDataVNIChange(t *testing.T) {
 				"the entry must be removed with the VNI it was written under")
 		})
 	}
+}
+
+// TestUpdatePodHostDataDriftFollowsEndpoint pins which of the two sources wins
+// when they disagree.
+//
+// A ready endpoint does not adopt a new VNI from its pod annotation: the VNI is
+// an identity and datapath dimension, and only a recreation converges it. The
+// pod watcher therefore must not publish the annotation's scope either -
+// doing so would announce the address in a VPC that no endpoint is in, which is
+// exactly the cross-VPC lie the scoping exists to prevent. The entry stays
+// where the datapath actually is until the pod is recreated.
+func TestUpdatePodHostDataDriftFollowsEndpoint(t *testing.T) {
+	prev := option.Config.EnableNativeVPC
+	prevAnn := option.Config.NativeVPCVNIAnnotation
+	option.Config.EnableNativeVPC = true
+	option.Config.NativeVPCVNIAnnotation = testVNIAnnotation
+	t.Cleanup(func() {
+		option.Config.EnableNativeVPC = prev
+		option.Config.NativeVPCVNIAnnotation = prevAnn
+	})
+
+	ep := &endpoint.Endpoint{VNIID: 9}
+	ipc := &recordingIPCache{}
+	w := &K8sPodWatcher{
+		logger:          hivetest.Logger(t),
+		ipcache:         ipc,
+		policyManager:   fakePolicyManager{},
+		endpointManager: fakeEndpointManager{eps: []*endpoint.Endpoint{ep}},
+		wgConfig:        fakeTypes.WireguardConfig{},
+		ipsecConfig:     fakeTypes.IPsecConfig{},
+	}
+
+	oldPod := vniPod("client", "10.99.0.11", "192.168.0.1", "9")
+	newPod := vniPod("client", "10.99.0.11", "192.168.0.1", "99") // annotation drifted
+
+	require.NoError(t, w.updatePodHostData(oldPod, newPod,
+		k8sTypes.IPSlice{"10.99.0.11"}, k8sTypes.IPSlice{"10.99.0.11"}))
+
+	require.Empty(t, ipc.upserted, "no entry may be published under a VPC the endpoint is not in")
+	require.Empty(t, ipc.deleted, "the entry backing the running datapath must stay")
+}
+
+// TestUpdatePodHostDataLocalPodWithoutEndpoint covers the startup ordering: pod
+// events are delivered before endpoint restore has finished, so the watcher has
+// no endpoint to consult yet. It must not fall back to the annotation for a pod
+// on this node - the annotation may be one the endpoint is about to refuse, and
+// the placeholder would then name a VPC the endpoint never joins. The endpoint
+// registers the real entry itself a moment later.
+func TestUpdatePodHostDataLocalPodWithoutEndpoint(t *testing.T) {
+	prev := option.Config.EnableNativeVPC
+	prevAnn := option.Config.NativeVPCVNIAnnotation
+	option.Config.EnableNativeVPC = true
+	option.Config.NativeVPCVNIAnnotation = testVNIAnnotation
+	t.Cleanup(func() {
+		option.Config.EnableNativeVPC = prev
+		option.Config.NativeVPCVNIAnnotation = prevAnn
+	})
+
+	ipc := &recordingIPCache{}
+	w := &K8sPodWatcher{
+		logger:          hivetest.Logger(t),
+		ipcache:         ipc,
+		policyManager:   fakePolicyManager{},
+		endpointManager: fakeEndpointManager{}, // restore has not exposed it yet
+		wgConfig:        fakeTypes.WireguardConfig{},
+		ipsecConfig:     fakeTypes.IPsecConfig{},
+	}
+
+	pod := vniPod("client", "10.99.0.11", "192.168.0.1", "99")
+	pod.Spec.NodeName = nodeTypes.GetName()
+
+	require.NoError(t, w.updatePodHostData(nil, pod, nil, k8sTypes.IPSlice{"10.99.0.11"}))
+	require.Empty(t, ipc.upserted, "the scope of a local pod is the endpoint's to publish")
+
+	// A pod on another node has no local endpoint to wait for, so the
+	// annotation remains the only available scope.
+	remote := vniPod("peer", "10.99.0.12", "192.168.0.2", "99")
+	remote.Spec.NodeName = "other-node"
+	require.NoError(t, w.updatePodHostData(nil, remote, nil, k8sTypes.IPSlice{"10.99.0.12"}))
+	require.Equal(t, []string{"10.99.0.12@vni:99"}, ipc.upserted)
 }

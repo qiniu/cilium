@@ -48,6 +48,7 @@ import (
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/nativevpc"
 	"github.com/cilium/cilium/pkg/node"
+	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/source"
@@ -609,6 +610,31 @@ func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPo
 	// native-vpc mode. Zero for non-native-vpc pods.
 	vni := podVNI(newPod)
 
+	// A managed endpoint deliberately does not follow annotation drift: its VNI
+	// is an identity and datapath dimension that only a recreation can change
+	// (see Endpoint.SyncVNIFromPodAnnotation). Announcing the annotation's scope
+	// here would publish the address in a VPC that no endpoint is in, so the
+	// endpoint's own scope wins whenever there is one. A zero VNI is never taken
+	// from the endpoint: that direction would merge the address back into the
+	// shared plain-IP scope.
+	//
+	// For a pod scheduled on this node the endpoint is the authority even when
+	// it is not known yet - pod events arrive before endpoint restore completes,
+	// and the annotation read here may be one the endpoint is going to refuse.
+	// The placeholder entry is then simply left to the endpoint, which registers
+	// the real one under the scope it was admitted with.
+	deferToEndpoint := false
+	if option.Config.EnableNativeVPC {
+		switch eps := k.endpointManager.GetEndpointsByPodName(k8sUtils.GetObjNamespaceName(&newPod.ObjectMeta)); {
+		case len(eps) > 0:
+			if epVNI := uint32(eps[0].GetVNIID()); epVNI != 0 {
+				vni = epVNI
+			}
+		case newPod.Spec.NodeName == nodeTypes.GetName():
+			deferToEndpoint = true
+		}
+	}
+
 	// In native-vpc mode every non-hostNetwork pod must carry a non-zero VNI
 	// (the OVN subnet's tunnel key). A missing/zero VNI is an error: registering
 	// nothing under the plain-IP scheme would collide with overlapping VPC
@@ -704,6 +730,9 @@ func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPo
 
 	var errs []string
 	for _, podIP := range newPodIPs {
+		if deferToEndpoint {
+			break
+		}
 		// Initial mapping of podIP <-> hostIP <-> identity. The mapping is
 		// later updated once the allocator has determined the real identity.
 		// If the endpoint remains unmanaged, the identity remains untouched.
