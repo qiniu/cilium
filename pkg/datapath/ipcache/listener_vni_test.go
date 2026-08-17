@@ -4,6 +4,7 @@
 package ipcache
 
 import (
+	"net/netip"
 	"testing"
 
 	"github.com/cilium/hive/hivetest"
@@ -79,4 +80,32 @@ func TestBPFListenerVNIRouting(t *testing.T) {
 	vk, ok = vni.deletes[0].(*ipcacheMap.VniKey)
 	require.True(t, ok)
 	require.Equal(t, uint32(36), vk.Vni)
+}
+
+// TestBPFListenerDeleteUsesDeletedEntryVNI pins the cache->forwarding seam for
+// deletions: the map is chosen by the VNI of the entry being removed, so
+// deleting a VPC entry never touches the plain map (and vice versa), and two
+// VPCs sharing an IP delete their own entry only.
+func TestBPFListenerDeleteUsesDeletedEntryVNI(t *testing.T) {
+	l, plain, vni := newTestListener(t)
+	prefix := cmtypes.NewLocalPrefixCluster(netip.MustParsePrefix("10.16.32.10/32"))
+
+	// Delete of a VPC entry -> VNI map only.
+	l.OnIPIdentityCacheChange(ipcache.Delete, prefix, nil, nil, nil,
+		ipcache.Identity{ID: 21929, Source: source.CustomResource, Vni: 36}, 0, nil, 0)
+	require.Empty(t, plain.deletes)
+	require.Len(t, vni.deletes, 1)
+	require.Equal(t, "10.16.32.10/32@vni:36", vni.deletes[0].String())
+
+	// Delete of the same IP in another VPC -> its own key.
+	l.OnIPIdentityCacheChange(ipcache.Delete, prefix, nil, nil, nil,
+		ipcache.Identity{ID: 21930, Source: source.CustomResource, Vni: 17}, 0, nil, 0)
+	require.Len(t, vni.deletes, 2)
+	require.Equal(t, "10.16.32.10/32@vni:17", vni.deletes[1].String())
+
+	// Delete of a non-VPC entry -> plain map only.
+	l.OnIPIdentityCacheChange(ipcache.Delete, prefix, nil, nil, nil,
+		ipcache.Identity{ID: 6, Source: source.KubeAPIServer}, 0, nil, 0)
+	require.Len(t, plain.deletes, 1)
+	require.Len(t, vni.deletes, 2)
 }

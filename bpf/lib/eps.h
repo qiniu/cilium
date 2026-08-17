@@ -206,12 +206,24 @@ ipcache_lookup4(const void *map, __be32 addr, __u32 prefix, __u32 cluster_id)
  * ipcache key to disambiguate overlapping IPs across clusters; here the
  * kube-ovn tunnel_key (VNI) plays that role for VPCs within one cluster. We
  * deliberately do not reuse cluster_id semantics (VPC != ClusterMesh).
+ *
+ * Layout rule (same as struct ipcache_key): every non-IP field must precede
+ * the IP union, because IPCACHE_VNI_STATIC_PREFIX is derived from
+ * sizeof(key) - sizeof(lpm_key) - sizeof(v6addr) and is added to the IP prefix
+ * length. Padding placed *after* the IP would inflate the static prefix and
+ * make any entry shorter than a host prefix match only addresses whose
+ * remaining bytes are zero.
  */
 struct ipcache_vni_key {
 	struct bpf_lpm_trie_key lpm_key;
 	__u32 vni;
 	__u8 pad1;
 	__u8 family;
+	/* pad2 rounds the non-IP part to 8 bytes so that the Go side
+	 * (pkg/maps/ipcache.VniKey, which cannot be packed) has the same layout
+	 * and the same 64-bit static prefix.
+	 */
+	__u8 pad2[2];
 	union {
 		struct {
 			__u32		ip4;
@@ -221,13 +233,6 @@ struct ipcache_vni_key {
 		};
 		union v6addr	ip6;
 	};
-	/* pad2 MUST stay in sync with VniKey.Pad2 in pkg/maps/ipcache: it rounds
-	 * sizeof(struct ipcache_vni_key) to 28 so that the Go side computes the
-	 * same IPCACHE_VNI_STATIC_PREFIX (64 bits). Without it Go computes 64 bits
-	 * while C computes 48, and BPF lookups in cilium_ipcache_vni never match
-	 * Go-written entries.
-	 */
-	__u8 pad2[2];
 } __packed;
 
 struct {
@@ -239,8 +244,10 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC | BPF_F_RDONLY_PROG_COND);
 } cilium_ipcache_vni __section_maps_btf;
 
-/* IPCACHE_VNI_STATIC_PREFIX gets sizeof non-IP, non-prefix part of
- * ipcache_vni_key (vni + pad1 + family).
+/* IPCACHE_VNI_STATIC_PREFIX is the number of key bits that precede the IP:
+ * vni + pad1 + family + pad2. It is derived the same way as
+ * IPCACHE_STATIC_PREFIX, which only holds because every non-IP field comes
+ * before the IP union (see the layout rule above).
  */
 #define IPCACHE_VNI_STATIC_PREFIX					\
 	(8 * (sizeof(struct ipcache_vni_key) - sizeof(struct bpf_lpm_trie_key)	\

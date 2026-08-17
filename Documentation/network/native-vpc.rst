@@ -718,8 +718,35 @@ Scope: BPF maps and programs.
 |                                      | one VPC cannot remove another VPC's entry        |
 +--------------------------------------+--------------------------------------------------+
 
-Defect found and fixed during this audit: endpoint teardown deleted the
-``cilium_lxc`` entry of an overlapping IP owned by another VPC's endpoint.
+Seams
+~~~~~
+
+*Upstream* (cache -> forwarding): the listener picks the map from
+``Identity.Vni`` for both upserts and deletions, so a deletion always targets
+the map the entry was written to (test-covered, including two VPCs sharing an
+IP). An entry never "moves" between the two maps, because the VNI is part of
+the ipcache key: a scope change is a delete of one key plus an upsert of
+another.
+
+The shadow/revive relationship between an endpoint IP and an equally-sized CIDR
+entry is resolved *within* one VNI scope (the lookup uses
+``KeyWithVNI(prefix, keyVNI)``), which is what keeps that logic - designed for
+one flat key space - correct when the entries live in two different BPF maps.
+
+The Go and C key layouts are pinned by a test on the real invariant: the LPM
+static prefix must equal the bit offset of the IP inside the key data.
+
+*Downstream* (forwarding -> policy/observability): the VNI-scoped lookup yields
+the peer identity that feeds the identity-keyed policy map, and the trace/drop
+events carry the endpoint id from which the observability plane derives the
+VNI. Neither consumer sees the (VNI, IP) key itself.
+
+Defects found and fixed during this audit: endpoint teardown deleted the
+``cilium_lxc`` entry of an overlapping IP owned by another VPC's endpoint; the
+VNI key placed its padding *after* the IP field, which inflated the LPM static
+prefix by 16 bits - host prefixes matched by accident (the extra bits land on
+zeroed padding) but any shorter prefix would only have matched addresses whose
+remaining bytes are zero.
 
 Observability plane
 -------------------

@@ -131,13 +131,15 @@ func NewKey(ip net.IP, mask net.IPMask, clusterID uint16) Key {
 // Must be in sync with struct ipcache_vni_key in <bpf/lib/eps.h>.
 // The VNI is part of the LPM static prefix, so the trie matches on VNI+IP.
 //
-// Layout note: the trailing Pad2 field is REQUIRED. Go rounds the struct size
-// up to the field alignment (26 bytes -> 28), and getVniStaticPrefixBits()
-// derives the LPM static prefix from unsafe.Sizeof. Without an explicit pad,
-// Go computes 64 static bits while the packed C struct computes 48, so BPF
-// lookups in cilium_ipcache_vni never match Go-written entries (and the map
-// key size 28 vs 26 makes the agent-created map incompatible with the one in
-// the BPF ELF). Pad2 must be mirrored in the C struct.
+// Layout rule (identical to Key/struct ipcache_key): **every non-IP field must
+// precede the IP field**, because the LPM static prefix is derived from
+// sizeof(VniKey) - sizeof(Prefixlen) - sizeof(IP) and is then added to the IP
+// prefix length. Pad2 therefore sits before IP: it rounds the non-IP part to 8
+// bytes (the Go struct cannot be packed) and keeps both languages at a 64-bit
+// static prefix. With the padding after the IP the static prefix would be
+// inflated by 16 bits, which happens to work for host prefixes (the extra bits
+// land on zeroed padding) but makes any shorter prefix match only addresses
+// whose remaining bytes are zero.
 //
 // This is the "local ClusterID" split: upstream addresses overlapping IPs
 // across clusters with a cluster_id field in the ipcache key; here the
@@ -148,13 +150,16 @@ type VniKey struct {
 	Vni       uint32 `align:"vni"`
 	Pad1      uint8  `align:"pad1"`
 	Family    uint8  `align:"family"`
+	// Pad2 keeps the non-IP part at 8 bytes and unsafe.Sizeof(VniKey{}) equal
+	// to sizeof(struct ipcache_vni_key) (28 bytes).
+	Pad2 [2]byte `align:"pad2"`
 	// represents both IPv6 and IPv4 (in the lowest four bytes)
 	IP types.IPv6 `align:"$union0"`
-	// Pad2 keeps unsafe.Sizeof(VniKey{}) == sizeof(struct ipcache_vni_key)
-	// (28 bytes) and the static prefix at 64 bits on both sides.
-	Pad2 [2]byte `align:"pad2"`
 }
 
+// getVniStaticPrefixBits returns the number of LPM key bits that precede the
+// IP field. It must equal the byte offset of IP within the key data (i.e.
+// after Prefixlen) times 8; the test in this package pins that invariant.
 func getVniStaticPrefixBits() uint32 {
 	staticMatchSize := unsafe.Sizeof(VniKey{})
 	staticMatchSize -= unsafe.Sizeof(VniKey{}.Prefixlen)
