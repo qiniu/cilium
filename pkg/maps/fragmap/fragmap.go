@@ -44,7 +44,7 @@ func newMap(registry *metrics.Registry, maxMapEntries int, getEventBufferConfig 
 	if option.Config.EnableIPv4FragmentsTracking {
 		m.bpfMapV4 = bpf.NewMap(mapNameIPv4,
 			ebpf.LRUHash,
-			&FragmentKey4{},
+			fragmentKey4(),
 			&FragmentValue4{},
 			maxMapEntries,
 			0,
@@ -70,7 +70,7 @@ func newMap(registry *metrics.Registry, maxMapEntries int, getEventBufferConfig 
 // This should only be used from components which aren't capable of using hive - mainly the cilium-dbg.
 // It needs to initialized beforehand via the Cilium Agent.
 func OpenMap4(logger *slog.Logger) (*bpf.Map, error) {
-	return bpf.OpenMap(bpf.MapPath(logger, mapNameIPv4), &FragmentKey4{}, &FragmentValue4{})
+	return bpf.OpenMap(bpf.MapPath(logger, mapNameIPv4), fragmentKey4(), &FragmentValue4{})
 }
 
 // OpenMap6 opens the pre-initialized IPv6 fragments map for access.
@@ -103,6 +103,53 @@ type FragmentKey4 struct {
 	ID         uint16     `align:"id"`
 	Proto      uint8      `align:"proto"`
 	_          uint8
+}
+
+// FragmentKey4NativeVPC is the native-vpc variant of FragmentKey4: the C
+// struct gains a VNI field when the datapath is compiled with
+// ENABLE_NATIVE_VPC, so that two pods sharing a source IP in different VPCs
+// cannot collide on the 16-bit IP identifier and have the non-first fragments
+// of one datagram classified with the other's L4 ports.
+//
+// The fields are repeated rather than embedded so that the C/Go align checker
+// verifies every field offset, not just the appended one.
+//
+// The agent only uses these types to create and dump the map, so selecting the
+// layout at map creation time is sufficient. Deployments without native-vpc
+// keep the upstream layout byte for byte.
+type FragmentKey4NativeVPC struct {
+	DestAddr   types.IPv4 `align:"daddr"`
+	SourceAddr types.IPv4 `align:"saddr"`
+	ID         uint16     `align:"id"`
+	Proto      uint8      `align:"proto"`
+	_          uint8      `align:"pad"`
+	VNI        uint32     `align:"vni"`
+}
+
+func (k *FragmentKey4NativeVPC) New() bpf.MapKey { return &FragmentKey4NativeVPC{} }
+
+func (k *FragmentKey4NativeVPC) NativeID() uint16 { return byteorder.NetworkToHost16(k.ID) }
+
+func (k *FragmentKey4NativeVPC) String() string {
+	return fmt.Sprintf("%s --> %s, %d, %d, vni:%d",
+		k.SourceAddr, k.DestAddr, k.Proto, k.NativeID(), k.VNI)
+}
+
+// FragmentKey4Type returns the map key layout matching the compiled datapath,
+// for consumers that need the type itself (map creation, the align checker).
+func FragmentKey4Type() any {
+	if option.Config.EnableNativeVPC {
+		return FragmentKey4NativeVPC{}
+	}
+	return FragmentKey4{}
+}
+
+// fragmentKey4 returns the map key layout matching the compiled datapath.
+func fragmentKey4() bpf.MapKey {
+	if option.Config.EnableNativeVPC {
+		return &FragmentKey4NativeVPC{}
+	}
+	return &FragmentKey4{}
 }
 
 // FragmentValue4 must match 'struct ipv4_frag_l4ports' in "bpf/lib/ipv4.h".

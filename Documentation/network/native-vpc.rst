@@ -1034,16 +1034,23 @@ apply unchanged:
   node sets removes the failure mode, and
   ``cilium_native_vpc_overlapping_ips`` already exposes the precondition.
 
-An operator that does not need fragmented traffic can additionally set
-``--enable-ipv4-fragment-tracking=false``, which trades the collision for
-dropping non-first fragments (``DROP_FRAG_NOSUPPORT``) - a fail-closed choice.
+**This is fixed**: ``struct ipv4_frag_id`` carries a VNI field when the
+datapath is compiled with the node-level ``ENABLE_NATIVE_VPC`` define, and
+``pkg/maps/fragmap`` selects the matching key layout when creating the map.
+Deployments without native-vpc keep the upstream layout byte for byte (12
+bytes; 16 with the VNI), which the align checker enforces.
 
-The bounded fix is to add a VNI field to ``struct ipv4_frag_id`` (and to
-``pkg/maps/fragmap.FragmentKey4``) under a node-level ``ENABLE_NATIVE_VPC``
-define, mirroring how ``VniKey`` extends the ipcache key: the field is only
-compiled in when the mode is enabled, so non-native-vpc deployments keep a
-byte-identical map. It is a follow-up rather than part of this change because
-it alters a map shared by five BPF programs and needs datapath validation.
+Only ``bpf_lxc`` knows the VNI (it is per-endpoint load-time config); every
+other program writes and reads with VNI 0 and therefore has its own key
+namespace. A datagram whose fragments were classified by different programs
+would then miss the map and be dropped (``DROP_FRAG_NOT_FOUND``) instead of
+being misclassified - the fail-closed direction. This does not occur in a
+native-vpc deployment, where the pod path is bpf_lxc only: kube-ovn owns the
+host and tunnel datapath, and the agent runs with no devices attached.
+
+An operator that does not need fragmented traffic at all can additionally set
+``--enable-ipv4-fragment-tracking=false``, which drops non-first fragments
+outright (``DROP_FRAG_NOSUPPORT``).
 
 Lifecycle plane
 ---------------

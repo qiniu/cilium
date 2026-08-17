@@ -13,12 +13,37 @@
 #define IPV4_SADDR_OFF		offsetof(struct iphdr, saddr)
 #define IPV4_DADDR_OFF		offsetof(struct iphdr, daddr)
 
+#ifdef ENABLE_NATIVE_VPC
+/* Native-vpc: the fragment key is scoped by the VNI of the endpoint that
+ * classifies the datagram. Without it, two pods that share a source IP in
+ * different VPCs and send fragmented datagrams to the same destination can
+ * collide on the 16-bit IP identifier, and the non-first fragments of one
+ * datagram would be classified with the other's L4 ports - feeding the wrong
+ * ports into the policy and conntrack lookups.
+ *
+ * Only bpf_lxc knows the VNI (it is per-endpoint load-time config); every
+ * other program uses 0, which gives them their own key namespace. A datagram
+ * whose fragments are classified by different programs then misses the map
+ * and is dropped (DROP_FRAG_NOT_FOUND) instead of being misclassified, which
+ * is the fail-closed direction. In native-vpc the pod path is bpf_lxc only
+ * (kube-ovn owns the host and tunnel datapath), so this does not occur.
+ */
+# ifdef IS_BPF_LXC
+#  define frag_scope_vni() CONFIG(native_vpc_vni)
+# else
+#  define frag_scope_vni() 0
+# endif
+#endif
+
 struct ipv4_frag_id {
 	__be32	daddr;
 	__be32	saddr;
 	__be16	id;		/* L4 datagram identifier */
 	__u8	proto;
 	__u8	pad;
+#ifdef ENABLE_NATIVE_VPC
+	__u32	vni;		/* native-vpc scope, 0 outside bpf_lxc */
+#endif
 } __packed;
 
 struct ipv4_frag_l4ports {
@@ -114,6 +139,9 @@ ipv4_handle_fragmentation(struct __ctx_buff *ctx,
 		.saddr = ip4->saddr,
 		.id = (__be16)ipfrag_get_id(fraginfo),
 		.proto = ipfrag_get_protocol(fraginfo),
+#ifdef ENABLE_NATIVE_VPC
+		.vni = frag_scope_vni(),
+#endif
 	};
 
 	if (unlikely(!ipfrag_has_l4_header(fraginfo)))

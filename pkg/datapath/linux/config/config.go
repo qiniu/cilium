@@ -218,6 +218,15 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 		cDefinesMap["ENABLE_IPV6"] = "1"
 	}
 
+	if option.Config.EnableNativeVPC {
+		// Node-level switch for the native-vpc datapath bits that cannot be
+		// expressed as per-endpoint load-time config, i.e. map key layouts.
+		// Currently only the VNI scope of the IPv4 fragment key; the
+		// per-endpoint VNI itself stays load-time data (native_vpc_vni) so
+		// that one bpf_lxc template serves every VPC.
+		cDefinesMap["ENABLE_NATIVE_VPC"] = "1"
+	}
+
 	if option.Config.EnableSRv6 {
 		cDefinesMap["ENABLE_SRV6"] = "1"
 		if option.Config.SRv6EncapMode != "reduced" {

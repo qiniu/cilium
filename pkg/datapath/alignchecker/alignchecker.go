@@ -4,6 +4,8 @@
 package alignchecker
 
 import (
+	"maps"
+
 	check "github.com/cilium/cilium/pkg/alignchecker"
 	"github.com/cilium/cilium/pkg/bpf"
 	lbmap "github.com/cilium/cilium/pkg/loadbalancer/maps"
@@ -31,6 +33,7 @@ var (
 		"ipv6_ct_tuple":        {ctmap.CtKey6Global{}},
 		"ct_entry":             {ctmap.CtEntry{}},
 		"ipcache_key":          {ipcachemap.Key{}},
+		"ipcache_vni_key":      {ipcachemap.VniKey{}},
 		"remote_endpoint_info": {ipcachemap.RemoteEndpointInfo{}},
 		"lb4_key":              {lbmap.Service4Key{}},
 		"lb4_backend":          {lbmap.Backend4ValueV3{}},
@@ -52,7 +55,9 @@ var (
 			srv6map.PolicyValue{},
 			srv6map.SIDKey{},
 		},
-		"macaddr":           {neighborsmap.Value{}},
+		"macaddr": {neighborsmap.Value{}},
+		// Selected at runtime: the C struct gains a VNI field when the
+		// datapath is compiled with ENABLE_NATIVE_VPC (see fragmap).
 		"ipv4_frag_id":      {fragmap.FragmentKey4{}},
 		"ipv4_frag_l4ports": {fragmap.FragmentValue4{}},
 		"ipv6_frag_id":      {fragmap.FragmentKey6{}},
@@ -125,8 +130,13 @@ var (
 // union fields can be referred with special tags - `align:"$union0"`,
 // `align:"$union1"`, etc.
 func CheckStructAlignments(path string) error {
+	// The layout of a few structs depends on the datapath configuration this
+	// node was compiled with, so resolve them now rather than at init time.
+	checks := maps.Clone(toCheck)
+	checks["ipv4_frag_id"] = []any{fragmap.FragmentKey4Type()}
+
 	// Validate alignments of C and Go equivalent structs
-	if err := check.CheckStructAlignments(path, toCheck, true); err != nil {
+	if err := check.CheckStructAlignments(path, checks, true); err != nil {
 		return err
 	}
 	return check.CheckStructAlignments(path, toCheckSizes, false)
