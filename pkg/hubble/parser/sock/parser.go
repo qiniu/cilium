@@ -6,12 +6,14 @@ package sock
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"net/netip"
 	"strings"
 
 	"go4.org/netipx"
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
+	cgroupManager "github.com/cilium/cilium/pkg/cgroups/manager"
 	"github.com/cilium/cilium/pkg/hubble/parser/common"
 	"github.com/cilium/cilium/pkg/hubble/parser/errors"
 	"github.com/cilium/cilium/pkg/hubble/parser/getters"
@@ -91,7 +93,7 @@ func (p *Parser) Decode(data []byte, decoded *flowpb.Flow) error {
 	}
 
 	ipVersion := decodeIPVersion(sock.Flags)
-	srcIP := p.decodeEndpointIP(sock.CgroupId, ipVersion)
+	srcIP, srcVNI := p.decodeEndpoint(sock.CgroupId, ipVersion)
 	if !srcIP.IsValid() && p.skipUnknownCGroupIDs {
 		// Skip events for which we cannot determine the endpoint ip based on
 		// the numeric cgroup id, since those events do not provide much value
@@ -110,6 +112,12 @@ func (p *Parser) Decode(data []byte, decoded *flowpb.Flow) error {
 		SrcLabelID: 0,
 		DstIP:      dstIP,
 		DstLabelID: 0,
+		// Native-vpc: the local endpoint of a socket event is identified by
+		// its cgroup id (hence by pod), which is exact. Its VNI is the scope
+		// of both sides of the flow, like the emitting endpoint's VNI is for
+		// L3/L4 events.
+		SrcVNI: srcVNI,
+		DstVNI: srcVNI,
 	}
 	srcEndpoint := p.epResolver.ResolveEndpoint(srcIP, 0, datapathContext)
 	dstEndpoint := p.epResolver.ResolveEndpoint(dstIP, 0, datapathContext)
@@ -147,36 +155,56 @@ func decodeIPVersion(flags uint8) flowpb.IPVersion {
 	return flowpb.IPVersion_IPv4
 }
 
-func (p *Parser) decodeEndpointIP(cgroupId uint64, ipVersion flowpb.IPVersion) netip.Addr {
-	if p.cgroupGetter != nil {
-		if m := p.cgroupGetter.GetPodMetadataForContainer(cgroupId); m != nil {
-			for _, podIP := range m.IPs {
-				isIPv6 := strings.Contains(podIP, ":")
-				if isIPv6 && ipVersion == flowpb.IPVersion_IPv6 ||
-					!isIPv6 && ipVersion == flowpb.IPVersion_IPv4 {
-					ip, err := netip.ParseAddr(podIP)
-					if err != nil {
-						p.log.Debug(
-							"failed to parse pod IP",
-							logfields.Error, err,
-							logfields.CGroupID, cgroupId,
-							logfields.K8sPodName, m.Name,
-							logfields.K8sNamespace, m.Namespace,
-							logfields.IPAddr, podIP,
-						)
-						return netip.Addr{}
-					}
-					return ip
-				}
+// decodeEndpoint returns the IP and the native-vpc VNI of the local endpoint
+// that owns the given cgroup id. Both are derived from the exact pod context
+// of the cgroup, never from a bare-IP lookup.
+func (p *Parser) decodeEndpoint(cgroupId uint64, ipVersion flowpb.IPVersion) (netip.Addr, uint32) {
+	if p.cgroupGetter == nil {
+		return netip.Addr{}, 0
+	}
+	m := p.cgroupGetter.GetPodMetadataForContainer(cgroupId)
+	if m == nil {
+		return netip.Addr{}, 0
+	}
+
+	var vni uint32
+	if podGetter, supported := p.endpointGetter.(getters.EndpointGetterByPod); supported {
+		if ep, ok := podGetter.GetEndpointInfoByPod(m.Namespace, m.Name); ok {
+			if v := ep.GetVNIID(); v > 0 && v <= math.MaxUint32 {
+				vni = uint32(v)
 			}
-			p.log.Debug(
-				"no matching IP for pod",
-				logfields.CGroupID, cgroupId,
-				logfields.K8sPodName, m.Name,
-				logfields.K8sNamespace, m.Namespace,
-			)
 		}
 	}
+
+	return p.podIP(m, cgroupId, ipVersion), vni
+}
+
+func (p *Parser) podIP(m *cgroupManager.PodMetadata, cgroupId uint64, ipVersion flowpb.IPVersion) netip.Addr {
+	for _, podIP := range m.IPs {
+		isIPv6 := strings.Contains(podIP, ":")
+		if isIPv6 && ipVersion == flowpb.IPVersion_IPv6 ||
+			!isIPv6 && ipVersion == flowpb.IPVersion_IPv4 {
+			ip, err := netip.ParseAddr(podIP)
+			if err != nil {
+				p.log.Debug(
+					"failed to parse pod IP",
+					logfields.Error, err,
+					logfields.CGroupID, cgroupId,
+					logfields.K8sPodName, m.Name,
+					logfields.K8sNamespace, m.Namespace,
+					logfields.IPAddr, podIP,
+				)
+				return netip.Addr{}
+			}
+			return ip
+		}
+	}
+	p.log.Debug(
+		"no matching IP for pod",
+		logfields.CGroupID, cgroupId,
+		logfields.K8sPodName, m.Name,
+		logfields.K8sNamespace, m.Namespace,
+	)
 	return netip.Addr{}
 }
 

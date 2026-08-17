@@ -127,6 +127,8 @@ Hubble performs to enrich a flow is scoped by (VNI, IP). The chain is:
    the peer of an endpoint in ``cilium_ipcache_vni`` with that endpoint's own
    ``CONFIG(native_vpc_vni)``. For encapsulated packets that Cilium itself
    decodes, the overlay VNI of the tunnel header takes precedence.
+   Socket-level events (``TraceSock``) derive the same scope from their cgroup
+   id through the pod's endpoint, and debug events from their endpoint id.
    For L7 events the VNI is recorded on the proxy access-log record
    (``accesslog.EndpointInfo.VNIID``) from the resolved endpoint, or from the
    unambiguous ipcache entry.
@@ -305,8 +307,19 @@ Readers (lookup)
 |                                      |           | metadata when the flow has VNI context;  |
 |                                      |           | otherwise VNI from the identity label    |
 +--------------------------------------+-----------+------------------------------------------+
-| Hubble sock parser (socketLB)        | yes*      | no VNI context in TraceSock events;      |
-|                                      |           | socketLB is not used with kube-ovn       |
+| Hubble sock parser (socketLB)        | yes       | VNI from the exact cgroup -> pod ->      |
+|                                      |           | endpoint context of the event            |
++--------------------------------------+-----------+------------------------------------------+
+| Hubble debug events                  | yes       | endpoint resolved by id, VNI reported    |
++--------------------------------------+-----------+------------------------------------------+
+| Hubble policy correlation            | yes       | keyed by endpoint id + remote identity,  |
+|                                      |           | both VNI-exact (never by IP)             |
++--------------------------------------+-----------+------------------------------------------+
+| Hubble DNS names (SourceNames)       | yes       | per-endpoint DNS cache, keyed by the     |
+|                                      |           | resolved endpoint id                     |
++--------------------------------------+-----------+------------------------------------------+
+| Hubble service enrichment            | n/a       | service VIPs are cluster-scoped, not in  |
+|                                      |           | the VPC address space                    |
 +--------------------------------------+-----------+------------------------------------------+
 | Hubble metrics context               | yes       | ``vni`` context identifier and           |
 |                                      |           | ``source_vni``/``destination_vni``       |

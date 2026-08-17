@@ -39,6 +39,14 @@ type EndpointGetterVNI interface {
 	GetEndpointInfoForVNI(ip netip.Addr, vni uint32) (endpoint EndpointInfo, ok bool)
 }
 
+// EndpointGetterByPod is the optional pod-scoped endpoint lookup used by the
+// socket-level parser: a TraceSock event identifies the local endpoint by
+// cgroup id (hence by pod), which is an exact context and must be preferred
+// over any bare-IP lookup in native-vpc mode.
+type EndpointGetterByPod interface {
+	GetEndpointInfoByPod(namespace, name string) (endpoint EndpointInfo, ok bool)
+}
+
 // IdentityGetter ...
 type IdentityGetter interface {
 	// GetIdentity fetches a full identity object given a numeric security id.

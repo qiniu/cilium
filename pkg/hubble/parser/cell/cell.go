@@ -159,6 +159,22 @@ func (h *payloadGetters) GetEndpointInfoByID(id uint16) (endpoint hubbleGetters.
 	return ep, true
 }
 
+// GetEndpointInfoByPod implements EndpointGetterByPod. It resolves the local
+// endpoint of a pod (an exact context, e.g. derived from a cgroup id), which
+// is what gives socket-level events their native-vpc VNI without any bare-IP
+// lookup. A pod with several endpoints (which does not happen for the local
+// pod of a socket event) is reported as unresolved rather than guessed.
+func (h *payloadGetters) GetEndpointInfoByPod(namespace, name string) (endpoint hubbleGetters.EndpointInfo, ok bool) {
+	if namespace == "" || name == "" {
+		return nil, false
+	}
+	eps := h.endpointManager.GetEndpointsByPodName(namespace + "/" + name)
+	if len(eps) != 1 {
+		return nil, false
+	}
+	return eps[0], true
+}
+
 // GetNamesOf implements DNSGetter.GetNamesOf. It looks up DNS names of a given
 // IP from the FQDN cache of an endpoint specified by sourceEpID.
 func (h *payloadGetters) GetNamesOf(sourceEpID uint32, ip netip.Addr) []string {
