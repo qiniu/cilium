@@ -780,6 +780,22 @@ proxy.
   `CIDR/FQDN boundary`_. They are correct for destinations outside the VPC
   address space (the normal use) and cannot distinguish two VPCs that overlap
   on the same prefix.
+* **Identity space (capacity boundary).** The identity is derived from the
+  label set, so adding the VNI label multiplies the number of cluster-wide
+  identities by the number of VNIs that share a label set: N workloads
+  replicated across M VPCs consume N*M identities instead of N. The
+  cluster-wide space is ``256..65535`` (with ClusterMesh it is smaller,
+  ``2^(16-clusterIDShift)`` per cluster), so a deployment must size
+  ``VNIs x distinct label sets`` against it. Local (CIDR/FQDN) identities are
+  unaffected because they are node-local.
+* **Identity management mode (rejected at startup).** The VNI identity label is
+  computed by the *agent* from the pod annotation. The operator's
+  CiliumIdentity controller derives identities from pod and namespace labels
+  only; with ``--identity-management-mode=operator`` (or ``both``) it would
+  create identities without the VNI label, consider the agent's VNI-scoped
+  identities unused and garbage collect them - silently merging all VPCs into
+  one identity. native-vpc therefore requires the default (agent-managed)
+  mode and refuses to start otherwise.
 * **L7 proxy (deployment boundary).** A redirected connection is proxied from
   the host network namespace to the original destination address. With
   overlapping VPC subnets the host cannot resolve which VPC that address
@@ -803,6 +819,29 @@ catches:
 * an *optional* interface that the production type stops implementing silently
   degrades the consumer to a bare-IP path. All of them now have compile-time
   assertions (``pkg/hubble/parser/cell``, ``pkg/endpointmanager``).
+
+Seams
+~~~~~
+
+*Upstream* (control -> policy): the VNI reaches the policy plane only as an
+identity label. The label is injected by the endpoint metadata resolver and is
+hard-kept by ``pkg/labelsfilter`` in native-vpc mode, so it cannot be filtered
+away by a user label whitelist or an explicit ignore rule. Because the identity
+key is the sorted label list, two pods that differ only by VNI necessarily get
+different numeric identities (test-covered in ``pkg/identity/key``).
+
+*Cross-component*: identity **allocation** must stay agent-side. The operator's
+CiliumIdentity controller derives identities from pod and namespace labels and
+knows nothing about the annotation, so operator-managed CIDs are rejected at
+startup (see above). The operator's identity *garbage collector* is safe: it
+works on identity usage (CiliumEndpoint references and heartbeats), not on
+recomputed label sets.
+
+*Downstream* (policy -> forwarding/observability): the policy map is keyed by
+identity, so the VNI never appears in the datapath policy lookup - the
+VNI-scoped ipcache is what selects the right identity in the first place. Hubble
+policy correlation is keyed by endpoint id plus remote identity, both of which
+are VNI-exact.
 
 Conntrack and NAT plane
 -----------------------
