@@ -6,6 +6,7 @@ package fragmap
 import (
 	"fmt"
 	"log/slog"
+	"unsafe"
 
 	"github.com/cilium/ebpf"
 
@@ -70,7 +71,28 @@ func newMap(registry *metrics.Registry, maxMapEntries int, getEventBufferConfig 
 // This should only be used from components which aren't capable of using hive - mainly the cilium-dbg.
 // It needs to initialized beforehand via the Cilium Agent.
 func OpenMap4(logger *slog.Logger) (*bpf.Map, error) {
-	return bpf.OpenMap(bpf.MapPath(logger, mapNameIPv4), fragmentKey4(), &FragmentValue4{})
+	path := bpf.MapPath(logger, mapNameIPv4)
+	return bpf.OpenMap(path, pinnedFragmentKey4(path), &FragmentValue4{})
+}
+
+// pinnedFragmentKey4 selects the key layout of the map that is actually pinned
+// on this node.
+//
+// The layout depends on whether the datapath was compiled with native-vpc (the
+// key then carries a VNI), and tools such as cilium-dbg do not share the
+// agent's configuration - deciding from option.Config alone would make them
+// decode the map with a key of the wrong size.
+func pinnedFragmentKey4(path string) bpf.MapKey {
+	if m, err := ebpf.LoadPinnedMap(path, nil); err == nil {
+		defer m.Close()
+		if m.KeySize() == uint32(unsafe.Sizeof(FragmentKey4NativeVPC{})) {
+			return &FragmentKey4NativeVPC{}
+		}
+		return &FragmentKey4{}
+	}
+	// The map is not pinned (yet): fall back to what this process is
+	// configured for.
+	return fragmentKey4()
 }
 
 // OpenMap6 opens the pre-initialized IPv6 fragments map for access.

@@ -761,11 +761,38 @@ files are ``pkg/hubble/parser/{threefour,seven,sock,debug,agent,common}``,
 ``pkg/monitor/api/types.go``, ``pkg/proxy/accesslog``, ``api/v1/flow`` and
 ``cilium-dbg/cmd/bpf_ipcache_{list,get}.go``.
 
+Seams
+~~~~~
+
+*Upstream* (every other plane -> observability): the observability plane never
+re-derives the (VNI, IP) pair itself. It consumes an exact context produced by
+the plane below - the endpoint id in a datapath event, the cgroup id of a
+socket event, the endpoint of an L7 access-log record - and only then queries
+the cache plane with the resulting (VNI, IP) key. This is what keeps it correct
+without duplicating the decision table.
+
+*Interactions with the later planes*:
+
+* the service plane change (no service translation for VPC endpoints) also
+  improves the flow record: a flow from a VPC pod to a ClusterIP now carries
+  the ClusterIP itself, so Hubble's service enrichment - which resolves
+  *frontends* - annotates it with the service name, instead of showing a
+  post-translation backend address;
+* the conntrack plane exports its precondition as
+  ``cilium_native_vpc_overlapping_ips`` (enabled by default), which is the
+  alertable signal for the one gap that cannot be closed in the key space;
+* the fragment-key change adds a VNI to a map that tools may dump; the map
+  layout is therefore selected from the *pinned map* rather than from the
+  process configuration, so ``cilium-dbg`` (which does not share the agent's
+  config) keeps decoding it correctly.
+
 Defects found and fixed during this audit: L7 flows had no VNI and lost all pod
 metadata; L3/L4 flows never had a VNI context (the only source was a tunnel
 header Cilium never sees under kube-ovn); socket-level flows had no VNI and
 could be enriched with a foreign VPC's pod; debug events did not report the
-VNI; ``cilium-dbg bpf ipcache get`` could not see VNI entries.
+VNI; ``cilium-dbg bpf ipcache get`` could not see VNI entries; and
+``cilium-dbg bpf frag list`` would have decoded the VNI-scoped fragment map
+with the wrong key layout.
 
 Policy plane
 ------------
