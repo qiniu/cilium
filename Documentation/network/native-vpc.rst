@@ -1221,8 +1221,11 @@ Pre-production acceptance
 =========================
 
 The unit tests prove the key construction; the following must be checked on a
-real cluster with two VPCs that share a subnet, because they exercise the
-interaction of all planes:
+real cluster, because they exercise the interaction of all planes. The runnable
+suite lives in ``test/native-vpc/`` (``./run-all.sh``): it creates three VPCs
+whose subnets share one CIDR, pins a client and a server of every VPC to the
+same two addresses, applies a deny / port-scoped / unrestricted policy
+respectively, and then asserts each item below. The checks are:
 
 #. **Isolation.** Two pods with the same IP in different VPCs, each with a
    policy selecting ``sg=web``: traffic inside each VPC is allowed, and the
