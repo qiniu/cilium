@@ -24,6 +24,7 @@ another VPC's traffic.
 |-----------------------|------------------------------------------------------------------------------|
 | `00-setup.sh`         | creates the VPCs, the overlapping subnets, the namespaces and the six pods    |
 | `10-verify-vni.sh`    | asserts the control/cache/forwarding/conntrack state is scoped per VNI        |
+| `15-key-uniqueness.sh` | after CNI ADD each pod owns exactly one resource per plane under its own (VNI, IP); after CNI DEL only its own are gone |
 | `20-policies.sh`      | applies the three policy scenarios                                            |
 | `30-connectivity.sh`  | runs the connectivity matrix and the cross-VPC leak checks                    |
 | `35-policymap.sh`     | the identity-keyed policy map of each server, as the datapath sees it          |

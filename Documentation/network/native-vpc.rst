@@ -696,6 +696,15 @@ Forwarding plane
 
 Scope: BPF maps and programs.
 
+The endpoint map (``cilium_lxc``) is the one place where the address is the
+whole key, with no room for a scope. Endpoints in a VPC therefore have no entry
+in it: three pods sharing an address would be one entry, so it could only ever
+answer for whichever of them regenerated last, and the CNI DEL of that one would
+take the entry away from the two still running. The datapath agrees - bpf_lxc
+takes the local-delivery fast path only when its compiled VNI is zero - so
+nothing is lost by leaving the map to the endpoints that a bare address does
+identify. The host entries it also holds are node-scoped and unaffected.
+
 +--------------------------------------+--------------------------------------------------+
 | File                                 | Result                                           |
 +======================================+==================================================+
@@ -838,13 +847,17 @@ proxy.
   identities unused and garbage collect them - silently merging all VPCs into
   one identity. native-vpc therefore requires the default (agent-managed)
   mode and refuses to start otherwise.
-* **L7 proxy (deployment boundary).** A redirected connection is proxied from
-  the host network namespace to the original destination address. With
-  overlapping VPC subnets the host cannot resolve which VPC that address
-  belongs to, so L7 policy (HTTP rules, and the DNS proxy when the DNS server
-  itself lives in a VPC subnet) must not be applied to VPC-internal
-  destinations. L7 policy toward destinations outside the VPC address space is
-  unaffected.
+* **L7 proxy (enforced).** A redirected connection is proxied from the host
+  network namespace to the original destination address, and the policy the
+  proxy applies is found again by the endpoint's address. With overlapping VPC
+  subnets that address identifies three endpoints, so the policies of the
+  endpoints sharing it would overwrite each other in the proxy and the last one
+  to regenerate would decide what is enforced for all of them - including
+  replacing an L7 policy with an L3/L4 one. An endpoint in a VPC therefore has
+  no policy pushed to the proxy at all, and a policy that only the proxy could
+  enforce is refused with an error naming the endpoint and its VPC rather than
+  applied to whichever endpoint shares the address. This is what makes the
+  boundary observable instead of merely documented.
 
 Assembly (hive) plane
 ---------------------
@@ -1243,6 +1256,17 @@ look for when reviewing a change.
 | life      | a mode downgrade left        | state that outlives a mode switch    |
 |           | endpoints half configured    | must be re-evaluated against the     |
 |           |                              | mode, not restored blindly           |
++-----------+------------------------------+--------------------------------------+
+| forwarding| the endpoint map is keyed by | a key with no room for the scope     |
+|           | address alone, so the pods   | cannot describe a scoped resource:   |
+|           | sharing one across VPCs      | do not write it rather than write an |
+|           | overwrote each other; only   | entry that answers for whoever wrote |
+|           | the last one written existed | last                                 |
++-----------+------------------------------+--------------------------------------+
+| policy    | the proxy policy is found by | a resource identified by address     |
+|           | endpoint address, so the     | downstream is as ambiguous as the    |
+|           | endpoints sharing one pushed | address; refuse rather than let the  |
+|           | over each other              | last writer decide for all           |
 +-----------+------------------------------+--------------------------------------+
 | control   | the restore re-read adopted  | a value that other state is derived  |
 |           | a *different* VNI, moving    | from cannot be swapped in isolation; |

@@ -1798,6 +1798,25 @@ func getNodeIDs(ep endpoint.EndpointUpdater, policy *policy.L4Policy) []string {
 // implemented by Cilium.
 var ErrNilPolicy = errors.New("nil EndpointPolicy")
 
+// vpcEndpointPolicy decides what the proxy may be told about an endpoint that
+// lives in a VPC.
+//
+// A policy pushed to Envoy is found again by the endpoint's address, which is
+// not unique once VPC subnets overlap: the endpoints sharing an address in
+// different VPCs would push over each other, and the last one to regenerate
+// would decide what the proxy enforces for all of them. Nothing is therefore
+// pushed for such an endpoint. A policy that only the proxy can enforce cannot
+// be honoured either, and is refused instead of being applied to whichever
+// endpoint happens to share the address.
+func vpcEndpointPolicy(vni, epID uint64, needsEnvoy bool) (error, func() error) {
+	if needsEnvoy {
+		return fmt.Errorf("native-vpc: refusing L7 policy for endpoint %d in VPC %d: "+
+			"the proxy identifies endpoints by address, which overlapping VPC subnets make ambiguous",
+			epID, vni), nil
+	}
+	return nil, func() error { return nil }
+}
+
 func (s *xdsServer) UpdateNetworkPolicy(ep endpoint.EndpointUpdater, epp *policy.EndpointPolicy, wg *completion.WaitGroup,
 ) (error, func() error) {
 	s.mutex.Lock()
@@ -1815,6 +1834,10 @@ func (s *xdsServer) UpdateNetworkPolicy(ep endpoint.EndpointUpdater, epp *policy
 	// Error out if the selectors are no longer valid
 	if !selectors.IsValid() {
 		return policy.ErrStaleSelectors, nil
+	}
+
+	if vni := ep.GetVNIID(); vni != 0 {
+		return vpcEndpointPolicy(vni, ep.GetID(), epp.SelectorPolicy.L4Policy.HasEnvoyRedirect())
 	}
 
 	ips := ep.GetPolicyNames()
