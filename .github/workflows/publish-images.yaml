@@ -220,14 +220,12 @@ jobs:
             gh release edit "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --draft \
-              --prerelease \
               --title "$RELEASE_TAG" \
               --notes-file release-notes.md
           else
             gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --draft \
-              --prerelease \
               --title "$RELEASE_TAG" \
               --notes-file release-notes.md
           fi
@@ -240,5 +238,4 @@ jobs:
 
           gh release edit "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --draft=false \
-            --prerelease
+            --draft=false
