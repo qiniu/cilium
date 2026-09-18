@@ -205,6 +205,10 @@ jobs:
               --prerelease \
               --title "$RELEASE_TAG" \
               --notes-file release-notes.md
+          else
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --notes-file release-notes.md
           fi
 
           gh release upload "$RELEASE_TAG" \
