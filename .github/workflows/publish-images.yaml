@@ -1,0 +1,214 @@
+name: Publish Qiniu images and release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-qiniu-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-images:
+    if: github.repository == 'qiniu/cilium'
+    name: Publish ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cilium
+            dockerfile: ./images/cilium/Dockerfile
+          - name: operator
+            dockerfile: ./images/operator/Dockerfile
+          - name: operator-aws
+            dockerfile: ./images/operator/Dockerfile
+          - name: operator-azure
+            dockerfile: ./images/operator/Dockerfile
+          - name: operator-alibabacloud
+            dockerfile: ./images/operator/Dockerfile
+          - name: operator-generic
+            dockerfile: ./images/operator/Dockerfile
+          - name: hubble-relay
+            dockerfile: ./images/hubble-relay/Dockerfile
+          - name: clustermesh-apiserver
+            dockerfile: ./images/clustermesh-apiserver/Dockerfile
+          - name: docker-plugin
+            dockerfile: ./images/cilium-docker-plugin/Dockerfile
+
+    steps:
+      - name: Check out the tagged revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Clean up runner disk space
+        uses: ./.github/actions/disk-cleanup
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set runtime image
+        uses: ./.github/actions/set-runtime-image
+        with:
+          repository: quay.io/cilium/
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          provenance: false
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ghcr.io/qiniu/${{ matrix.name }}:${{ github.ref_name }}
+          target: release
+          build-args: |
+            CILIUM_RUNTIME_IMAGE=${{ env.CILIUM_RUNTIME_IMAGE }}
+            OPERATOR_VARIANT=${{ matrix.name }}
+
+      - name: Record image digest
+        env:
+          IMAGE_NAME: ${{ matrix.name }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p image-digest
+          {
+            echo "### ${IMAGE_NAME}"
+            echo
+            echo "\`ghcr.io/qiniu/${IMAGE_NAME}:${IMAGE_TAG}@${IMAGE_DIGEST}\`"
+            echo
+          } > "image-digest/${IMAGE_NAME}.md"
+
+          digest_variable=$(echo "${IMAGE_NAME}_DIGEST" | tr '[:lower:]-' '[:upper:]_')
+          printf 'export %s := "%s"\n' \
+            "$digest_variable" \
+            "$IMAGE_DIGEST" \
+            > "image-digest/${IMAGE_NAME}.mk"
+
+      - name: Upload image digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-digest-${{ matrix.name }}
+          path: |
+            image-digest/${{ matrix.name }}.md
+            image-digest/${{ matrix.name }}.mk
+          retention-days: 7
+
+  publish-release:
+    if: github.repository == 'qiniu/cilium'
+    name: Publish GitHub release
+    needs: publish-images
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out the tagged revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download image digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: image-digests
+          pattern: image-digest-*
+          merge-multiple: true
+
+      - name: Build release notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          tag_notes=$(git for-each-ref "refs/tags/${RELEASE_TAG}" --format='%(contents)')
+          {
+            echo "## Container images"
+            echo
+            find image-digests -type f -name '*.md' -print0 \
+              | sort -z \
+              | xargs -0 cat
+          } > image-digests.md
+
+          {
+            if [[ -n "$tag_notes" ]]; then
+              echo "$tag_notes"
+              echo
+            fi
+            cat image-digests.md
+          } > release-notes.md
+
+      - name: Build Qiniu Helm chart and install manifest
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          chart_version=${RELEASE_TAG#v}
+          {
+            echo '# File generated by .github/workflows/publish-images.yaml; DO NOT EDIT.'
+            echo '# SPDX-License-Identifier: Apache-2.0'
+            echo
+            find image-digests -type f -name '*.mk' -print0 \
+              | sort -z \
+              | xargs -0 cat
+          } > install/kubernetes/Makefile.digests
+
+          make -B -C install/kubernetes cilium/values.yaml \
+            RELEASE_REGISTRY=ghcr.io \
+            RELEASE_ORG=qiniu \
+            CILIUM_VERSION="$RELEASE_TAG"
+
+          mkdir -p release-assets
+          helm package install/kubernetes/cilium \
+            --destination release-assets \
+            --version "$chart_version" \
+            --app-version "$chart_version"
+          helm template cilium install/kubernetes/cilium \
+            --namespace kube-system \
+            --include-crds \
+            > "release-assets/cilium-${RELEASE_TAG}-quick-install.yaml"
+
+          grep -F 'repository: "ghcr.io/qiniu/cilium"' install/kubernetes/cilium/values.yaml
+          grep -F 'repository: "ghcr.io/qiniu/operator"' install/kubernetes/cilium/values.yaml
+          grep -F 'repository: "ghcr.io/qiniu/hubble-relay"' install/kubernetes/cilium/values.yaml
+          grep -F 'repository: "ghcr.io/qiniu/clustermesh-apiserver"' install/kubernetes/cilium/values.yaml
+          grep -F "ghcr.io/qiniu/cilium:${RELEASE_TAG}@sha256:" \
+            "release-assets/cilium-${RELEASE_TAG}-quick-install.yaml"
+          grep -F "ghcr.io/qiniu/operator-generic:${RELEASE_TAG}@sha256:" \
+            "release-assets/cilium-${RELEASE_TAG}-quick-install.yaml"
+
+          test -s "release-assets/cilium-${chart_version}.tgz"
+          test -s "release-assets/cilium-${RELEASE_TAG}-quick-install.yaml"
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --prerelease \
+              --title "$RELEASE_TAG" \
+              --notes-file release-notes.md
+          fi
+
+          gh release upload "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber \
+            image-digests.md \
+            release-assets/*
