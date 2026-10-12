@@ -412,6 +412,15 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 	cDefinesMap["LB4_SRC_RANGE_MAP_SIZE"] = fmt.Sprintf("%d", cfg.LBConfig.LBSourceRangeMapEntries)
 	cDefinesMap["LB6_SRC_RANGE_MAP_SIZE"] = fmt.Sprintf("%d", cfg.LBConfig.LBSourceRangeMapEntries)
 
+	// Standalone enforcement of loadBalancerSourceRanges. With the kube-proxy replacement
+	// enabled the check is already done by the NodePort datapath, so only compile the filter
+	// in when it is disabled.
+	if cfg.LBConfig.LBSourceRangeFilter && !h.kprCfg.KubeProxyReplacement {
+		cDefinesMap["ENABLE_LB_SRC_RANGE_FILTER"] = "1"
+	} else if cfg.LBConfig.LBSourceRangeFilter {
+		h.log.Info("Ignoring --bpf-lb-source-range-filter: loadBalancerSourceRanges are already enforced by the kube-proxy replacement")
+	}
+
 	macByIfIndexMacro, isL3DevMacro, err := devMacros(nativeDevices)
 	if err != nil {
 		return fmt.Errorf("generating device macros: %w", err)

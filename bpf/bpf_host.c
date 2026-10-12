@@ -45,6 +45,7 @@
 #include "lib/encap.h"
 #include "lib/nat.h"
 #include "lib/lb.h"
+#include "lib/lb_src_range_filter.h"
 #include "lib/nodeport.h"
 #include "lib/nodeport_egress.h"
 #include "lib/eps.h"
@@ -1256,6 +1257,14 @@ int cil_from_netdev(struct __ctx_buff *ctx)
 	ret = tcx_early_hook(ctx, proto);
 	if (ret != CTX_ACT_OK)
 		return ret;
+
+	/* Enforce loadBalancerSourceRanges before anything else looks at the
+	 * packet. Compiled in only when the kube-proxy replacement is off, as
+	 * nodeport_svc_lb{4,6}() already performs this check otherwise.
+	 */
+	ret = lb_src_range_filter(ctx, proto);
+	if (ret != CTX_ACT_OK)
+		goto drop_err;
 
 	return do_netdev(ctx, proto, UNKNOWN_ID, TRACE_FROM_NETWORK, false);
 drop_err:

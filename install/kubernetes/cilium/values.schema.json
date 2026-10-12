@@ -651,6 +651,9 @@
         "lbSourceRangeAllTypes": {
           "type": "boolean"
         },
+        "lbSourceRangeFilter": {
+          "type": "boolean"
+        },
         "mapDynamicSizeRatio": {
           "type": [
             "null",

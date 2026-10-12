@@ -168,6 +168,9 @@ func (in *UserConfig) DeepEqual(other *UserConfig) bool {
 	if in.LBSourceRangeMapEntries != other.LBSourceRangeMapEntries {
 		return false
 	}
+	if in.LBSourceRangeFilter != other.LBSourceRangeFilter {
+		return false
+	}
 	if in.LBMaglevMapEntries != other.LBMaglevMapEntries {
 		return false
 	}

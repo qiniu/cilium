@@ -483,6 +483,9 @@ data:
 {{- if hasKey .Values.bpf "lbSourceRangeAllTypes" }}
   bpf-lb-source-range-all-types: {{ .Values.bpf.lbSourceRangeAllTypes | quote }}
 {{- end }}
+{{- if hasKey .Values.bpf "lbSourceRangeFilter" }}
+  bpf-lb-source-range-filter: {{ .Values.bpf.lbSourceRangeFilter | quote }}
+{{- end }}
 {{- if hasKey .Values.bpf "lbAlgorithmAnnotation" }}
   bpf-lb-algorithm-annotation: {{ .Values.bpf.lbAlgorithmAnnotation | quote }}
 {{- end }}
