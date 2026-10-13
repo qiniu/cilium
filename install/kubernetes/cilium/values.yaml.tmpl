@@ -692,6 +692,16 @@ bpf:
   # CIDR filter.
   # @default -- `false`
   lbSourceRangeAllTypes: false
+  # -- (bool) Enforce loadBalancerSourceRanges on ingress from the native
+  # devices when the kube-proxy replacement is disabled. Packets from a source
+  # outside the configured CIDRs are dropped before they reach the service
+  # implementation; allowed packets are passed on untouched. Only traffic
+  # ingressing one of the devices Cilium is attached to is filtered, so the
+  # device carrying the traffic for the LoadBalancer ingress IPs has to be part
+  # of `devices`. No effect when kubeProxyReplacement is enabled, where the
+  # check is already performed.
+  # @default -- `false`
+  lbSourceRangeFilter: false
   # -- (bool) Enable the option to define the load balancing algorithm on
   # a per-service basis through service.cilium.io/lb-algorithm annotation.
   # @default -- `false`

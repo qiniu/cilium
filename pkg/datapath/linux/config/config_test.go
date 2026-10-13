@@ -172,6 +172,57 @@ func TestPrivilegedWriteNodeConfig(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestPrivilegedWriteNodeConfigSourceRangeFilter(t *testing.T) {
+	testutils.PrivilegedTest(t)
+	ns := netns.NewNetNS(t)
+	setupCiliumDummyDevices(t, ns)
+
+	tests := []struct {
+		name        string
+		filter      bool
+		kpr         bool
+		wantDefined bool
+	}{
+		{name: "disabled", filter: false, kpr: false, wantDefined: false},
+		{name: "enabled without kube-proxy replacement", filter: true, kpr: false, wantDefined: true},
+		// The kube-proxy replacement already performs the check in
+		// nodeport_svc_lb{4,6}(), so the filter must not be compiled in on top of it.
+		{name: "ignored with kube-proxy replacement", filter: true, kpr: true, wantDefined: false},
+		{name: "disabled with kube-proxy replacement", filter: false, kpr: true, wantDefined: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoError(t, ns.Do(func() error {
+				setupConfigSuite(t)
+
+				w, err := NewHeaderfileWriter(WriterParams{
+					Log:            hivetest.Logger(t),
+					NodeAddressing: fakeTypes.NewNodeAddressing(),
+					Sysctl:         sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc"),
+					NodeMap:        fake.NewFakeNodeMapV2(),
+					KPRConfig:      kpr.KPRConfig{KubeProxyReplacement: tt.kpr},
+				})
+				require.NoError(t, err)
+
+				cfg := dummyNodeCfg
+				cfg.LBConfig = loadbalancer.DefaultConfig
+				cfg.LBConfig.LBSourceRangeFilter = tt.filter
+
+				var buf bytes.Buffer
+				require.NoError(t, w.WriteNodeConfig(&buf, &cfg))
+
+				if tt.wantDefined {
+					require.Contains(t, buf.String(), "define ENABLE_LB_SRC_RANGE_FILTER 1\n")
+				} else {
+					require.NotContains(t, buf.String(), "ENABLE_LB_SRC_RANGE_FILTER")
+				}
+				return nil
+			}))
+		})
+	}
+}
+
 func TestPrivilegedWriteNetdevConfig(t *testing.T) {
 	setupConfigSuite(t)
 	writeConfig(t, "netdev", func(w io.Writer, dp datapath.ConfigWriter) error {

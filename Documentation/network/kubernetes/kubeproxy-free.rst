@@ -1508,6 +1508,52 @@ originating from this set, this can be changed into ``service.cilium.io/src-rang
     loadBalancerSourceRanges:
     - 192.168.1.0/24
 
+Source Ranges Without kube-proxy Replacement
+============================================
+
+Some deployments cannot enable the kube-proxy replacement, for example when
+Cilium runs in CNI chaining mode on top of another datapath, and the service
+translation is therefore done by kube-proxy or by an external gateway. In that
+case the checks described above are not part of the datapath, even though the
+agent still maintains both the service entries for the ``LoadBalancer``
+frontends (taken from ``status.loadBalancer.ingress``) and the source range
+maps.
+
+Setting ``bpf.lbSourceRangeFilter=true`` enforces ``spec.loadBalancerSourceRanges``
+on ingress from the native devices using exactly those maps, without performing
+any translation: a packet whose source address is not allowed for the frontend it
+is addressed to is dropped with ``Denied by LB src range check``, every other
+packet is passed on untouched to whatever implements the service.
+
+This requires that the traffic for the ``LoadBalancer`` ingress IPs enters the node
+through one of the native devices, since that is where ``cil_from_netdev`` is
+attached. Make sure the device carrying that traffic is part of ``devices``, as
+auto-detection may not pick it up on nodes with many interfaces. The option has no
+effect when ``kubeProxyReplacement`` is enabled, as the check is already performed
+there.
+
+An empty ``loadBalancerSourceRanges`` applies no restriction,
+``service.cilium.io/src-ranges-policy: deny`` inverts the verdict, and
+``bpf.lbSourceRangeAllTypes`` is honored as well since it is applied when the agent
+populates the maps.
+
+Traffic that reaches a frontend through another path is not filtered, which is how
+in-cluster access ends up unrestricted in the usual case: pods and host processes
+reach the service through socket LB, the from-container path or a local service
+implementation, none of which traverse the native device ingress. Note that this is
+a property of the traffic path, not an exemption based on the source: in-cluster
+traffic that does ingress a native device addressed to the frontend is filtered like
+any other.
+
+Two further properties are worth knowing before enabling the option:
+
+- The match is on destination address and port, exactly like the service lookup of
+  the kube-proxy replacement. If a frontend address is also used as a source NAT
+  address, a reply to such a connection can match the frontend when its ephemeral
+  port collides with a frontend port, and is then subject to the source range check.
+- Packets whose L4 tuple cannot be extracted, such as unsupported protocols and
+  non-first fragments, are passed on, as they cannot open a connection to a frontend.
+
 Service Proxy Name Configuration
 ********************************
 

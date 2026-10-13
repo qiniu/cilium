@@ -44,6 +44,9 @@ const (
 	// LBSourceRangeMapMaxEntries configures max entries of bpf map for service source ranges.
 	LBSourceRangeMapMaxEntries = "bpf-lb-source-range-map-max"
 
+	// LBSourceRangeFilter enforces service source ranges without the kube-proxy replacement.
+	LBSourceRangeFilter = "bpf-lb-source-range-filter"
+
 	// LBMaglevMapMaxEntries configures max entries of bpf map for Maglev.
 	LBMaglevMapMaxEntries = "bpf-lb-maglev-map-max"
 
@@ -157,6 +160,16 @@ type UserConfig struct {
 
 	// LBSourceRangeMapEntries is the maximum number of entries allowed in BPF lbmap for source ranges.
 	LBSourceRangeMapEntries int `mapstructure:"bpf-lb-source-range-map-max"`
+
+	// LBSourceRangeFilter enforces loadBalancerSourceRanges on ingress from the native devices
+	// when the kube-proxy replacement is disabled. The check is the same one the kube-proxy
+	// replacement performs before translating a frontend, but no translation is done: packets
+	// from an allowed source are passed on to whatever handles the service (kube-proxy, or a
+	// gateway the packet is routed to). Only traffic ingressing a device cil_from_netdev is
+	// attached to is filtered, so the devices carrying the frontend traffic have to be part of
+	// the configured (or detected) native devices. Has no effect when the kube-proxy
+	// replacement is enabled, as the check is already part of its datapath.
+	LBSourceRangeFilter bool `mapstructure:"bpf-lb-source-range-filter"`
 
 	// LBMaglevMapEntries is the maximum number of entries allowed in BPF lbmap for maglev.
 	LBMaglevMapEntries int `mapstructure:"bpf-lb-maglev-map-max"`
@@ -304,6 +317,8 @@ func (def UserConfig) Flags(flags *pflag.FlagSet) {
 	flags.MarkHidden(LBSourceRangeMapMaxEntries)
 
 	flags.Bool(LBSourceRangeAllTypes, def.LBSourceRangeAllTypes, "Propagate loadbalancerSourceRanges to all corresponding service types")
+
+	flags.Bool(LBSourceRangeFilter, def.LBSourceRangeFilter, "Enforce loadBalancerSourceRanges on ingress from native devices when the kube-proxy replacement is disabled")
 
 	flags.Int(LBMaglevMapMaxEntries, def.LBMaglevMapEntries, fmt.Sprintf("Maximum number of entries in Cilium BPF lbmap for maglev (if this isn't set, the value of --%s will be used.)", LBMapEntriesName))
 	flags.MarkHidden(LBMaglevMapMaxEntries)
@@ -491,6 +506,7 @@ var DefaultUserConfig = UserConfig{
 	LBSockRevNatEntries: 0, // Probes for suitable size if zero
 
 	LBSourceRangeAllTypes:    false,
+	LBSourceRangeFilter:      false,
 	LBSockTerminateAllProtos: false,
 
 	NodePortRange: []string{},
