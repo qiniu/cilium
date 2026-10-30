@@ -474,6 +474,17 @@ func TestCiliumEndpointPodName(t *testing.T) {
 		ObjectMeta: slim_metav1.ObjectMeta{Name: "client", Namespace: "default"},
 	}
 	require.Equal(t, "client", legacy.PodName())
+
+	// A pod named like the attachment's CEP replaces it under the same key;
+	// the watcher must not skip that Upsert, or ipcache keeps PodName=client.
+	replacement := &types.CiliumEndpoint{
+		ObjectMeta: slim_metav1.ObjectMeta{
+			Name:            "client.7.net1",
+			Namespace:       "default",
+			OwnerReferences: []slim_metav1.OwnerReference{{Kind: "Pod", Name: "client.7.net1", UID: "uid-2"}},
+		},
+	}
+	require.False(t, attachment.DeepEqual(replacement))
 }
 
 // TestEndpointUpdatedAttachmentUsesPodName pins that the entry an attachment's

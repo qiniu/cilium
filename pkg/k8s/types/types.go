@@ -53,6 +53,12 @@ func (in *CiliumEndpoint) DeepEqual(other *CiliumEndpoint) bool {
 	if in.Namespace != other.Namespace {
 		return false
 	}
+	// The ipcache entry carries PodName(); under one key it changes when an
+	// attachment's CEP is replaced by a pod of the same name and the watcher
+	// sees only the merged Upsert.
+	if in.PodName() != other.PodName() {
+		return false
+	}
 
 	return in.deepEqual(other)
 }
