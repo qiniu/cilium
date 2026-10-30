@@ -474,17 +474,43 @@ func TestCiliumEndpointPodName(t *testing.T) {
 		ObjectMeta: slim_metav1.ObjectMeta{Name: "client", Namespace: "default"},
 	}
 	require.Equal(t, "client", legacy.PodName())
+}
 
-	// A pod named like the attachment's CEP replaces it under the same key;
-	// the watcher must not skip that Upsert, or ipcache keeps PodName=client.
-	replacement := &types.CiliumEndpoint{
-		ObjectMeta: slim_metav1.ObjectMeta{
-			Name:            "client.7.net1",
-			Namespace:       "default",
-			OwnerReferences: []slim_metav1.OwnerReference{{Kind: "Pod", Name: "client.7.net1", UID: "uid-2"}},
-		},
+// TestCoalescedCEPRecreationIsCleanedUp pins the watcher's DeepEqual filter
+// against an owner change: resource.Events() reads the current object by key,
+// so deleting an attachment's CEP "app.7.net1" and recreating it for a pod
+// named "app.7.net1" can arrive as one Upsert. If that Upsert is filtered out,
+// ipcache keeps PodName=app and the replacement's delete matches nothing.
+func TestCoalescedCEPRecreationIsCleanedUp(t *testing.T) {
+	prev := option.Config.EnableNativeVPC
+	option.Config.EnableNativeVPC = true
+	t.Cleanup(func() { option.Config.EnableNativeVPC = prev })
+
+	logger := hivetest.Logger(t)
+	ipc := ipcache.NewIPCache(&ipcache.Configuration{Context: t.Context(), Logger: logger})
+	t.Cleanup(func() { require.NoError(t, ipc.Shutdown()) })
+	w := &K8sCiliumEndpointsWatcher{
+		logger:        logger,
+		ipcache:       ipc,
+		policyManager: fakePolicyManager{},
+		wgConfig:      fakeTypes.WireguardConfig{},
+		ipsecConfig:   fakeTypes.IPsecConfig{},
 	}
-	require.False(t, attachment.DeepEqual(replacement))
+
+	old := vniCEP("app.7.net1", "10.99.0.11", "5", 1234)
+	old.OwnerReferences = []slim_metav1.OwnerReference{{Kind: "Pod", Name: "app", UID: "uid-app"}}
+	w.endpointUpdated(nil, old)
+
+	replacement := old.DeepCopy()
+	replacement.OwnerReferences = []slim_metav1.OwnerReference{{Kind: "Pod", Name: "app.7.net1", UID: "uid-other"}}
+	// The same guard as ciliumEndpointsInit applies to an Upsert.
+	if !old.DeepEqual(replacement) {
+		w.endpointUpdated(old, replacement)
+	}
+	w.endpointDeleted(replacement)
+
+	_, exists := ipc.LookupByIP("10.99.0.11@vni:5")
+	require.False(t, exists, "deleting the replacement must remove its ipcache entry")
 }
 
 // TestEndpointUpdatedAttachmentUsesPodName pins that the entry an attachment's

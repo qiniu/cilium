@@ -466,12 +466,12 @@ What makes an attachment different from the primary interface:
   The primary endpoint keeps the legacy identifiers, so existing deployments
   are unaffected. The separator is ``.7.``: a CiliumEndpoint name is validated
   with the very same function as a pod name, so no separator can put the name
-  out of a pod's reach, but no controller-generated pod name can contain a dot
-  in that position (a generated name always ends in ``-<ordinal>`` or
-  ``-<random>``, and a StatefulSet name may not contain a dot at all), so only
-  a hand-written pod could claim it. That CEP name is still one another pod
-  could carry,
-  so an existing CiliumEndpoint is only adopted when its owner reference names
+  out of a pod's reach. ``.7.`` only makes a collision less likely under
+  common naming; it does not rule out a generated pod name (a DaemonSet
+  ``app.7.net1`` creates pods ``app.7.net1-<random>``, which is the
+  CiliumEndpoint name of pod ``app`` with an interface ``net1-<random>``).
+  Because that CEP name is one another pod can carry,
+  an existing CiliumEndpoint is only adopted when its owner reference names
   this endpoint's pod - in both directions, and by owner *name*, so that a pod
   recreated under the same name still adopts its own object. The label sync
   asserts the same object with a JSON-Patch test on its UID, so an endpoint
