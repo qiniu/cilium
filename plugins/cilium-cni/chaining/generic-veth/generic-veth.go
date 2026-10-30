@@ -7,11 +7,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	cniTypes "github.com/containernetworking/cni/pkg/types"
 	cniTypesVer "github.com/containernetworking/cni/pkg/types/100"
 	cniVersion "github.com/containernetworking/cni/pkg/version"
 	"github.com/vishvananda/netlink"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/client"
@@ -26,6 +28,37 @@ import (
 )
 
 type GenericVethChainer struct{}
+
+// primaryInterfaceName is what the container runtime calls the default
+// network's interface (containerd uses "eth0",
+// internal/cri/server/helpers.go). It is only used to warn about a likely
+// missing “secondary-interface“ declaration, never to decide: see
+// types.NetConf.SecondaryInterface.
+const primaryInterfaceName = "eth0"
+
+// validateAttachmentCEPName checks the CiliumEndpoint name this attachment
+// will require. It is a Kubernetes object name, so it has to be valid as a
+// whole: an interface name that is not a DNS-1123 label ("vpc_0" is a legal
+// Linux name), or a pod name long enough to push the result past the
+// 253-character limit, would make every CiliumEndpoint write fail long after
+// CNI ADD returned, leaving the attachment without an identity on every other
+// node. Reject it here instead, where the error reaches the user.
+func validateAttachmentCEPName(podName, ifName string) error {
+	if errs := validation.IsDNS1123Label(ifName); len(errs) > 0 {
+		return fmt.Errorf("interface name %q cannot be used by a secondary interface: it must be a DNS-1123 label so that the CiliumEndpoint name is valid (%s)",
+			ifName, strings.Join(errs, "; "))
+	}
+	if podName == "" {
+		// Not a Kubernetes workload: there is no CiliumEndpoint to name.
+		return nil
+	}
+	cepName := endpointid.AttachmentCEPName(podName, ifName)
+	if errs := validation.IsDNS1123Subdomain(cepName); len(errs) > 0 {
+		return fmt.Errorf("pod %q cannot carry a secondary interface named %q: its CiliumEndpoint would be named %q (%s)",
+			podName, ifName, cepName, strings.Join(errs, "; "))
+	}
+	return nil
+}
 
 func (f *GenericVethChainer) Add(ctx context.Context, pluginCtx chainingapi.PluginContext, cli *client.Client) (res *cniTypesVer.Result, err error) {
 	err = cniVersion.ParsePrevResult(&pluginCtx.NetConf.NetConf)
@@ -79,6 +112,15 @@ func (f *GenericVethChainer) Add(ctx context.Context, pluginCtx chainingapi.Plug
 				continue
 			}
 
+			// Pick the interface this CNI ADD is about. With multus a pod has
+			// several veth interfaces (eth0 plus net1, net2, ...) and the
+			// plugin is invoked once per attachment, so taking the first veth
+			// found would create a second endpoint for eth0 instead of one for
+			// the attachment.
+			if link.Attrs().Name != pluginCtx.Args.IfName {
+				continue
+			}
+
 			vethLXCMac = link.Attrs().HardwareAddr.String()
 			vethLXCName = link.Attrs().Name
 
@@ -128,7 +170,7 @@ func (f *GenericVethChainer) Add(ctx context.Context, pluginCtx chainingapi.Plug
 		}
 
 		if !linkFound {
-			return errors.New("no link found inside container")
+			return fmt.Errorf("no link %q found inside container", pluginCtx.Args.IfName)
 		}
 
 		if pluginCtx.NetConf.EnableRouteMTU || pluginCtx.CiliumConf.EnableRouteMTUForCNIChaining {
@@ -196,6 +238,21 @@ func (f *GenericVethChainer) Add(ctx context.Context, pluginCtx chainingapi.Plug
 	}
 
 	var disabled = false
+	// An attachment is declared by the CNI configuration, never guessed from the
+	// interface name (see types.NetConf.SecondaryInterface).
+	secondary := pluginCtx.NetConf.SecondaryInterface
+	if secondary {
+		if err = validateAttachmentCEPName(string(pluginCtx.CniArgs.K8S_POD_NAME), pluginCtx.Args.IfName); err != nil {
+			return nil, err
+		}
+	} else if pluginCtx.Args.IfName != primaryInterfaceName {
+		pluginCtx.Logger.Warn(
+			"Interface is not the usual primary name and is not declared as a secondary interface; "+
+				"if this is a multus attachment, set \"secondary-interface\": true in its cilium-cni configuration, "+
+				"otherwise it will share the pod's legacy identifiers and CiliumEndpoint with the primary endpoint",
+			logfields.Interface, pluginCtx.Args.IfName,
+		)
+	}
 	ep := &models.EndpointChangeRequest{
 		Addressing: &models.AddressPair{
 			IPv4: vethIP,
@@ -208,10 +265,16 @@ func (f *GenericVethChainer) Add(ctx context.Context, pluginCtx chainingapi.Plug
 		Mac:                    vethLXCMac,
 		InterfaceName:          vethHostName,
 		ContainerInterfaceName: vethLXCName,
-		K8sPodName:             string(pluginCtx.CniArgs.K8S_POD_NAME),
-		K8sNamespace:           string(pluginCtx.CniArgs.K8S_POD_NAMESPACE),
-		K8sUID:                 string(pluginCtx.CniArgs.K8S_POD_UID),
-		SyncBuildEndpoint:      true,
+		// A secondary (multus) attachment shares the container ID and the pod
+		// name with the pod's primary endpoint, so it must be addressed by its
+		// CNI attachment ID only: the legacy identifiers would collide and its
+		// CiliumEndpoint would overwrite the primary one. The primary endpoint
+		// keeps them, so existing deployments are unaffected.
+		DisableLegacyIdentifiers: secondary,
+		K8sPodName:               string(pluginCtx.CniArgs.K8S_POD_NAME),
+		K8sNamespace:             string(pluginCtx.CniArgs.K8S_POD_NAMESPACE),
+		K8sUID:                   string(pluginCtx.CniArgs.K8S_POD_UID),
+		SyncBuildEndpoint:        true,
 		DatapathConfiguration: &models.EndpointDatapathConfiguration{
 			// aws-cni requires ARP passthrough between Linux and
 			// the pod
@@ -266,6 +329,12 @@ func (f *GenericVethChainer) Add(ctx context.Context, pluginCtx chainingapi.Plug
 }
 
 func (f *GenericVethChainer) Delete(ctx context.Context, pluginCtx chainingapi.PluginContext, delClient *lib.DeletionFallbackClient) (err error) {
+	// shortcut: deletes every endpoint of the container, not just the
+	// attachment this CNI DEL is about. Harmless today because a pod is torn
+	// down as a whole: multus deletes its delegates in reverse order, so the
+	// attachment's DEL runs first and takes the primary endpoint with it, and
+	// the primary's own DEL is then the no-op. Delete by CNI attachment ID once
+	// an interface can be detached from a running pod.
 	req := &models.EndpointBatchDeleteRequest{ContainerID: pluginCtx.Args.ContainerID}
 	if err := delClient.EndpointDeleteMany(req); err != nil {
 		if errors.Is(err, lib.ErrClientFailure) {

@@ -31,6 +31,17 @@ type CiliumEndpoint struct {
 	ServiceAccount string
 }
 
+// PodName returns the owning Pod's name; an attachment's CEP has its own name.
+// Older CEPs without a Pod owner retain the object-name fallback.
+func (in *CiliumEndpoint) PodName() string {
+	for _, ref := range in.OwnerReferences {
+		if ref.Kind == "Pod" && ref.Name != "" {
+			return ref.Name
+		}
+	}
+	return in.Name
+}
+
 func (in *CiliumEndpoint) DeepEqual(other *CiliumEndpoint) bool {
 	if other == nil {
 		return false
@@ -40,6 +51,12 @@ func (in *CiliumEndpoint) DeepEqual(other *CiliumEndpoint) bool {
 		return false
 	}
 	if in.Namespace != other.Namespace {
+		return false
+	}
+	// The ipcache entry carries PodName(); under one key it changes when an
+	// attachment's CEP is replaced by a pod of the same name and the watcher
+	// sees only the merged Upsert.
+	if in.PodName() != other.PodName() {
 		return false
 	}
 

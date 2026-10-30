@@ -212,3 +212,29 @@ func SplitVNIIP(vniIP string) (ip string, ok bool) {
 	}
 	return ip, true
 }
+
+// attachmentCEPSeparator joins the pod name and the interface name of an
+// additional interface into the name of its CiliumEndpoint.
+//
+// CiliumEndpoint names live in the same namespace as pod names, and a custom
+// resource name is validated with the very same function as a pod name
+// (apiextensions NameIsDNSSubdomain), so no separator can make the name
+// unreachable for a pod: the collision is structural and the ownership checks
+// in the endpoint synchronizer are what keeps it harmless. The separator's job
+// is only to make it less likely.
+//
+// A single "-" is not: "<pod>-net1" is exactly how one would name a workload.
+// Dots make it less likely under common naming, but do not rule out a
+// generated name: a DaemonSet "app.7.net1" creates pods "app.7.net1-<random>",
+// which is the attachment CEP name of pod "app" with interface
+// "net1-<random>". Two adjacent dots are rejected (an empty label), so the
+// separator carries a digit between them.
+const attachmentCEPSeparator = ".7."
+
+// AttachmentCEPName returns the CiliumEndpoint name of an additional interface
+// of a pod. Both the agent (when naming the object) and the CNI plugin (when
+// checking that the name it is about to require is a valid one) build it here,
+// so the two cannot drift apart.
+func AttachmentCEPName(podName, ifName string) string {
+	return podName + attachmentCEPSeparator + ifName
+}

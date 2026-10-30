@@ -122,6 +122,7 @@ Socionext
 Solarflare
 Spectre
 Starovoitov
+StatefulSet
 Stormtroopers
 Suchakra
 Suricata
@@ -273,6 +274,7 @@ configMapKey
 configSources
 configmap
 configs
+conflist
 conntrack
 conntrackGCInterval
 containerd
@@ -571,6 +573,7 @@ lwt
 lxc
 mTLS
 macOS
+macvlan
 maglev
 mainboard
 makefile
@@ -610,6 +613,7 @@ multicast
 multicluster
 multicore
 multihoming
+multus
 musl
 mutex
 mutexes

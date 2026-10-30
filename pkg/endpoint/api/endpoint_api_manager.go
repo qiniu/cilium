@@ -236,7 +236,7 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 
 			// For native-vpc mode, read VNI from Pod annotation before conflict detection.
 			if nativeVPCEnabled && pod != nil {
-				parsedVNI, err := parseVNIFromPod(pod, m.logger)
+				parsedVNI, err := parseVNIFromPod(pod, ep.AddressForVNILookup(), m.logger)
 				if err != nil {
 					return invalidDataError(ep, err)
 				}
@@ -630,6 +630,11 @@ func requireVNI(nativeVPCEnabled bool, vni uint64, isHostEndpoint, isK8sPod bool
 // It returns unsetVNI for hostNetwork pods (they use the host network stack
 // directly and are not part of any overlay network).
 //
+// ip is the endpoint's own address: a pod with multus attachments has one OVN
+// subnet, and therefore one tunnel_key annotation, per interface, so the VNI
+// must be read from the annotation of the provider that allocated this
+// endpoint's address and not from the primary interface's one.
+//
 // For any other pod a missing, empty, non-numeric, zero or out-of-range
 // tunnel_key annotation is an ERROR in native-vpc mode: the OVN subnet always
 // carries a non-zero tunnel key (kube-ovn waits for it before allocating pod
@@ -637,8 +642,8 @@ func requireVNI(nativeVPCEnabled bool, vni uint64, isHostEndpoint, isK8sPod bool
 // Rejecting the endpoint here is deliberate: silently degrading to the plain
 // IP scheme would collide with overlapping VPC subnets and cause
 // non-deterministic policy verdicts.
-func parseVNIFromPod(pod *slim_corev1.Pod, logger *slog.Logger) (int64, error) {
-	vni, res, err := nativevpc.VNIFromPod(pod)
+func parseVNIFromPod(pod *slim_corev1.Pod, ip string, logger *slog.Logger) (int64, error) {
+	vni, res, err := nativevpc.VNIFromPodForIP(pod, ip)
 	switch res {
 	case nativevpc.Disabled, nativevpc.HostNetwork:
 		logger.Debug("Skipping VNI for pod that is not in any VPC",
@@ -646,8 +651,10 @@ func parseVNIFromPod(pod *slim_corev1.Pod, logger *slog.Logger) (int64, error) {
 		)
 		return unsetVNI, nil
 	case nativevpc.Absent:
-		return 0, fmt.Errorf("native-vpc pod %s/%s is missing tunnel_key annotation %q: a non-zero VNI is mandatory for every non-hostNetwork pod",
-			pod.Namespace, pod.Name, option.Config.NativeVPCVNIAnnotation)
+		// err names the key actually read: an attachment's provider key, not
+		// the configured primary annotation.
+		return 0, fmt.Errorf("native-vpc pod %s/%s is %w: a non-zero VNI is mandatory for every non-hostNetwork pod",
+			pod.Namespace, pod.Name, err)
 	case nativevpc.Invalid:
 		return 0, fmt.Errorf("native-vpc pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}

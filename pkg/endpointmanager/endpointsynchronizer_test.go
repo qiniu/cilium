@@ -16,6 +16,7 @@ import (
 	"github.com/cilium/cilium/pkg/endpoint"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	"github.com/cilium/cilium/pkg/node"
 )
 
@@ -28,8 +29,19 @@ func Test_updateCEPUID(t *testing.T) {
 			},
 		}
 	}
+	podNamed := func(name, hostIP string) *slim_corev1.Pod {
+		return &slim_corev1.Pod{
+			ObjectMeta: slim_metav1.ObjectMeta{Name: name},
+			Status:     slim_corev1.PodStatus{HostIP: hostIP},
+		}
+	}
 	epWithUID := func(uid string, pod *slim_corev1.Pod) *endpoint.Endpoint {
 		ep := &endpoint.Endpoint{}
+		if pod != nil {
+			// The CEP name, and therefore the ownership check, is derived from
+			// the pod name the endpoint carries.
+			ep.K8sPodName = pod.Name
+		}
 		ep.SetPod(pod)
 		ep.SetCiliumEndpointUID(types.UID(uid))
 		return ep
@@ -93,6 +105,43 @@ func Test_updateCEPUID(t *testing.T) {
 				ObjectMeta: v1.ObjectMeta{UID: types.UID("a")},
 			},
 		},
+		"ciliumendpoint belongs to another pod": {
+			// Pod "app" with an attachment "net1" publishes the CEP
+			// "app.7.net1"; a pod literally named "app.7.net1" then finds an
+			// object of its own name on its own node. Its CEP name equals its
+			// pod name, so nothing but the owner separates the two - and
+			// taking it over would leave both synchronizers writing one
+			// object, each able to delete it.
+			err:    fmt.Errorf("belongs to pod"),
+			ep:     epWithUID("", podNamed("app.7.net1", testIP)),
+			nodeIP: testIP,
+			cep: &v2.CiliumEndpoint{
+				ObjectMeta: v1.ObjectMeta{
+					Name: "app.7.net1",
+					UID:  types.UID("a"),
+					OwnerReferences: []v1.OwnerReference{
+						{Kind: "Pod", Name: "app", UID: types.UID("uid-app")},
+					},
+				},
+			},
+		},
+		"ciliumendpoint of a pod recreated under the same name": {
+			// A StatefulSet pod keeps its name across restarts and has to go
+			// on adopting its own CEP, which still references the previous
+			// incarnation's UID. This is what the adoption path exists for.
+			ep:            epWithUID("", podNamed("app-0", testIP)),
+			nodeIP:        testIP,
+			expectedEPUID: someUID("a"),
+			cep: &v2.CiliumEndpoint{
+				ObjectMeta: v1.ObjectMeta{
+					Name: "app-0",
+					UID:  types.UID("a"),
+					OwnerReferences: []v1.OwnerReference{
+						{Kind: "Pod", Name: "app-0", UID: types.UID("uid-previous")},
+					},
+				},
+			},
+		},
 		// This is the normal case of taking ownership.
 		// Note that this also happens when the nodeIP changes during a reboot
 		// but the endpoint snapshot is lost on reboot. The endpoint UID will
@@ -133,4 +182,37 @@ func Test_updateCEPUID(t *testing.T) {
 		})
 
 	}
+}
+
+// TestCEPOwnerConflict pins which CiliumEndpoint an endpoint may take over. The
+// CEP name of an attachment ("<pod>.7.<ifname>") is a name another pod can
+// carry, so the object's owner decides - and it must decide in both
+// directions, or the pod-named side silently takes the attachment's object and
+// two synchronizers end up writing one CEP.
+func TestCEPOwnerConflict(t *testing.T) {
+	cepWithOwner := func(ownerName string) *v2.CiliumEndpoint {
+		cep := &v2.CiliumEndpoint{ObjectMeta: v1.ObjectMeta{Name: "app.7.net1", Namespace: "default"}}
+		if ownerName != "" {
+			cep.OwnerReferences = []v1.OwnerReference{{Kind: "Pod", Name: ownerName, UID: types.UID("uid-" + ownerName)}}
+		}
+		return cep
+	}
+
+	// The attachment of pod "app" owns it.
+	assert.NoError(t, cepOwnerConflict(cepWithOwner("app"), "app"))
+	// A pod that merely carries the name must not take it over...
+	assert.Error(t, cepOwnerConflict(cepWithOwner("app"), "app.7.net1"))
+	// ...and neither direction is exempt.
+	assert.Error(t, cepOwnerConflict(cepWithOwner("app.7.net1"), "app"))
+
+	// A pod recreated under the same name (a StatefulSet restart) has a new
+	// UID but the same name, and has to keep adopting its own CEP: that is
+	// what this adoption path exists for.
+	recreated := cepWithOwner("app.7.net1")
+	recreated.OwnerReferences[0].UID = "uid-previous-incarnation"
+	assert.NoError(t, cepOwnerConflict(recreated, "app.7.net1"))
+
+	// A CEP without a pod owner reference predates the convention: no evidence
+	// of another owner, so it is adopted as before.
+	assert.NoError(t, cepOwnerConflict(cepWithOwner(""), "app.7.net1"))
 }

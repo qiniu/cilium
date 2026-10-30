@@ -32,6 +32,14 @@ type NetConf struct {
 	LogFormat      string                 `json:"log-format"`
 	LogFile        string                 `json:"log-file"`
 	ChainingMode   string                 `json:"chaining-mode"`
+	// SecondaryInterface marks this invocation as an additional interface of
+	// the pod (a multus attachment) rather than its default network. It is an
+	// explicit declaration on purpose: CNI_IFNAME is chosen by the caller and
+	// carries no primary/secondary meaning, so deriving it from the name would
+	// reclassify the default network of any deployment that does not call it
+	// eth0, silently dropping its legacy identifiers and renaming its
+	// CiliumEndpoint.
+	SecondaryInterface bool `json:"secondary-interface"`
 }
 
 // IPAM is the Cilium specific CNI IPAM configuration

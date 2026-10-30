@@ -91,11 +91,6 @@ jobs:
     needs: [compute-vars]
     timeout-minutes: 180
     steps:
-      - name: Collect Workflow Telemetry
-        uses: catchpoint/workflow-telemetry-action@94c3c3d9567a0205de6da68a76c428ce4e769af1 # v2.0.0
-        with:
-          comment_on_pr: false
-
       - name: Configure git
         run: |
           git config --global user.name "GitHub Actions"
@@ -177,11 +172,6 @@ jobs:
     needs: [compute-vars]
     timeout-minutes: 180
     steps:
-      - name: Collect Workflow Telemetry
-        uses: catchpoint/workflow-telemetry-action@94c3c3d9567a0205de6da68a76c428ce4e769af1 # v2.0.0
-        with:
-          comment_on_pr: false
-
       - name: Configure git
         run: |
           git config --global user.name "GitHub Actions"
@@ -271,11 +261,6 @@ jobs:
     if: needs.compute-vars.outputs.build-bpf == 'true'
     timeout-minutes: 180
     steps:
-      - name: Collect Workflow Telemetry
-        uses: catchpoint/workflow-telemetry-action@94c3c3d9567a0205de6da68a76c428ce4e769af1 # v2.0.0
-        with:
-          comment_on_pr: false
-
       - name: Configure git
         run: |
           git config --global user.name "GitHub Actions"
@@ -364,11 +349,6 @@ jobs:
     if: needs.compute-vars.outputs.build-test == 'true'
     timeout-minutes: 180
     steps:
-      - name: Collect Workflow Telemetry
-        uses: catchpoint/workflow-telemetry-action@94c3c3d9567a0205de6da68a76c428ce4e769af1 # v2.0.0
-        with:
-          comment_on_pr: false
-
       - name: Configure git
         run: |
           git config --global user.name "GitHub Actions"
