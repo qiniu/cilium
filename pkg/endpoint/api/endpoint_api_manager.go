@@ -651,8 +651,10 @@ func parseVNIFromPod(pod *slim_corev1.Pod, ip string, logger *slog.Logger) (int6
 		)
 		return unsetVNI, nil
 	case nativevpc.Absent:
-		return 0, fmt.Errorf("native-vpc pod %s/%s is missing tunnel_key annotation %q: a non-zero VNI is mandatory for every non-hostNetwork pod",
-			pod.Namespace, pod.Name, option.Config.NativeVPCVNIAnnotation)
+		// err names the key actually read: an attachment's provider key, not
+		// the configured primary annotation.
+		return 0, fmt.Errorf("native-vpc pod %s/%s is %w: a non-zero VNI is mandatory for every non-hostNetwork pod",
+			pod.Namespace, pod.Name, err)
 	case nativevpc.Invalid:
 		return 0, fmt.Errorf("native-vpc pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}

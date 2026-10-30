@@ -136,7 +136,9 @@ func VNIFromPod(pod *slim_corev1.Pod) (uint64, Result, error) {
 
 // VNIFromPodForIP applies the native-vpc decision table to a pod and returns
 // the VNI (0 unless the result is Valid), the classification, and a
-// descriptive error for the Invalid case.
+// descriptive error for the Absent and Invalid cases. The Absent error names
+// the annotation that was read, which for an attachment is its provider's
+// key, not --native-vpc-vni-annotation.
 //
 // ip selects the interface: when it matches the address kube-ovn allocated for
 // a multus attachment, that attachment's provider-scoped tunnel_key is read,
@@ -155,7 +157,7 @@ func VNIFromPodForIP(pod *slim_corev1.Pod, ip string) (uint64, Result, error) {
 		return 0, Disabled, nil
 	}
 	if pod == nil {
-		return 0, Absent, nil
+		return 0, Absent, fmt.Errorf("missing pod metadata")
 	}
 	if pod.Spec.HostNetwork {
 		return 0, HostNetwork, nil
@@ -182,11 +184,11 @@ func VNIFromPodForIP(pod *slim_corev1.Pod, ip string) (uint64, Result, error) {
 		// interface is not on an OVN subnet and has no tunnel_key. Reporting
 		// Absent makes endpoint creation reject it, instead of silently
 		// adopting the primary interface's VPC.
-		return 0, Absent, nil
+		return 0, Absent, fmt.Errorf("missing a tunnel_key: address %s was not allocated by any kube-ovn provider of this pod", ip)
 	}
 	raw, ok := pod.Annotations[key]
 	if !ok || strings.TrimSpace(raw) == "" {
-		return 0, Absent, nil
+		return 0, Absent, fmt.Errorf("missing tunnel_key annotation %q", key)
 	}
 
 	vni, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)

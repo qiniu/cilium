@@ -451,8 +451,10 @@ What makes an attachment different from the primary interface:
   ``k8s.v1.cni.cncf.io/network-status`` annotation only after every delegate
   has returned, so the name is not readable while Cilium runs inside the
   delegate chain, whereas kube-ovn writes ``ip_address`` and ``tunnel_key``
-  before its own CNI ADD returns. The decision table is unchanged: an
-  attachment with a missing or broken ``tunnel_key`` is rejected, never
+  before its own CNI ADD returns. That ordering is a hard requirement: a
+  kube-ovn that does not write the per-provider ``tunnel_key`` before its CNI
+  ADD returns makes every attachment fail closed. The decision table is
+  unchanged: an attachment with a missing or broken ``tunnel_key`` is rejected, never
   silently given the primary interface's VNI. If two interfaces of one pod
   were allocated the *same* address in different VPCs, no signal is left to
   tell them apart and the endpoint is rejected as well, rather than put in
@@ -486,10 +488,10 @@ Known limits:
   delegates in reverse order, so the attachment's DEL takes the primary
   endpoint with it and the primary's own DEL is a no-op); detaching an
   interface from a running pod would need a delete by CNI attachment ID.
-* A NAD that is not an OVN subnet (vlan/underlay/macvlan) has no
-  ``tunnel_key``, and its address is not one kube-ovn allocated, so the
-  attachment is in no VPC: native-vpc rejects the endpoint and the CNI ADD
-  fails. It is never given the primary interface's VNI, which would place it
+* A NAD that is not an OVN overlay subnet has no ``tunnel_key``: kube-ovn
+  writes none for its vlan/underlay subnets, and a macvlan attachment
+  is not allocated by kube-ovn at all. Either way the attachment is in no VPC:
+  native-vpc rejects the endpoint and the CNI ADD fails. It is never given the primary interface's VNI, which would place it
   in a VPC it is not in. Do not chain Cilium into such a NAD.
 * The conntrack/NAT limitation above applies per endpoint and is unchanged.
 * A pod named exactly ``<other-pod>.7.<ifname>`` collides with the

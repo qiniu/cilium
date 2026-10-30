@@ -62,7 +62,7 @@ func TestVNIFromPod(t *testing.T) {
 			vni, res, err := VNIFromPod(tc.pod)
 			require.Equal(t, tc.wantRes, res)
 			require.Equal(t, tc.wantVNI, vni)
-			if tc.wantRes == Invalid {
+			if tc.wantRes == Invalid || tc.wantRes == Absent {
 				require.Error(t, err)
 			} else {
 				require.NoError(t, err)
@@ -136,7 +136,7 @@ func TestVNIFromPodForIP(t *testing.T) {
 			vni, res, err := VNIFromPodForIP(multusPod, tc.ip)
 			require.Equal(t, tc.wantRes, res)
 			require.Equal(t, tc.wantVNI, vni)
-			if tc.wantRes == Invalid {
+			if tc.wantRes == Invalid || tc.wantRes == Absent {
 				require.Error(t, err)
 			} else {
 				require.NoError(t, err)
@@ -151,9 +151,11 @@ func TestVNIFromPodForIP(t *testing.T) {
 			"net1.default.ovn.kubernetes.io/ip_address": "192.168.1.10",
 		}}}
 		vni, res, err := VNIFromPodForIP(p, "192.168.1.10")
-		require.NoError(t, err)
 		require.Equal(t, Absent, res)
 		require.Zero(t, vni)
+		// The error names the key that is missing: the attachment's, not the
+		// primary one, which is present.
+		require.EqualError(t, err, `missing tunnel_key annotation "net1.default.ovn.kubernetes.io/tunnel_key"`)
 	})
 
 	t.Run("an address two VPCs share is refused, not guessed", func(t *testing.T) {
@@ -286,6 +288,6 @@ func TestVNIFromPodForIPAddressSpelling(t *testing.T) {
 
 	// An address nobody allocated still fails closed.
 	_, res, err = VNIFromPodForIP(p, "10.0.0.1")
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "not allocated by any kube-ovn provider")
 	require.Equal(t, Absent, res)
 }

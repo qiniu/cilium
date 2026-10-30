@@ -185,7 +185,7 @@ func Test_updateCEPUID(t *testing.T) {
 }
 
 // TestCEPOwnedByPod pins which CiliumEndpoint an endpoint may take over. The
-// CEP name of an attachment ("<pod>-<ifname>") is a name another pod can
+// CEP name of an attachment ("<pod>.7.<ifname>") is a name another pod can
 // carry, so the object's owner decides - and it must decide in both
 // directions, or the pod-named side silently takes the attachment's object and
 // two synchronizers end up writing one CEP.

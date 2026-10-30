@@ -269,6 +269,17 @@ func TestParseVNIFromPod(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("attachment error names its provider key", func(t *testing.T) {
+		option.Config.NativeVPCVNIAnnotation = vniKey
+		pod := &slim_corev1.Pod{ObjectMeta: slim_metav1.ObjectMeta{Annotations: map[string]string{
+			"ovn.kubernetes.io/ip_address": "10.16.0.5",
+			vniKey:                         "36",
+			"net1.default.ovn.kubernetes.io/ip_address": "192.168.1.10",
+		}}}
+		_, err := parseVNIFromPod(pod, "192.168.1.10", logger)
+		assert.EqualError(t, err, `native-vpc pod / is missing tunnel_key annotation "net1.default.ovn.kubernetes.io/tunnel_key": a non-zero VNI is mandatory for every non-hostNetwork pod`)
+	})
 }
 
 // TestRequireVNI pins the native-vpc control-plane invariant: an endpoint of a
