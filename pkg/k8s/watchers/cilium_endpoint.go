@@ -177,6 +177,11 @@ func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types
 	var keysAdded []string
 	if oldEndpoint != nil && oldEndpoint.Networking != nil {
 		oldVNI := ciliumEndpointVNI(oldEndpoint)
+		// The entry was written with the pod name of the *old* object, so the
+		// match has to use the same one. Taking it from the new object - or
+		// from either object's own name - would never match an attachment's
+		// entry, leaving a stale (VNI, IP) -> identity behind.
+		oldPodName := oldEndpoint.PodName()
 		defer func() {
 			for _, oldPair := range oldEndpoint.Networking.Addressing {
 				for _, oldIP := range []string{oldPair.IPV4, oldPair.IPV6} {
@@ -187,7 +192,7 @@ func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types
 					if slices.Contains(keysAdded, oldKey) {
 						continue
 					}
-					if k.ipcache.DeleteOnMetadataMatch(oldKey, source.CustomResource, endpoint.Namespace, endpoint.Name) {
+					if k.ipcache.DeleteOnMetadataMatch(oldKey, source.CustomResource, endpoint.Namespace, oldPodName) {
 						namedPortsChanged = true
 					}
 				}
@@ -226,7 +231,7 @@ func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types
 
 	k8sMeta := &ipcache.K8sMetadata{
 		Namespace:  endpoint.Namespace,
-		PodName:    endpoint.Name,
+		PodName:    endpoint.PodName(),
 		NamedPorts: make(ciliumTypes.NamedPortMap, len(endpoint.NamedPorts)),
 	}
 	for _, port := range endpoint.NamedPorts {
@@ -280,10 +285,11 @@ func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types
 func (k *K8sCiliumEndpointsWatcher) endpointDeleted(endpoint *types.CiliumEndpoint) {
 	if endpoint.Networking != nil {
 		namedPortsChanged := false
+		podName := endpoint.PodName()
 		for _, pair := range endpoint.Networking.Addressing {
 			if pair.IPV4 != "" {
 				vni := ciliumEndpointVNI(endpoint)
-				portsChanged := k.ipcache.DeleteOnMetadataMatch(ipcache.KeyWithVNI(pair.IPV4, vni), source.CustomResource, endpoint.Namespace, endpoint.Name)
+				portsChanged := k.ipcache.DeleteOnMetadataMatch(ipcache.KeyWithVNI(pair.IPV4, vni), source.CustomResource, endpoint.Namespace, podName)
 				if portsChanged {
 					namedPortsChanged = true
 				}
@@ -291,7 +297,7 @@ func (k *K8sCiliumEndpointsWatcher) endpointDeleted(endpoint *types.CiliumEndpoi
 
 			if pair.IPV6 != "" {
 				vni := ciliumEndpointVNI(endpoint)
-				portsChanged := k.ipcache.DeleteOnMetadataMatch(ipcache.KeyWithVNI(pair.IPV6, vni), source.CustomResource, endpoint.Namespace, endpoint.Name)
+				portsChanged := k.ipcache.DeleteOnMetadataMatch(ipcache.KeyWithVNI(pair.IPV6, vni), source.CustomResource, endpoint.Namespace, podName)
 				if portsChanged {
 					namedPortsChanged = true
 				}

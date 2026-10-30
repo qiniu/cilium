@@ -500,7 +500,28 @@ func updateCiliumEndpointLabels(logger *slog.Logger, clientset k8sClient.Clients
 				}
 				ciliumClient := clientset.CiliumV2()
 
+				// This patch addresses the CiliumEndpoint by name, and the name
+				// of an attachment ("<pod>.7.<ifname>") is one another pod can
+				// carry. An endpoint that never published its own CEP has no UID
+				// to assert, so it must not write at all; one that has holds the
+				// UID as a test operation, which the API server evaluates in the
+				// same transaction as the replace.
+				cepUID := ep.GetCiliumEndpointUID()
+				if cepUID == "" {
+					scopedLog.Debug(
+						"Skipping CiliumEndpoint label sync: this endpoint does not own a CiliumEndpoint yet",
+						logfields.EndpointID, ep.GetID(),
+					)
+					// Keep this one-shot controller pending until CEP publication.
+					return errors.New("CiliumEndpoint UID is not available yet")
+				}
+
 				replaceLabels := []k8s.JSONPatch{
+					{
+						OP:    "test",
+						Path:  "/metadata/uid",
+						Value: cepUID,
+					},
 					{
 						OP:    "replace",
 						Path:  "/metadata/labels",
@@ -595,6 +616,33 @@ func podVNI(pod *slim_corev1.Pod) uint32 {
 	return uint32(vni)
 }
 
+// endpointForPodIPs returns the endpoint that holds exactly the given
+// addresses, or nil if none does. A pod has more than one endpoint when it has
+// multus attachments, and they do not share a VPC scope, so every address of
+// the endpoint must belong to the set being registered: two interfaces can
+// legitimately share one address family's address across VPCs, and matching on
+// any single one of them would let an attachment speak for the primary
+// network's addresses.
+func endpointForPodIPs(eps []*endpoint.Endpoint, podIPs k8sTypes.IPSlice) *endpoint.Endpoint {
+	for _, ep := range eps {
+		matched := false
+		for _, epIP := range []string{ep.GetIPv4Address(), ep.GetIPv6Address()} {
+			if epIP == "" {
+				continue
+			}
+			if !slices.Contains(podIPs, epIP) {
+				matched = false
+				break
+			}
+			matched = true
+		}
+		if matched {
+			return ep
+		}
+	}
+	return nil
+}
+
 func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPodIPs, newPodIPs k8sTypes.IPSlice) error {
 	if newPod.Spec.HostNetwork {
 		k.logger.Debug("Pod is using host networking",
@@ -625,9 +673,14 @@ func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPo
 	// the real one under the scope it was admitted with.
 	deferToEndpoint := false
 	if option.Config.EnableNativeVPC {
-		switch eps := k.endpointManager.GetEndpointsByPodName(k8sUtils.GetObjNamespaceName(&newPod.ObjectMeta)); {
-		case len(eps) > 0:
-			if epVNI := uint32(eps[0].GetVNIID()); epVNI != 0 {
+		// A pod with multus attachments has one endpoint per interface, each
+		// in the VPC of its own OVN subnet. Only the endpoint holding one of
+		// the addresses registered here may define their scope - pod.Status
+		// carries the primary network's addresses only, so an attachment's
+		// endpoint would hand out a VNI its subnet never had.
+		switch ep := endpointForPodIPs(k.endpointManager.GetEndpointsByPodName(k8sUtils.GetObjNamespaceName(&newPod.ObjectMeta)), newPodIPs); {
+		case ep != nil:
+			if epVNI := uint32(ep.GetVNIID()); epVNI != 0 {
 				vni = epVNI
 			}
 		case newPod.Spec.NodeName == nodeTypes.GetName():

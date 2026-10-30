@@ -100,7 +100,7 @@ func ProcessCiliumEndpointDeletion(endpoint *types.CiliumEndpoint, handlers []Na
 	for _, h := range handlers {
 		for _, mv := range h.Handler.ListMetricVec() {
 			if ctx := h.Handler.Context(); ctx != nil {
-				ctx.DeleteMetricsAssociatedWithPod(endpoint.GetName(), endpoint.GetNamespace(), mv)
+				ctx.DeleteMetricsAssociatedWithPod(endpoint.PodName(), endpoint.GetNamespace(), mv)
 			}
 		}
 	}

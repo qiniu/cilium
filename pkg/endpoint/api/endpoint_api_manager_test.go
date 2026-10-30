@@ -259,7 +259,7 @@ func TestParseVNIFromPod(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			option.Config.NativeVPCVNIAnnotation = tt.key
-			vni, err := parseVNIFromPod(tt.pod, logger)
+			vni, err := parseVNIFromPod(tt.pod, "", logger)
 			if tt.expectedError != "" {
 				assert.Error(t, err)
 				assert.EqualError(t, err, tt.expectedError)

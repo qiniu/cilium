@@ -918,7 +918,10 @@ func (e *Endpoint) SyncVNIFromPodAnnotation(pod *slim_corev1.Pod) bool {
 		hostNetwork bool
 		parseErr    error
 	)
-	vni, res, err := nativevpc.VNIFromPod(pod)
+	// The endpoint's own address selects the kube-ovn provider that owns it:
+	// a pod with multus attachments carries one tunnel_key annotation per
+	// interface, and this endpoint is only in the VPC of its own interface.
+	vni, res, err := nativevpc.VNIFromPodForIP(pod, e.AddressForVNILookup())
 	switch res {
 	case nativevpc.Disabled:
 		return false
@@ -1627,6 +1630,18 @@ func (e *Endpoint) SetMac(mac mac.MAC) {
 	e.unconditionalLock()
 	defer e.unlock()
 	e.mac = mac
+}
+
+// AddressForVNILookup returns the endpoint's own address, used to select the
+// kube-ovn provider (primary network or multus attachment) whose tunnel_key
+// carries this endpoint's VNI. IPv4 is preferred only because it is the common
+// case; both addresses of a dual-stack interface resolve to the same provider.
+// Endpoint addresses are const after creation, so this needs no lock.
+func (e *Endpoint) AddressForVNILookup() string {
+	if ip := e.GetIPv4Address(); ip != "" {
+		return ip
+	}
+	return e.GetIPv6Address()
 }
 
 // GetDisableLegacyIdentifiers returns the endpoint's disableLegacyIdentifiers.

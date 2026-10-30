@@ -269,7 +269,12 @@ func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoin
 						// created on an agent version that did not yet store the
 						// UID at CEP create time.
 						if err := updateCEPUID(scopedLog, e, localCEP); err != nil {
-							scopedLog.Warn("could not take ownership of existing ciliumendpoint", logfields.Error, err)
+							// A name taken by another pod is not a transient
+							// condition the controller can retry out of: it ends
+							// only when one of the two workloads is renamed or
+							// removed. Report it at a level an operator sees
+							// instead of retrying quietly.
+							scopedLog.Error("could not take ownership of existing ciliumendpoint", logfields.Error, err)
 							return err
 						}
 					case k8serrors.IsNotFound(err):
@@ -345,7 +350,12 @@ func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoin
 						// created on an agent version that did not yet store the
 						// UID at CEP create time.
 						if err := updateCEPUID(scopedLog, e, localCEP); err != nil {
-							scopedLog.Warn("could not take ownership of existing ciliumendpoint", logfields.Error, err)
+							// A name taken by another pod is not a transient
+							// condition the controller can retry out of: it ends
+							// only when one of the two workloads is renamed or
+							// removed. Report it at a level an operator sees
+							// instead of retrying quietly.
+							scopedLog.Error("could not take ownership of existing ciliumendpoint", logfields.Error, err)
 							return err
 						}
 
@@ -482,6 +492,46 @@ func ciliumEndpointVNIAnnotations(e *endpoint.Endpoint) map[string]string {
 // that this is a temporary state where either the local/remote agent managing the CEP
 // is shutting down and will delete the CEP, or the CEP is stale and needs to be cleaned
 // up by the operator.
+// cepOwnedByPod reports whether the CiliumEndpoint is owned by a pod of this
+// name.
+//
+// The owner *name* decides, not its UID: a restarted StatefulSet pod
+// legitimately inherits both the name and the CEP of its predecessor with a
+// new UID, which is the case this adoption path exists for. A different owner
+// name is a different workload - pod "app" with an attachment "net1" and a pod
+// literally named "app.7.net1" derive the very same CEP name, and the owner is
+// the only thing that tells them apart.
+//
+// A CEP with no pod owner reference predates the convention; there is no
+// evidence of another owner, so it is adopted as before.
+func cepOwnedByPod(cep *cilium_v2.CiliumEndpoint, podName string) error {
+	found := false
+	for _, ref := range cep.OwnerReferences {
+		if ref.Kind != "Pod" || ref.Name == "" {
+			continue
+		}
+		found = true
+		if ref.Name == podName {
+			return nil
+		}
+	}
+	if !found {
+		return nil
+	}
+	return fmt.Errorf("endpoint sync could not take ownership of CEP %q: it belongs to pod %v, not to %q",
+		cep.GetNamespace()+"/"+cep.GetName(), cepOwnerPodNames(cep), podName)
+}
+
+func cepOwnerPodNames(cep *cilium_v2.CiliumEndpoint) []string {
+	var names []string
+	for _, ref := range cep.OwnerReferences {
+		if ref.Kind == "Pod" && ref.Name != "" {
+			names = append(names, ref.Name)
+		}
+	}
+	return names
+}
+
 func updateCEPUID(scopedLog *slog.Logger, e *endpoint.Endpoint, localCEP *cilium_v2.CiliumEndpoint) error {
 	// It's possible we already own this CEP, as in the case of a restore after restart.
 	// If the Endpoint already owns the CEP (by holding the matching CEP UID reference) then we don't have to
@@ -511,6 +561,16 @@ func updateCEPUID(scopedLog *slog.Logger, e *endpoint.Endpoint, localCEP *cilium
 	if cepOwner.IsNil() {
 		return fmt.Errorf("endpoint sync cannot take ownership of CEP: no pod")
 	}
+
+	// Both directions need this: the CEP name of an attachment
+	// ("<pod>.7.<ifname>") is a name another pod can carry, so either of the two
+	// can be the one that finds the other's object. Skipping the check on the
+	// pod-named side would let it adopt the attachment's CEP and leave two
+	// synchronizers writing one object.
+	if err := cepOwnedByPod(localCEP, e.GetK8sPodName()); err != nil {
+		return err
+	}
+
 	podHostIP := cepOwner.GetHostIP()
 	if podHostIP == "" {
 		return fmt.Errorf("endpoint sync cannot take ownership of CEP: no pod HostIP")

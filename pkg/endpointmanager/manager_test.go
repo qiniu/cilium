@@ -325,7 +325,7 @@ func TestLookup(t *testing.T) {
 			},
 			setupArgs: func() args {
 				return args{
-					endpointid.NewID(endpointid.CEPNamePrefix, "default/foo-net1"),
+					endpointid.NewID(endpointid.CEPNamePrefix, "default/foo.7.net1"),
 				}
 			},
 			setupWant: func() want {
@@ -656,7 +656,7 @@ func TestLookupCEPName(t *testing.T) {
 			},
 			setupArgs: func() args {
 				return args{
-					"default/bar-eth1",
+					"default/bar.7.eth1",
 				}
 			},
 			setupWant: func(ep *endpoint.Endpoint) want {

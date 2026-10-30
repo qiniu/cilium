@@ -402,6 +402,105 @@ Non-VPC entities (node IPs, host, world, service/CIDR prefixes) stay in the
 plain ipcache and are resolved by the plain fallback of the lookups above; they must
 never be queried through the VNI-scoped maps.
 
+Multus attached networks (NAD)
+==============================
+
+A pod can have a second kube-ovn interface through a multus
+NetworkAttachmentDefinition (``net1``, in a different VPC than ``eth0``).
+Cilium does not model multi-interface pods: ``net1`` is simply *another chained
+CNI ADD*, and gets its own endpoint, its own identity and its own
+``bpf_lxc``. Policy therefore applies to it the same way it does to ``eth0`` -
+which is the point, since traffic entering through an EIP / VPC NAT gateway
+reaches the pod on the attached interface and never passes the primary one.
+
+Deployment: the NAD's ``spec.config`` must be a *conflist* that chains
+``cilium-cni`` behind ``kube-ovn``, exactly as the cluster's primary CNI
+configuration does, and the Cilium plugin of a NAD must declare
+``"secondary-interface": true``. multus then invokes Cilium once per attachment
+with ``CNI_IFNAME=net1``.
+
+The declaration is what separates an attachment from the pod's default
+network; the interface name is not. ``CNI_IFNAME`` is chosen by the caller - a
+runtime may call the default network something other than ``eth0``, and a NAD
+may request any name - so deriving the role from it would reclassify such a
+default network as an attachment and silently strip its legacy identifiers,
+rename its CiliumEndpoint and ignore its ``cni.cilium.io/mac-address``
+annotation. An attachment's interface name must also be a DNS-1123 label,
+because the CiliumEndpoint is named ``<pod>.7.<ifname>``; a legal Linux name such
+as ``vpc_0`` is rejected at CNI ADD instead of failing every later CEP write.
+
+The pod's *primary* network must be chained too, and with multus installed
+that is a second place to configure: the runtime calls multus, so eth0 is set
+up by multus' **default delegate**, not by the conflist file Cilium installs.
+A multus running with ``--multus-conf-file=auto`` adopts the alphabetically
+first configuration in ``/etc/cni/net.d`` (ignoring its own ``00-multus.conf``)
+as that delegate, which is the plain kube-ovn one. Name the chained conflist
+explicitly with ``--multus-master-cni-file-name``, or set ``clusterNetwork``;
+otherwise the primary interface silently bypasses Cilium: no error is
+reported, the pod simply has no endpoint and no policy on eth0.
+
+What makes an attachment different from the primary interface:
+
+* **Per-provider annotations.** kube-ovn allocates each interface from its own
+  OVN subnet and writes the per-provider annotations
+  ``<nad-name>.<nad-namespace>.ovn.kubernetes.io/{ip_address,tunnel_key}``.
+  Only an attachment's key is built from that template; the primary network's
+  key stays the configured ``--native-vpc-vni-annotation``, which is what that
+  flag is for. Cilium selects the provider by
+  the endpoint's **address**, not by the interface name: multus writes the
+  ``k8s.v1.cni.cncf.io/network-status`` annotation only after every delegate
+  has returned, so the name is not readable while Cilium runs inside the
+  delegate chain, whereas kube-ovn writes ``ip_address`` and ``tunnel_key``
+  before its own CNI ADD returns. The decision table is unchanged: an
+  attachment with a missing or broken ``tunnel_key`` is rejected, never
+  silently given the primary interface's VNI. If two interfaces of one pod
+  were allocated the *same* address in different VPCs, no signal is left to
+  tell them apart and the endpoint is rejected as well, rather than put in
+  whichever VPC the annotation map happened to yield first.
+* **Identifiers.** An attachment shares the container ID and the pod name with
+  the primary endpoint, so a declared attachment is created with
+  ``disable-legacy-identifiers``: it is addressed by its CNI attachment ID
+  (``<container-id>:net1``) and its CiliumEndpoint is named ``<pod>.7.net1``.
+  The primary endpoint keeps the legacy identifiers, so existing deployments
+  are unaffected. The separator is ``.7.``: a CiliumEndpoint name is validated
+  with the very same function as a pod name, so no separator can put the name
+  out of a pod's reach, but no controller-generated pod name can contain a dot
+  in that position (a generated name always ends in ``-<ordinal>`` or
+  ``-<random>``, and a StatefulSet name may not contain a dot at all), so only
+  a hand-written pod could claim it. That CEP name is still one another pod
+  could carry,
+  so an existing CiliumEndpoint is only adopted when its owner reference names
+  this endpoint's pod - in both directions, and by owner *name*, so that a pod
+  recreated under the same name still adopts its own object. The label sync
+  asserts the same object with a JSON-Patch test on its UID, so an endpoint
+  that never published a CiliumEndpoint cannot write to another pod's.
+* **Cache plane.** ``pod.Status.PodIPs`` carries the primary network's
+  addresses only, so the pod watcher consults the endpoint that holds *those*
+  addresses. An attachment's address reaches other nodes through its own
+  CiliumEndpoint, which carries the VNI annotation.
+
+Known limits:
+
+* CNI DEL deletes every endpoint of the container, not only the attachment
+  being removed. Pods are torn down as a whole today (multus deletes its
+  delegates in reverse order, so the attachment's DEL takes the primary
+  endpoint with it and the primary's own DEL is a no-op); detaching an
+  interface from a running pod would need a delete by CNI attachment ID.
+* A NAD that is not an OVN subnet (vlan/underlay/macvlan) has no
+  ``tunnel_key``, and its address is not one kube-ovn allocated, so the
+  attachment is in no VPC: native-vpc rejects the endpoint and the CNI ADD
+  fails. It is never given the primary interface's VNI, which would place it
+  in a VPC it is not in. Do not chain Cilium into such a NAD.
+* The conntrack/NAT limitation above applies per endpoint and is unchanged.
+* A pod named exactly ``<other-pod>.7.<ifname>`` collides with the
+  CiliumEndpoint name an attachment would use. Whichever of the two created
+  the object keeps it; the other keeps its endpoint and its policy but cannot
+  publish a CiliumEndpoint, so other nodes do not learn its identity until the
+  name is free. Renaming either workload resolves it.
+* An attachment's interface name must be a DNS-1123 label and short enough
+  that ``<pod>.7.<ifname>`` stays within 253 characters, since that is a
+  Kubernetes object name. CNI ADD fails otherwise.
+
 Requirements
 ============
 
