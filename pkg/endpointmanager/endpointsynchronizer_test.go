@@ -184,13 +184,13 @@ func Test_updateCEPUID(t *testing.T) {
 	}
 }
 
-// TestCEPOwnedByPod pins which CiliumEndpoint an endpoint may take over. The
+// TestCEPOwnerConflict pins which CiliumEndpoint an endpoint may take over. The
 // CEP name of an attachment ("<pod>.7.<ifname>") is a name another pod can
 // carry, so the object's owner decides - and it must decide in both
 // directions, or the pod-named side silently takes the attachment's object and
 // two synchronizers end up writing one CEP.
-func TestCEPOwnedByPod(t *testing.T) {
-	cepOwnedByPodRef := func(ownerName string) *v2.CiliumEndpoint {
+func TestCEPOwnerConflict(t *testing.T) {
+	cepWithOwner := func(ownerName string) *v2.CiliumEndpoint {
 		cep := &v2.CiliumEndpoint{ObjectMeta: v1.ObjectMeta{Name: "app.7.net1", Namespace: "default"}}
 		if ownerName != "" {
 			cep.OwnerReferences = []v1.OwnerReference{{Kind: "Pod", Name: ownerName, UID: types.UID("uid-" + ownerName)}}
@@ -199,20 +199,20 @@ func TestCEPOwnedByPod(t *testing.T) {
 	}
 
 	// The attachment of pod "app" owns it.
-	assert.NoError(t, cepOwnedByPod(cepOwnedByPodRef("app"), "app"))
+	assert.NoError(t, cepOwnerConflict(cepWithOwner("app"), "app"))
 	// A pod that merely carries the name must not take it over...
-	assert.Error(t, cepOwnedByPod(cepOwnedByPodRef("app"), "app.7.net1"))
+	assert.Error(t, cepOwnerConflict(cepWithOwner("app"), "app.7.net1"))
 	// ...and neither direction is exempt.
-	assert.Error(t, cepOwnedByPod(cepOwnedByPodRef("app.7.net1"), "app"))
+	assert.Error(t, cepOwnerConflict(cepWithOwner("app.7.net1"), "app"))
 
 	// A pod recreated under the same name (a StatefulSet restart) has a new
 	// UID but the same name, and has to keep adopting its own CEP: that is
 	// what this adoption path exists for.
-	recreated := cepOwnedByPodRef("app.7.net1")
+	recreated := cepWithOwner("app.7.net1")
 	recreated.OwnerReferences[0].UID = "uid-previous-incarnation"
-	assert.NoError(t, cepOwnedByPod(recreated, "app.7.net1"))
+	assert.NoError(t, cepOwnerConflict(recreated, "app.7.net1"))
 
 	// A CEP without a pod owner reference predates the convention: no evidence
 	// of another owner, so it is adopted as before.
-	assert.NoError(t, cepOwnedByPod(cepOwnedByPodRef(""), "app.7.net1"))
+	assert.NoError(t, cepOwnerConflict(cepWithOwner(""), "app.7.net1"))
 }

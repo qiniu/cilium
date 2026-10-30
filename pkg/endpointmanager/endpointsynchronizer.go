@@ -492,8 +492,11 @@ func ciliumEndpointVNIAnnotations(e *endpoint.Endpoint) map[string]string {
 // that this is a temporary state where either the local/remote agent managing the CEP
 // is shutting down and will delete the CEP, or the CEP is stale and needs to be cleaned
 // up by the operator.
-// cepOwnedByPod reports whether the CiliumEndpoint is owned by a pod of this
-// name.
+// cepOwnerConflict returns an error if the CiliumEndpoint has a Pod owner
+// reference and none of them is named podName, i.e. there is evidence that it
+// belongs to another pod. nil only means "no conflict": it does not prove that
+// podName owns the CEP, and the caller's other checks (local node, CEP UID)
+// still apply.
 //
 // The owner *name* decides, not its UID: a restarted StatefulSet pod
 // legitimately inherits both the name and the CEP of its predecessor with a
@@ -503,8 +506,8 @@ func ciliumEndpointVNIAnnotations(e *endpoint.Endpoint) map[string]string {
 // the only thing that tells them apart.
 //
 // A CEP with no pod owner reference predates the convention; there is no
-// evidence of another owner, so it is adopted as before.
-func cepOwnedByPod(cep *cilium_v2.CiliumEndpoint, podName string) error {
+// evidence of another owner, so it is not a conflict.
+func cepOwnerConflict(cep *cilium_v2.CiliumEndpoint, podName string) error {
 	found := false
 	for _, ref := range cep.OwnerReferences {
 		if ref.Kind != "Pod" || ref.Name == "" {
@@ -567,7 +570,7 @@ func updateCEPUID(scopedLog *slog.Logger, e *endpoint.Endpoint, localCEP *cilium
 	// can be the one that finds the other's object. Skipping the check on the
 	// pod-named side would let it adopt the attachment's CEP and leave two
 	// synchronizers writing one object.
-	if err := cepOwnedByPod(localCEP, e.GetK8sPodName()); err != nil {
+	if err := cepOwnerConflict(localCEP, e.GetK8sPodName()); err != nil {
 		return err
 	}
 

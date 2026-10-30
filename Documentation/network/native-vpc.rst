@@ -491,9 +491,13 @@ Known limits:
 * A NAD that is not an OVN overlay subnet has no ``tunnel_key``: kube-ovn
   writes none for its vlan/underlay subnets, and a macvlan attachment
   is not allocated by kube-ovn at all. Either way the attachment is in no VPC:
-  native-vpc rejects the endpoint and the CNI ADD fails. It is never given the primary interface's VNI, which would place it
-  in a VPC it is not in. Do not chain Cilium into such a NAD.
-* The conntrack/NAT limitation above applies per endpoint and is unchanged.
+  native-vpc rejects the endpoint and the CNI ADD fails. It is never given
+  the primary interface's VNI, which would place it in a VPC it is not in. Do
+  not chain Cilium into such a NAD.
+* The conntrack/NAT plane is unchanged: its key carries no VNI (see
+  `Conntrack and NAT plane`_), and an attachment's endpoint shares the
+  node-wide conntrack and NAT maps like any other endpoint. Cilium has no
+  per-endpoint connection limit.
 * A pod named exactly ``<other-pod>.7.<ifname>`` collides with the
   CiliumEndpoint name an attachment would use. Whichever of the two created
   the object keeps it; the other keeps its endpoint and its policy but cannot
