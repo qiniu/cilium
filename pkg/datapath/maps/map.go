@@ -210,7 +210,7 @@ func (ms *MapSweeper) RemoveDisabledMaps() {
 		// pin left behind by a previous run with the mode enabled, so that a
 		// later re-enable starts from a clean map instead of inheriting entries
 		// of a previous VPC topology.
-		maps = append(maps, ipcachemap.VniName)
+		maps = append(maps, ipcachemap.VniName, "cilium_vni_routes")
 	}
 
 	if !option.Config.EnableHealthDatapath {

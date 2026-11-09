@@ -11,15 +11,43 @@ Native VPC Mode (kube-ovn)
 **************************
 
 Cilium can run in native-vpc mode on top of a kube-ovn underlay that provides
-multiple VPCs and overlapping subnets. Cilium deliberately does **not** model
-the kube-ovn VPC object: a VPC is an aggregate that can contain several
-subnets, while each OVN logical switch/subnet has its own tunnel_key/VNI
-(Virtual Network Identifier). The data-plane key is therefore (VNI, IP), not
-(VPC, IP) and not bare IP. Every control/cache/forwarding/observability
-consumer described below uses that VNI scope.
+multiple VPCs and overlapping subnets. A VPC can contain several subnets,
+while each OVN logical switch/subnet has its own tunnel_key/VNI (Virtual
+Network Identifier). The identity key remains (VNI, IP), not (VPC, IP) and
+not bare IP. For routed peers, Cilium reads kube-ovn Subnet membership to
+resolve the peer subnet's VNI within the endpoint's VPC.
 
 This document describes the tunnel_key contract between kube-ovn and Cilium,
 and the recovery procedure when it is temporarily violated.
+
+Same-VPC cross-subnet identity resolution
+==========================================
+
+Agents watch ``kubeovn.io/v1`` Subnets and join ``spec.vpc``,
+``spec.cidrBlock`` and ``status.tunnelKey``. The ``cilium_vni_routes`` LPM
+map stores ``(local subnet VNI, peer subnet prefix) -> peer subnet VNI``
+only for different, non-overlapping subnets belonging to the same VPC.
+Both ingress and egress, for IPv4 and IPv6, consult it before looking up
+``cilium_ipcache_vni``. Same-subnet traffic keeps its original VNI; the
+existing plain-ipcache fallback for non-VPC peers is unchanged. No endpoint
+identity is copied into another subnet or VPC.
+
+This lets security-group ``fromEndpoints`` and ``toEndpoints`` selectors
+match VM identities across subnets. kube-ovn still owns
+routing and ACLs; this map neither forwards packets nor bypasses policy.
+
+``nativeVPC.enabled`` grants agents get/list/watch access to Subnets through
+the Helm ClusterRole. Install that RBAC before upgrading agents; deployments
+using agent flags directly must grant the same permission. All nodes need
+the updated agent and BPF source for both ends of a routed connection.
+
+The route map holds at most 65,536 entries. Subnet changes remove obsolete
+entries before inserting replacements; failed map operations are retried
+and reported through agent health. Invalid/duplicate VNIs or overlapping
+CIDRs within one VPC revoke the peer routes and report degraded health.
+Different VPCs may still reuse CIDRs. On restart, the map is cleared before
+rebuilding it from the synchronized Subnet snapshot; endpoint-selector
+traffic may be denied during this convergence window.
 
 The tunnel_key annotation
 =========================
@@ -131,10 +159,10 @@ Hubble performs to enrich a flow is scoped by (VNI, IP). The chain is:
 1. **VNI context of the event.** For L3/L4 events (trace/drop/policy-verdict),
    the notification carries the id of the local endpoint whose BPF program
    emitted it. The parser resolves that endpoint by id and takes its
-   ``VNIID``. This is exactly the scope the datapath used: ``bpf_lxc`` resolves
-   the peer of an endpoint in ``cilium_ipcache_vni`` with that endpoint's own
-   ``CONFIG(native_vpc_vni)``. For encapsulated packets that Cilium itself
-   decodes, the overlay VNI of the tunnel header takes precedence.
+   ``VNIID`` as the initial scope. When a datapath identity carries a VNI
+   label, the resolver uses that identity's VNI for its side of the flow,
+   including routed peers in another subnet. For encapsulated packets that
+   Cilium itself decodes, the overlay VNI supplies the initial scope.
    Socket-level events (``TraceSock``) derive the same scope from their cgroup
    id through the pod's endpoint, and debug events from their endpoint id.
    For L7 events the VNI is recorded on the proxy access-log record

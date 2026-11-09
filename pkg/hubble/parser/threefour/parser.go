@@ -276,10 +276,8 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 		DstLabelID:            dstLabelID,
 		TraceObservationPoint: decoded.TraceObservationPoint,
 	}
-	// Native-vpc: derive the VNI scope of the flow from the local endpoint that
-	// emitted the event. This mirrors the datapath exactly: bpf_lxc resolves
-	// the peer of an endpoint with that endpoint's own CONFIG(native_vpc_vni),
-	// so the same VNI is the correct scope for both sides of the flow.
+	// Use the emitting endpoint's VNI as the initial scope. The resolver uses
+	// each datapath identity's VNI label for peers routed across subnet VNIs.
 	if vni, ok := p.vniOfLocalEndpoint(dn, tn, pvn); ok {
 		datapathContext.SrcVNI = vni
 		datapathContext.DstVNI = vni
@@ -706,12 +704,8 @@ func decodeIpTraceId(dn *monitor.DropNotify, tn *monitor.TraceNotify) *pb.IPTrac
 // program emitted the event (the "source" field of the notification is the
 // endpoint owning the program, not necessarily the source of the packet).
 //
-// That endpoint's VNI is the exact scope the datapath used to resolve the peer
-// (bpf_lxc looks the peer up in cilium_ipcache_vni with its own
-// CONFIG(native_vpc_vni)), which makes it the right context for resolving both
-// sides of the flow: same-VPC peers resolve exactly, non-VPC peers fall back
-// to the plain scope, and a foreign VPC entry with the same IP can never be
-// selected.
+// This is exact for same-subnet peers. For routed peers the resolver takes
+// the peer VNI from its datapath identity rather than guessing by IP.
 func (p *Parser) vniOfLocalEndpoint(dn *monitor.DropNotify, tn *monitor.TraceNotify, pvn *monitor.PolicyVerdictNotify) (uint32, bool) {
 	// Outside native-vpc mode every endpoint has VNI 0; skip the extra lookup
 	// on the per-event hot path.

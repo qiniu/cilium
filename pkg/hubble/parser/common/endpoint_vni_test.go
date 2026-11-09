@@ -10,11 +10,61 @@ import (
 	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cilium/cilium/pkg/hubble/parser/getters"
 	"github.com/cilium/cilium/pkg/hubble/testutils"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/labels"
 )
+
+type peerSubnetEndpointGetter struct {
+	testutils.FakeEndpointGetter
+	peer getters.EndpointInfo
+}
+
+func (g *peerSubnetEndpointGetter) GetEndpointInfoForVNI(_ netip.Addr, vni uint32) (getters.EndpointInfo, bool) {
+	return g.peer, g.peer != nil && g.peer.GetVNIID() == uint64(vni)
+}
+
+func TestEndpointResolverPeerSubnet(t *testing.T) {
+	ip := netip.MustParseAddr("10.98.8.2")
+	const secID = uint32(21929)
+	for _, local := range []bool{false, true} {
+		t.Run(map[bool]string{false: "remote", true: "local"}[local], func(t *testing.T) {
+			identityGetter := &testutils.FakeIdentityGetter{OnGetIdentity: func(uint32) (*identity.Identity, error) {
+				return identity.NewIdentity(identity.NumericIdentity(secID), labels.Labels{
+					labels.VNIKey: labels.NewLabel(labels.VNIKey, "54", labels.LabelSourceVNI),
+				}), nil
+			}}
+			epGetter := &peerSubnetEndpointGetter{}
+			if local {
+				epGetter.peer = &testutils.FakeEndpointInfo{
+					ID: 123, Identity: identity.NumericIdentity(secID), VNIID: 54,
+					PodNamespace: "same-vpc", PodName: "peer",
+				}
+			}
+			ipGetter := &testutils.FakeIPGetter{
+				OnLookupSecIDByIPForVNI: func(_ netip.Addr, vni uint32) (ipcache.Identity, bool) {
+					require.Equal(t, uint32(54), vni)
+					return ipcache.Identity{ID: identity.NumericIdentity(secID), Vni: 54}, true
+				},
+				OnGetK8sMetadataForVNI: func(_ netip.Addr, vni uint32) *ipcache.K8sMetadata {
+					require.Equal(t, uint32(54), vni)
+					return &ipcache.K8sMetadata{Namespace: "same-vpc", PodName: "peer"}
+				},
+			}
+			resolver := NewEndpointResolver(hivetest.Logger(t), epGetter, identityGetter, ipGetter)
+			ep := resolver.ResolveEndpoint(ip, secID, DatapathContext{SrcIP: ip, SrcVNI: 58})
+			require.Equal(t, uint64(54), ep.VniId)
+			require.Equal(t, secID, ep.Identity)
+			require.Equal(t, "same-vpc", ep.Namespace)
+			require.Equal(t, "peer", ep.PodName)
+			if local {
+				require.Equal(t, uint32(123), ep.ID)
+			}
+		})
+	}
+}
 
 // TestEndpointResolverRemoteVNI verifies that a remote native-vpc endpoint is
 // resolved through its VNI-scoped ipcache entry: the plain (bare-IP) lookup

@@ -57,9 +57,21 @@ cilium_pod() {
   kubectl -n "$CILIUM_NS" get pod -l k8s-app=cilium -o name 2>/dev/null | head -1
 }
 
+cilium_pod_on_node() {
+  local node=$1
+  kubectl -n "$CILIUM_NS" get pod -l k8s-app=cilium \
+    --field-selector="spec.nodeName=${node}" -o name 2>/dev/null | head -1
+}
+
 # cilium_exec <args...> - run cilium-dbg inside the agent
 cilium_exec() {
   kubectl -n "$CILIUM_NS" exec "$(cilium_pod)" -c cilium-agent -- "$@" 2>/dev/null
+}
+
+cilium_exec_pod() {
+  local pod=$1
+  shift
+  kubectl -n "$CILIUM_NS" exec "$pod" -c cilium-agent -- "$@" 2>/dev/null
 }
 
 # pod_vni <namespace> <pod> - the kube-ovn tunnel_key annotation

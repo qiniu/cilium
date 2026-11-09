@@ -27,6 +27,7 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/linux/utime"
 	"github.com/cilium/cilium/pkg/datapath/loader"
 	datapathmaps "github.com/cilium/cilium/pkg/datapath/maps"
+	"github.com/cilium/cilium/pkg/datapath/nativevpc"
 	"github.com/cilium/cilium/pkg/datapath/neighbor"
 	"github.com/cilium/cilium/pkg/datapath/node"
 	"github.com/cilium/cilium/pkg/datapath/orchestrator"
@@ -128,6 +129,7 @@ var Cell = cell.Module(
 
 	// Synchronizes the userspace ipcache with the corresponding BPF map.
 	ipcache.Cell,
+	nativevpc.Cell,
 
 	// Provides the loader, which compiles and loads the datapath programs.
 	loader.Cell,

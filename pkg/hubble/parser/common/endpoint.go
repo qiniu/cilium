@@ -140,25 +140,32 @@ func (r *EndpointResolver) ResolveEndpoint(ip netip.Addr, datapathSecurityIdenti
 		return datapathID.Uint32()
 	}
 
+	contextVNI := context.SrcVNI
+	if ip != context.SrcIP {
+		contextVNI = context.DstVNI
+	}
+	if contextVNI > 0 && r.identityGetter != nil &&
+		!identity.NumericIdentity(datapathSecurityIdentity).IsReservedIdentity() {
+		// A routed same-VPC peer can live in a different subnet than the
+		// endpoint emitting the event; its datapath identity carries its VNI.
+		if id, err := r.identityGetter.GetIdentity(datapathSecurityIdentity); err == nil {
+			if vni, ok := vniFromIdentityLabels(id.Labels); ok {
+				contextVNI = vni
+			}
+		}
+	}
+
 	// For local endpoints, use exact (VNI, IP) context when available. A
 	// native-vpc endpoint must never be selected by guessing from a bare IP.
 	if r.endpointGetter != nil {
 		var epInfo getters.EndpointInfo
 		var ok bool
-		vni := context.SrcVNI
-		if ip != context.SrcIP {
-			vni = context.DstVNI
-		}
-		if vni > 0 {
+		if contextVNI > 0 {
 			if vniGetter, supported := r.endpointGetter.(getters.EndpointGetterVNI); supported {
-				epInfo, ok = vniGetter.GetEndpointInfoForVNI(ip, vni)
+				epInfo, ok = vniGetter.GetEndpointInfoForVNI(ip, contextVNI)
 				if !ok {
-					// The peer of a VPC endpoint is either in the same VPC
-					// (resolved above, mirroring what bpf_lxc does with the
-					// endpoint's own CONFIG(native_vpc_vni)) or a non-VPC
-					// entity (host, node, non-OVN pod). Only the latter,
-					// key-exact plain scope is an acceptable fallback: a
-					// bare-IP guess could pick an endpoint of another VPC.
+					// Only the key-exact plain scope is a safe fallback for
+					// non-VPC peers; a bare-IP guess could pick another VPC.
 					epInfo, ok = vniGetter.GetEndpointInfoForVNI(ip, 0)
 				}
 			}
@@ -192,13 +199,7 @@ func (r *EndpointResolver) ResolveEndpoint(ip netip.Addr, datapathSecurityIdenti
 	numericIdentity := datapathSecurityIdentity
 	var namespace, podName string
 	var needVNIMetadata bool
-	// contextVNI is the VNI scope the datapath observed for this side of the
-	// flow (0 when the event carries no VNI context). inVPCScope records
-	// whether this peer really resolved inside that scope.
-	contextVNI := context.SrcVNI
-	if ip != context.SrcIP {
-		contextVNI = context.DstVNI
-	}
+	// inVPCScope records whether this peer resolved inside its VNI scope.
 	var inVPCScope bool
 	if r.ipGetter != nil {
 		var identityResolved bool

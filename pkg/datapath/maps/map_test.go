@@ -178,6 +178,8 @@ func TestRemoveDisabledMaps(t *testing.T) {
 				"cilium_proxy4",
 				"cilium_proxy6",
 				"cilium_policy_01234",
+				"cilium_ipcache_vni",
+				"cilium_vni_routes",
 				"cilium_policy_v2_01234",
 				"cilium_policy_v2_reserved_1",
 			},
@@ -186,6 +188,8 @@ func TestRemoveDisabledMaps(t *testing.T) {
 			"cilium_proxy4",
 			"cilium_proxy6",
 			"cilium_policy_01234",
+			"cilium_ipcache_vni",
+			"cilium_vni_routes",
 		}
 		bwManager := newTestBWManager()
 		sweeper := newMapSweeper(hivetest.Logger(t), testEPManager, bwManager, loadbalancer.DefaultConfig, kpr.KPRConfig{})

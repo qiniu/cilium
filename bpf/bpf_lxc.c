@@ -2128,8 +2128,8 @@ int tail_ipv6_to_endpoint(struct __ctx_buff *ctx)
 		const union v6addr *src = (union v6addr *)&ip6->saddr;
 		const struct remote_endpoint_info *info;
 
-		/* In native-vpc mode, resolve the source against the VNI-scoped
-		 * ipcache using this endpoint's own VNI first (see IPv4 twin).
+		/* Resolve the peer subnet VNI within this endpoint's VPC before
+		 * looking up its identity (see IPv4 twin).
 		 */
 		info = NULL;
 		if (CONFIG(native_vpc_vni) > 0)
@@ -2454,18 +2454,10 @@ int tail_ipv4_to_endpoint(struct __ctx_buff *ctx)
 	if (identity_is_reserved(src_sec_identity)) {
 		const struct remote_endpoint_info *info;
 
-		/* In native-vpc mode, resolve the source against the VNI-scoped
-		 * ipcache using this endpoint's own VNI first. This correctly
-		 * attributes same-VPC peers (the common case) even when their IP
-		 * is not present in the plain ipcache due to overlapping VPC
-		 * subnets.
-		 *
-		 * Inter-VPC traffic never reaches this endpoint: whether two VPCs
-		 * can talk is decided by kube-ovn's forwarding plane (logical
-		 * router / ACL), which drops it by default (VPC peering is not
-		 * supported). A VNI-map miss therefore only occurs for non-VPC
-		 * sources (default-subnet pods, nodes, world), which are resolved
-		 * via the plain ipcache below.
+		/* Resolve the peer subnet VNI within this endpoint's VPC before
+		 * looking up its identity. Same-subnet peers keep the endpoint's
+		 * own VNI; nodes and external sources use the plain fallback.
+		 * Inter-VPC forwarding remains kube-ovn's responsibility.
 		 */
 		info = NULL;
 		if (CONFIG(native_vpc_vni) > 0)

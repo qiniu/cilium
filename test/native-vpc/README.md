@@ -27,6 +27,7 @@ another VPC's traffic.
 | `15-key-uniqueness.sh` | after CNI ADD each pod owns exactly one resource per plane under its own (VNI, IP); after CNI DEL only its own are gone, including a DEL that happens while the agent is down; the host stack and the operator commands hold to the same rule |
 | `20-policies.sh`      | applies the three policy scenarios                                            |
 | `30-connectivity.sh`  | runs the connectivity matrix and the cross-VPC leak checks                    |
+| `32-cross-subnet.sh`  | creates two subnets in one VPC; checks SG-selector TCP/ICMP both ways, then denies traffic after removing SG membership; cleans up its own fixtures |
 | `35-policymap.sh`     | the identity-keyed policy map of each server, as the datapath sees it          |
 | `40-observability.sh` | asserts Hubble attributes every flow to the right VPC                         |
 | `45-hubble-vni.sh`    | per-VPC forwarding-plane records (VNI+IP+identity+verdict) and VNI filtering   |
@@ -62,6 +63,12 @@ another VPC's traffic.
   vpc-c;
 - `tcp/9090` is blocked in vpc-b while open in vpc-c for the same address pair.
 
+**32-cross-subnet.sh** (6 checks, qbox/las#4978)
+- requires Cilium endpoints, so a kube-ovn-only CNI chain cannot produce a false pass;
+- verifies kube-ovn routes between the subnets before applying policy;
+- checks that shared-SG endpoint selectors allow TCP and ICMP in both directions;
+- waits for identity changes and checks that removing SG membership denies both directions.
+
 **40-observability.sh** (7 checks)
 - every flow between the shared addresses carries a VNI on *both* endpoints;
 - flows group by VNI to the correct namespace;
@@ -93,6 +100,7 @@ to the review in `Documentation/network/native-vpc.rst`.
 | 3 forwarding | endpoints addressable as `vni-ipv4:<vni>:<ip>`   | `10-verify-vni.sh`               |
 | 4 policy     | identities, and therefore policy, are VPC-scoped | `30-connectivity.sh`             |
 | 4 policy     | a policy of one VPC cannot affect another        | `30-connectivity.sh`             |
+| 4 policy     | SG endpoint selectors work across subnet VNIs within one VPC | `32-cross-subnet.sh` |
 | 4 policy     | the policy map is keyed by identity, not address | `35-policymap.sh`                |
 | 4 policy     | the allowed peer carries the same VNI            | `35-policymap.sh`                |
 | 4 policy     | the port scope is visible in the policy map      | `35-policymap.sh`                |

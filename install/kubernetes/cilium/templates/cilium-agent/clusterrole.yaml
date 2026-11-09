@@ -18,6 +18,16 @@ metadata:
     {{- toYaml . | nindent 4 }}
     {{- end }}
 rules:
+{{- if .Values.nativeVPC.enabled }}
+- apiGroups:
+  - kubeovn.io
+  resources:
+  - subnets
+  verbs:
+  - get
+  - list
+  - watch
+{{- end }}
 - apiGroups:
   - networking.k8s.io
   resources:

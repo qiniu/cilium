@@ -198,8 +198,8 @@ ipcache_lookup4(const void *map, __be32 addr, __u32 prefix, __u32 cluster_id)
  * Entries are keyed by (VNI, IP) so that overlapping IPs from different VPCs
  * can coexist. It is only consulted by native-vpc endpoints
  * (CONFIG(native_vpc_vni) > 0) to resolve the identity of a peer that is
- * expected to live in the same VPC
- * (the endpoint's own VNI). Must be kept in sync with
+ * expected to live in the same VPC. cilium_vni_routes resolves a peer subnet's
+ * VNI before the identity lookup. Must be kept in sync with
  * pkg/maps/ipcache.VniKey.
  *
  * This is the "local ClusterID" split: upstream uses a cluster_id field in the
@@ -253,6 +253,18 @@ struct {
 	(8 * (sizeof(struct ipcache_vni_key) - sizeof(struct bpf_lpm_trie_key)	\
 	      - sizeof(union v6addr)))
 
+/* (local subnet VNI, peer subnet prefix) -> peer subnet VNI. The control
+ * plane only installs routes between non-overlapping subnets of one VPC.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__type(key, struct ipcache_vni_key);
+	__type(value, __u32);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(max_entries, 65536);
+	__uint(map_flags, BPF_F_NO_PREALLOC | BPF_F_RDONLY_PROG_COND);
+} cilium_vni_routes __section_maps_btf;
+
 static __always_inline __maybe_unused const struct remote_endpoint_info *
 ipcache_lookup4_vni(const void *map, __be32 addr, __u32 prefix, __u32 vni)
 {
@@ -262,8 +274,14 @@ ipcache_lookup4_vni(const void *map, __be32 addr, __u32 prefix, __u32 vni)
 		.ip4 = addr,
 	};
 
+	const __u32 *peer_vni;
+
 	key.vni = vni;
 	key.ip4 &= GET_PREFIX(prefix);
+	peer_vni = map_lookup_elem(&cilium_vni_routes, &key);
+
+	if (peer_vni)
+		key.vni = *peer_vni;
 	return map_lookup_elem(map, &key);
 }
 
@@ -277,7 +295,13 @@ ipcache_lookup6_vni(const void *map, const union v6addr *addr,
 		.ip6 = *addr,
 	};
 
+	const __u32 *peer_vni;
+
 	key.vni = vni;
 	ipv6_addr_clear_suffix(&key.ip6, prefix);
+	peer_vni = map_lookup_elem(&cilium_vni_routes, &key);
+
+	if (peer_vni)
+		key.vni = *peer_vni;
 	return map_lookup_elem(map, &key);
 }
