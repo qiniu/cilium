@@ -1032,14 +1032,29 @@ func (e *Endpoint) runIPIdentitySync(endpointIP netip.Addr) {
 		addressFamily = "IPv6"
 	}
 
-	// Capture the VNI used by this controller instance. UpdateController
-	// replaces the old controller when VNI/identity changes; the old StopFunc
-	// must delete the exact key its DoFunc wrote (e.g. <ip>@vni:N), rather than
-	// re-reading a newer e.VNIID and leaking the old kvstore/tracker entry.
+	// Capture the VNI and the identity of these params together, under the
+	// endpoint lock SetIdentity holds: their DoFunc writes this pair, and
+	// their StopFunc deletes the entry of this VNI. A run of older params
+	// after a scope change must not pair its VNI with the new identity.
 	vni := e.VNIID
+	var identityID identityPkg.NumericIdentity
+	if e.SecurityIdentity != nil {
+		identityID = e.SecurityIdentity.ID
+	}
+	name := fmt.Sprintf("sync-%s-identity-mapping (%d)", addressFamily, e.ID)
+	written := e.identitySyncs[name]
+	if written == nil {
+		// Restore moved the endpoint to another scope: the previous agent
+		// wrote the entry of the old one.
+		written = &identitySyncState{vni: e.restoredFromVNI, ok: e.restoredFromVNI != 0}
+		if e.identitySyncs == nil {
+			e.identitySyncs = map[string]*identitySyncState{}
+		}
+		e.identitySyncs[name] = written
+	}
 
 	e.controllers.UpdateController(
-		fmt.Sprintf("sync-%s-identity-mapping (%d)", addressFamily, e.ID),
+		name,
 		controller.ControllerParams{
 			Group: syncAddressIdentityMappingControllerGroup,
 			DoFunc: func(ctx context.Context) error {
@@ -1053,7 +1068,7 @@ func (e *Endpoint) runIPIdentitySync(endpointIP netip.Addr) {
 				}
 				logger := e.getLogger()
 
-				ID := e.SecurityIdentity.ID
+				ID := identityID
 				hostIP, err := netip.ParseAddr(node.GetCiliumEndpointNodeIP(logger))
 				if err != nil {
 					e.runlock()
@@ -1072,6 +1087,15 @@ func (e *Endpoint) runIPIdentitySync(endpointIP netip.Addr) {
 				// Release lock as we do not want to have long-lasting key-value
 				// store operations resulting in lock being held for a long time.
 				e.runlock()
+
+				// The entry of the previous scope is removed before the new one
+				// is written: at most the recorded scope then has an entry, so
+				// a failed removal leaves nothing the record does not name.
+				if err := written.moveTo(vni, func(old uint64) error {
+					return e.kvstoreSyncher.Delete(ctx, endpointIP.String(), old, k8sNamespace, k8sPodName, e.ID)
+				}); err != nil {
+					return fmt.Errorf("unable to delete endpoint IP '%s' of the previous VNI from ipcache: %w", endpointIP.String(), err)
+				}
 
 				params := &ipcache.UpsertParams{
 					IP:                endpointIP,
@@ -1098,15 +1122,57 @@ func (e *Endpoint) runIPIdentitySync(endpointIP netip.Addr) {
 				// pod can be given it, and that pod's endpoint registers the
 				// same (VNI, IP). Name the pod this entry belongs to so the
 				// removal cannot take the new owner's entry with it.
-				if err := e.kvstoreSyncher.Delete(ctx, ip, vni, e.K8sNamespace, e.K8sPodName, e.ID); err != nil {
-					return fmt.Errorf("unable to delete endpoint IP '%s' from ipcache: %w", ip, err)
-				}
-				return nil
+				return written.scopes(vni, func(v uint64) error {
+					if err := e.kvstoreSyncher.Delete(ctx, ip, v, e.K8sNamespace, e.K8sPodName, e.ID); err != nil {
+						return fmt.Errorf("unable to delete endpoint IP '%s' from ipcache: %w", ip, err)
+					}
+					return nil
+				})
 			},
 			RunInterval: 5 * time.Minute,
 			Context:     e.aliveCtx,
 		},
 	)
+}
+
+// identitySyncState is the scope whose entry the identity sync controller of
+// one address family has written. The endpoint's scope can change (native-vpc
+// key change), and the controller is kept and only gets new params, so its
+// DoFunc moves the entry: it removes the entry of the scope written before
+// and writes the current one. Only that controller's goroutine uses the
+// state, where DoFunc and StopFunc run one after another, so it needs no
+// lock.
+type identitySyncState struct {
+	vni uint64
+	ok  bool // the entry of vni may exist
+}
+
+// moveTo is called before the entry of vni is written. It removes the entry
+// of the previously written scope with del when it is not vni, and records
+// vni as written. A failed removal keeps the previous scope recorded and
+// returns before vni is written, so that a retry or the StopFunc removes it.
+func (s *identitySyncState) moveTo(vni uint64, del func(uint64) error) error {
+	if s.ok && s.vni != vni {
+		if err := del(s.vni); err != nil {
+			return err
+		}
+	}
+	s.vni, s.ok = vni, true
+	return nil
+}
+
+// scopes removes the entry of vni - the scope of the params the controller
+// stops with, which are those of its last run - and of the written scope if
+// that differs (its removal failed, or restore moved the endpoint before the
+// first run).
+func (s *identitySyncState) scopes(vni uint64, del func(uint64) error) error {
+	if err := del(vni); err != nil {
+		return err
+	}
+	if s.ok && s.vni != vni {
+		return del(s.vni)
+	}
+	return nil
 }
 
 // SetIdentity resets endpoint's policy identity to 'id'.

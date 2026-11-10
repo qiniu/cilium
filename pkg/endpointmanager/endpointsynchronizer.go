@@ -296,7 +296,7 @@ func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoin
 								Labels: cepOwner.GetLabels(),
 								// Carry the native-vpc VNI so that CiliumEndpoint watchers on
 								// other nodes can register the IP in the VNI-scoped ipcache.
-								Annotations: ciliumEndpointVNIAnnotations(e),
+								Annotations: ciliumEndpointVNIAnnotations(e, mdl),
 							},
 							Status: *mdl,
 						}
@@ -402,7 +402,7 @@ func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoin
 					},
 				}
 				// Backfill the native-vpc VNI annotation on pre-existing CEPs.
-				if vniAnnots := ciliumEndpointVNIAnnotations(e); len(vniAnnots) > 0 {
+				if vniAnnots := ciliumEndpointVNIAnnotations(e, mdl); len(vniAnnots) > 0 {
 					vniValue := vniAnnots[ciliumEndpointVNIAnnotation]
 					switch {
 					case localCEP == nil || localCEP.Annotations == nil:
@@ -472,11 +472,38 @@ func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoin
 // ciliumEndpointVNIAnnotations returns the annotations to write on the CEP of
 // the given endpoint to carry its native-vpc VNI. Returns an empty map when the
 // endpoint is not a native-vpc endpoint (VNI == 0).
-func ciliumEndpointVNIAnnotations(e *endpoint.Endpoint) map[string]string {
-	if vni := e.GetVNIID(); vni > 0 {
+//
+// The VNI is taken from the identity published in mdl, so that the CEP never
+// pairs a VNI with the identity of another scope: while a running endpoint
+// changes its scope, VNIID moves before the identity of the new scope is
+// resolved, and other nodes would install (new VNI, IP) -> old identity.
+// Without a VNI label (no identity of a scope yet, e.g. the init identity) the
+// endpoint's VNI is used.
+func ciliumEndpointVNIAnnotations(e *endpoint.Endpoint, mdl *cilium_v2.EndpointStatus) map[string]string {
+	vni := e.GetVNIID()
+	if mdl != nil && mdl.Identity != nil {
+		if v, ok := vniFromIdentityLabels(mdl.Identity.Labels); ok {
+			vni = v
+		}
+	}
+	if vni > 0 {
 		return map[string]string{ciliumEndpointVNIAnnotation: strconv.FormatUint(vni, 10)}
 	}
 	return nil
+}
+
+// vniFromIdentityLabels returns the VNI of the native-vpc identity label in
+// the serialized identity labels, if there is one.
+func vniFromIdentityLabels(identityLabels []string) (uint64, bool) {
+	prefix := pkgLabels.LabelSourceVNI + ":" + pkgLabels.VNIKey + "="
+	for _, l := range identityLabels {
+		if v, ok := strings.CutPrefix(l, prefix); ok {
+			if vni, err := strconv.ParseUint(v, 10, 64); err == nil && vni > 0 {
+				return vni, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // updateCEPUID attempts to update the endpoints UID to be that of localCEP.

@@ -23,6 +23,7 @@ import (
 	cilium_v2a1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/client"
 	"github.com/cilium/cilium/pkg/k8s/resource"
+	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	"github.com/cilium/cilium/pkg/k8s/types"
 	"github.com/cilium/cilium/pkg/metrics"
 	monitoragent "github.com/cilium/cilium/pkg/monitor/agent"
@@ -162,6 +163,10 @@ type EndpointsModify interface {
 
 	// UpdateReferences updates maps the contents of mappings to the specified endpoint.
 	UpdateReferences(ep *endpoint.Endpoint) error
+
+	// MigrateEndpointVNI moves an exposed endpoint of pod to the native-vpc
+	// scope its tunnel_key annotations name and re-keys its references.
+	MigrateEndpointVNI(ep *endpoint.Endpoint, pod *slim_corev1.Pod) bool
 
 	// RemoveEndpoint stops the active handling of events by the specified endpoint,
 	// and prevents the endpoint from being globally accessible via other packages.

@@ -53,6 +53,7 @@ type endpointManager interface {
 	GetHostEndpoint() *endpoint.Endpoint
 	GetEndpointsByPodName(string) []*endpoint.Endpoint
 	UpdatePolicyMaps(context.Context) error
+	MigrateEndpointVNI(*endpoint.Endpoint, *slim_corev1.Pod) bool
 }
 
 type nodeManager interface {

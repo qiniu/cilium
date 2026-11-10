@@ -176,6 +176,16 @@ type Endpoint struct {
 	// information about endpoints. Initialized by manager.expose.
 	kvstoreSyncher *ipcache.IPIdentitySynchronizer
 
+	// identitySyncs holds the written scope of each ipcache identity sync
+	// controller (see identitySyncState). The map is protected by mutex; each
+	// state is used only by its controller's goroutine.
+	identitySyncs map[string]*identitySyncState
+
+	// restoredFromVNI is the scope restore moved the endpoint away from, so
+	// that the first identity sync removes the entry the previous agent wrote
+	// under it. Protected by mutex.
+	restoredFromVNI uint64
+
 	// ID of the endpoint, unique in the scope of the node
 	ID uint16
 
@@ -850,8 +860,12 @@ func (e *Endpoint) GetNodeMAC() mac.MAC {
 
 // GetVNIID returns the VNI of the endpoint for native-vpc mode.
 // Returns 0 if VNI is not set.
+// GetVNIID is safe without the endpoint lock: VNIID is written atomically
+// (under the lock) because a running endpoint can change its scope
+// (MigrateVNIFromPodAnnotation) while unlocked readers such as Hubble and the
+// CiliumEndpoint synchronizer read it.
 func (e *Endpoint) GetVNIID() uint64 {
-	return e.VNIID
+	return atomic.LoadUint64(&e.VNIID)
 }
 
 // MaxVNI is the upper bound for native-vpc VNI (Virtual Network Identifier)
@@ -862,10 +876,9 @@ func (e *Endpoint) GetVNIID() uint64 {
 const MaxVNI = nativevpc.MaxVNI
 
 // legacyVPCLabelSource was used by the initial native-vpc implementation to
-// encode a subnet VNI as "vpc:vpc=<vni>". This was semantically wrong: VPC is
-// an aggregate object and its subnets can carry different VNIs. Remove labels
-// from this source during metadata reconciliation so restored endpoints
-// converge to the VNI-scoped label.
+// encode the then subnet-scoped VNI as "vpc:vpc=<vni>", which did not name a
+// VPC. Remove labels from this source during metadata reconciliation so
+// restored endpoints converge to the VNI-scoped label.
 const legacyVPCLabelSource = "vpc"
 
 // SyncVNIFromPodAnnotation refreshes the endpoint's native-vpc VNI (VNIID)
@@ -888,8 +901,10 @@ const legacyVPCLabelSource = "vpc"
 // where it collides with the same IP in another VPC and gets a foreign
 // identity - the exact failure this mode prevents. Keeping the last known VNI
 // is the fail-closed direction (at worst the endpoint stays isolated), and the
-// condition is reported as an error. A pod that legitimately leaves a VPC is
-// recreated by kube-ovn, which creates a new endpoint.
+// condition is reported as an error. A valid key that names another scope
+// moves the endpoint only before it is exposed (restore,
+// SyncVNIFromPodAnnotationBeforeExpose); an exposed endpoint moves through
+// MigrateVNIFromPodAnnotation.
 //
 // Fallback strategy: if a running pod is ever missing its tunnel_key
 // annotation, restart kube-ovn-controller first (its init flow backfills the
@@ -907,6 +922,22 @@ const legacyVPCLabelSource = "vpc"
 //     CONFIG(native_vpc_vni) value in bpf_lxc and the ipcache listener writes
 //     cilium_ipcache_vni entries.
 func (e *Endpoint) SyncVNIFromPodAnnotation(pod *slim_corev1.Pod) bool {
+	return e.syncVNIFromPodAnnotation(pod, false)
+}
+
+// SyncVNIFromPodAnnotationBeforeExpose is SyncVNIFromPodAnnotation for an
+// endpoint that is not exposed to the endpointmanager yet (restore). It may
+// also move the endpoint between two scopes (N -> M), e.g. after kube-ovn
+// switched the key from the subnet to the VPC while the agent was down: the
+// endpointmanager identifiers are built on expose, and everything else that
+// derives from the VNI is derived afterwards (identity label and identity in
+// metadataResolver, ipcache via the identity sync - which also removes the
+// entry of the previous scope - CiliumEndpoint annotation, datapath config).
+func (e *Endpoint) SyncVNIFromPodAnnotationBeforeExpose(pod *slim_corev1.Pod) bool {
+	return e.syncVNIFromPodAnnotation(pod, true)
+}
+
+func (e *Endpoint) syncVNIFromPodAnnotation(pod *slim_corev1.Pod, beforeExpose bool) bool {
 	var (
 		parsed uint64
 		valid  bool
@@ -966,43 +997,113 @@ func (e *Endpoint) SyncVNIFromPodAnnotation(pod *slim_corev1.Pod) bool {
 	}
 
 	// VNI is an identity/datapath dimension. Once an endpoint is ready, changing
-	// it without coordinating endpointmanager references, ipcache/kvstore,
+	// it here without coordinating endpointmanager references, ipcache/kvstore,
 	// policy regeneration, and the loaded BPF configuration would leave a
-	// split-brain identity chain. Runtime annotation changes therefore do not
-	// hot-update an exposed endpoint; restore/recreation is the convergence
-	// mechanism documented by native-vpc.rst.
+	// split-brain identity chain. A ready endpoint moves only through
+	// MigrateVNIFromPodAnnotation, which the pod watcher calls together with the
+	// endpointmanager reference update.
 	if e.getState() == StateReady {
 		if e.VNIID != newVNI {
-			e.getLogger().Warn("Ignoring native-vpc VNI drift on ready endpoint; recreate or restore the endpoint to converge",
+			e.getLogger().Warn("Ignoring native-vpc VNI drift on ready endpoint in metadata resolution; the pod watcher migrates it",
 				logfields.VNIID, e.VNIID,
 				logfields.K8sPodName, e.GetK8sNamespaceAndPodName())
 		}
 		return false
 	}
 
-	// The same reasoning applies before the endpoint is exposed, with one
-	// exception. Taking a scope for the first time (0 -> N) is the kube-ovn
-	// backfill this re-read exists for: nothing derives from a scope that does
-	// not exist yet. Moving between two scopes is different - the identity
-	// label, the numeric identity, the CiliumEndpoint annotation other nodes
-	// read and the loaded datapath configuration all derive from the VNI, and
-	// none of them is re-derived here. Adopting the new scope would publish the
-	// address in a VPC while the endpoint's identity still says another one, so
-	// the endpoint keeps the scope it was admitted with and a recreation is
-	// what moves a pod between VPCs. A hostNetwork pod is exempt for the same
-	// reason it may reset the scope at all: it is a structural signal, not an
-	// annotation that drifted.
-	if !hostNetwork && e.VNIID != 0 && newVNI != e.VNIID {
-		e.getLogger().Warn("Ignoring native-vpc VNI change on an existing endpoint; recreate the pod to move it between VPCs",
+	// Taking a scope for the first time (0 -> N) is the kube-ovn backfill this
+	// re-read exists for: nothing derives from a scope that does not exist
+	// yet. Moving between two scopes (N -> M) is only done before the endpoint
+	// is exposed (see SyncVNIFromPodAnnotationBeforeExpose). A created endpoint
+	// is exposed before its metadata is resolved, and its endpointmanager
+	// references would keep the old scope; a running endpoint moves through
+	// MigrateVNIFromPodAnnotation, which the pod watcher calls together with
+	// the reference update. A hostNetwork pod is exempt: it is a structural
+	// signal, not an annotation that drifted.
+	if !beforeExpose && !hostNetwork && e.VNIID != 0 && newVNI != e.VNIID {
+		e.getLogger().Warn("Ignoring native-vpc VNI change in metadata resolution; the pod watcher migrates the endpoint",
 			logfields.VNIID, e.VNIID,
 			logfields.K8sPodName, e.GetK8sNamespaceAndPodName())
 		return false
 	}
 	if e.VNIID != newVNI {
-		e.VNIID = newVNI
+		if e.VNIID != 0 && newVNI != 0 {
+			e.getLogger().Info("Native-vpc VNI changed before the endpoint is exposed",
+				logfields.VNIID, newVNI,
+				logfields.OldVNIID, e.VNIID,
+				logfields.K8sPodName, e.GetK8sNamespaceAndPodName())
+			// The identity sync of the new scope removes the entry the
+			// previous agent wrote under this one (kvstore).
+			e.restoredFromVNI = e.VNIID
+			// The restored identity is allocated from these labels before
+			// the metadata resolver runs (RegenerateAfterRestore): the
+			// label must name the new scope already, or the entry of the new
+			// scope is published with the identity of the old one.
+			e.replaceIdentityLabels(labels.LabelSourceVNI, vniIdentityLabels(newVNI))
+		}
+		atomic.StoreUint64(&e.VNIID, newVNI)
 		return true
 	}
 	return false
+}
+
+// vniIdentityLabels returns the native-vpc identity label of a VNI scope.
+func vniIdentityLabels(vni uint64) labels.Labels {
+	return labels.Labels{
+		labels.VNIKey: labels.NewLabel(labels.VNIKey, strconv.FormatUint(vni, 10), labels.LabelSourceVNI),
+	}
+}
+
+// MigrateVNIFromPodAnnotation moves an exposed endpoint to the scope its pod's
+// tunnel_key annotation now names and reports whether it did. It is the
+// runtime counterpart of the restore-time re-read in SyncVNIFromPodAnnotation,
+// used when kube-ovn rewrites the key of a running pod (for example when the
+// key moves from the subnet to the VPC). Only a valid non-zero key different
+// from the current one moves the endpoint: a missing or broken annotation
+// never moves it into the shared plain-IP scope.
+//
+// The VNI and its identity label change together under the endpoint lock, and
+// identity resolution follows (as in ModifyIdentityLabels). The new identity
+// re-runs the ipcache identity sync, which writes the entry of the new scope
+// and removes the one of the old scope, and regenerates the datapath with the new
+// CONFIG(native_vpc_vni); the CiliumEndpoint annotation follows via the
+// synchronizer. The caller must refresh the endpointmanager references,
+// which are keyed by (VNI, IP).
+func (e *Endpoint) MigrateVNIFromPodAnnotation(pod *slim_corev1.Pod) bool {
+	vni, res, _ := nativevpc.VNIFromPodForIP(pod, e.AddressForVNILookup())
+	if res != nativevpc.Valid || vni == e.GetVNIID() {
+		return false
+	}
+	if err := e.lockAlive(); err != nil {
+		return false
+	}
+	oldVNI, moved := e.migrateVNILocked(vni)
+	e.unlock()
+	if !moved {
+		return false
+	}
+
+	e.getLogger().Info("Native-vpc VNI changed on a running endpoint",
+		logfields.VNIID, vni,
+		logfields.OldVNIID, oldVNI,
+		logfields.K8sPodName, e.GetK8sNamespaceAndPodName())
+	e.runIdentityResolver(context.Background(), false, 0)
+	return true
+}
+
+// migrateVNILocked moves the endpoint to a valid non-zero VNI and its identity
+// label, and marks the identity for re-resolution. It must be called with
+// e.mutex held; the caller runs the identity resolver.
+func (e *Endpoint) migrateVNILocked(vni uint64) (oldVNI uint64, moved bool) {
+	oldVNI = e.VNIID
+	if vni == 0 || vni == oldVNI {
+		return oldVNI, false
+	}
+	atomic.StoreUint64(&e.VNIID, vni)
+	e.replaceIdentityLabels(labels.LabelSourceVNI, vniIdentityLabels(vni))
+	e.setState(StateWaitingForIdentity, "Triggering identity resolution due to native-vpc VNI change")
+	e.identityRevision++
+	return oldVNI, true
 }
 
 // StringID returns the endpoint's ID in a string.
@@ -2121,10 +2222,11 @@ func (e *Endpoint) metadataResolver(ctx context.Context,
 	}
 
 	// Inject/refresh the VNI identity label so the identity/policy plane
-	// carries the same subnet/logical-switch VNI scope as the (VNI, IP)
-	// ipcache/datapath key. VNI is deliberately not called VPC here: one
-	// kube-ovn VPC can aggregate several subnets with different VNIs.
-	labelsRemoved := false
+	// carries the same scope as the (VNI, IP) ipcache/datapath key. The VNI is
+	// kube-ovn's tunnel_key: the VPC (logical router) key, so all subnets of a
+	// VPC share one scope (kube-ovn releases before the VPC scope wrote the
+	// subnet key).
+	labelsChanged := false
 	if option.Config.EnableNativeVPC {
 		// Remove the semantically-wrong legacy "vpc:vpc=<vni>" label on
 		// upgrade. Also remove the current VNI label when VNI resets to 0.
@@ -2132,23 +2234,27 @@ func (e *Endpoint) metadataResolver(ctx context.Context,
 		// labels to Disabled and would block a later 0->N recovery).
 		e.unconditionalLock()
 		if e.replaceIdentityLabels(legacyVPCLabelSource, labels.Labels{}) != 0 {
-			labelsRemoved = true
+			labelsChanged = true
 		}
 		if e.GetVNIID() == 0 && e.replaceIdentityLabels(labels.LabelSourceVNI, labels.Labels{}) != 0 {
-			labelsRemoved = true
+			labelsChanged = true
+		}
+		// A changed VNI (restore after N -> M) must replace the label here:
+		// UpdateLabels below filters by the k8s source and never replaces a
+		// label of the vni source.
+		if vni := e.GetVNIID(); vni > 0 && e.replaceIdentityLabels(labels.LabelSourceVNI, vniIdentityLabels(vni)) != 0 {
+			labelsChanged = true
 		}
 		e.unlock()
 
 		if vni := e.GetVNIID(); vni > 0 {
-			controllerBaseLabels.MergeLabels(labels.Labels{
-				labels.VNIKey: labels.NewLabel(labels.VNIKey, strconv.FormatUint(vni, 10), labels.LabelSourceVNI),
-			})
+			controllerBaseLabels.MergeLabels(vniIdentityLabels(vni))
 		}
 	}
 
 	updateTriggered := e.UpdateLabels(ctx, source, controllerBaseLabels, k8sMetadata.InfoLabels, blocking)
-	if labelsRemoved && !updateTriggered {
-		e.Logger(resolveLabels).Info("Removed stale VPC/VNI identity label during VNI reconciliation")
+	if labelsChanged && !updateTriggered {
+		e.Logger(resolveLabels).Info("Updated VPC/VNI identity label during VNI reconciliation")
 		regenTriggered = e.runIdentityResolver(ctx, blocking, 0)
 	}
 	regenTriggered = updateTriggered || regenTriggered

@@ -29,6 +29,7 @@ import (
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/identity"
+	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/ztunnel/pb"
 )
@@ -132,6 +133,10 @@ func (m *MockEndpointManager) RestoreEndpoint(ep *endpoint.Endpoint) error {
 
 func (m *MockEndpointManager) UpdateReferences(ep *endpoint.Endpoint) error {
 	panic("MockEndpointManager.UpdateReferences not implemented")
+}
+
+func (m *MockEndpointManager) MigrateEndpointVNI(ep *endpoint.Endpoint, pod *slim_corev1.Pod) bool {
+	panic("MockEndpointManager.MigrateEndpointVNI not implemented")
 }
 
 func (m *MockEndpointManager) RemoveEndpoint(ep *endpoint.Endpoint, conf endpoint.DeleteConfig) []error {

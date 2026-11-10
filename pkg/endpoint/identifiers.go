@@ -129,8 +129,8 @@ func (e *Endpoint) Identifiers() id.Identifiers {
 		// For native-vpc mode, use VNI-aware identifier to distinguish
 		// endpoints with overlapping IPs in different VPCs.
 		// Mutually exclusive with global IP identifier to avoid index overwrite.
-		if e.VNIID > 0 {
-			refs[id.VNIIPv4Prefix] = id.FormatVNIIP(e.VNIID, e.IPv4)
+		if vni := e.GetVNIID(); vni > 0 {
+			refs[id.VNIIPv4Prefix] = id.FormatVNIIP(vni, e.IPv4)
 		} else {
 			refs[id.IPv4Prefix] = e.IPv4.String()
 		}
@@ -139,8 +139,8 @@ func (e *Endpoint) Identifiers() id.Identifiers {
 	if e.IPv6.IsValid() {
 		// For native-vpc mode, use VNI-aware identifier.
 		// Mutually exclusive with global IP identifier to avoid index overwrite.
-		if e.VNIID > 0 {
-			refs[id.VNIIPv6Prefix] = id.FormatVNIIP(e.VNIID, e.IPv6)
+		if vni := e.GetVNIID(); vni > 0 {
+			refs[id.VNIIPv6Prefix] = id.FormatVNIIP(vni, e.IPv6)
 		} else {
 			refs[id.IPv6Prefix] = e.IPv6.String()
 		}

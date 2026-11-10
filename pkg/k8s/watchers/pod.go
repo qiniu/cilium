@@ -330,6 +330,21 @@ func (k *K8sPodWatcher) updateK8sPodV1(oldK8sPod, newK8sPod *slim_corev1.Pod) er
 		}
 	}
 
+	// Native-vpc: move the pod's endpoints to the scope its tunnel_key names
+	// if kube-ovn rewrote it (e.g. when the key moved from the subnet to the
+	// VPC). Compared on every update rather than when the annotation changes:
+	// a change processed before the endpoint was exposed (CNI ADD in
+	// progress) found nothing to move, and the update in which kubelet
+	// publishes the pod's addresses always follows, because kubelet reads
+	// them from the sandbox after CNI ADD returned. Events are processed in
+	// order here, so an older pod can never undo a newer move. This runs
+	// after updatePodHostData, which still sees the endpoint's current scope
+	// and leaves the ipcache alone; the endpoint's identity sync moves its
+	// own entry.
+	if option.Config.EnableNativeVPC && option.Config.NativeVPCVNIAnnotation != "" {
+		k.migratePodEndpointsVNI(newK8sPod)
+	}
+
 	// Check annotation updates.
 	oldAnno := oldK8sPod.ObjectMeta.Annotations
 	newAnno := newK8sPod.ObjectMeta.Annotations
@@ -598,6 +613,14 @@ func (k *K8sPodWatcher) deleteK8sPodV1(pod *slim_corev1.Pod) error {
 	return err
 }
 
+// migratePodEndpointsVNI moves the running endpoints of pod to the scope its
+// tunnel_key annotations now name (see EndpointManager.MigrateEndpointVNI).
+func (k *K8sPodWatcher) migratePodEndpointsVNI(pod *slim_corev1.Pod) {
+	for _, ep := range k.endpointManager.GetEndpointsByPodName(k8sUtils.GetObjNamespaceName(&pod.ObjectMeta)) {
+		k.endpointManager.MigrateEndpointVNI(ep, pod)
+	}
+}
+
 // podVNI returns the Virtual Network Identifier (VNI) of the pod in
 // native-vpc mode, read from the pod's tunnel_key annotation
 // (option.Config.NativeVPCVNIAnnotation, e.g. ovn.kubernetes.io/tunnel_key).
@@ -658,13 +681,13 @@ func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPo
 	// native-vpc mode. Zero for non-native-vpc pods.
 	vni := podVNI(newPod)
 
-	// A managed endpoint deliberately does not follow annotation drift: its VNI
-	// is an identity and datapath dimension that only a recreation can change
-	// (see Endpoint.SyncVNIFromPodAnnotation). Announcing the annotation's scope
-	// here would publish the address in a VPC that no endpoint is in, so the
-	// endpoint's own scope wins whenever there is one. A zero VNI is never taken
-	// from the endpoint: that direction would merge the address back into the
-	// shared plain-IP scope.
+	// A managed endpoint's VNI is an identity and datapath dimension that only
+	// the endpoint changes, together with everything derived from it
+	// (MigrateEndpointVNI, called after this function, or restore). Announcing
+	// the annotation's scope here would publish the address in a VPC that no
+	// endpoint is in yet, so the endpoint's own scope wins whenever there is
+	// one. A zero VNI is never taken from the endpoint: that direction would
+	// merge the address back into the shared plain-IP scope.
 	//
 	// For a pod scheduled on this node the endpoint is the authority even when
 	// it is not known yet - pod events arrive before endpoint restore completes,
@@ -677,7 +700,7 @@ func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPo
 		// in the VPC of its own OVN subnet. Only the endpoint holding one of
 		// the addresses registered here may define their scope - pod.Status
 		// carries the primary network's addresses only, so an attachment's
-		// endpoint would hand out a VNI its subnet never had.
+		// endpoint would hand out a VNI its VPC never had.
 		switch ep := endpointForPodIPs(k.endpointManager.GetEndpointsByPodName(k8sUtils.GetObjNamespaceName(&newPod.ObjectMeta)), newPodIPs); {
 		case ep != nil:
 			if epVNI := uint32(ep.GetVNIID()); epVNI != 0 {
@@ -689,7 +712,7 @@ func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPo
 	}
 
 	// In native-vpc mode every non-hostNetwork pod must carry a non-zero VNI
-	// (the OVN subnet's tunnel key). A missing/zero VNI is an error: registering
+	// (the tunnel key of its OVN VPC). A missing/zero VNI is an error: registering
 	// nothing under the plain-IP scheme would collide with overlapping VPC
 	// subnets. The endpoint-create path rejects such pods too; this guards
 	// already-running pods that cannot be re-created (e.g. created by an

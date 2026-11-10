@@ -205,6 +205,9 @@ const (
 	// VNIID is the Virtual Network Identifier for an endpoint in native-vpc mode
 	VNIID = "vniID"
 
+	// OldVNIID is the previous native-vpc VNI of an endpoint whose scope changed
+	OldVNIID = "oldVNIID"
+
 	// BPFCompilationTime is the time elapsed to build a BPF endpoint program
 	BPFCompilationTime = "BPFCompilationTime"
 

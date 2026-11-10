@@ -75,9 +75,9 @@ const (
 // tunnelKeyProvidersForIP returns the kube-ovn providers that allocated ip for
 // this pod, sorted for a deterministic result.
 //
-// A pod with multus attachments has one OVN subnet - and therefore one VNI -
-// per interface, so the VNI of an endpoint must be read from the annotation of
-// the provider that allocated *that* interface's address. The interface is
+// A pod with multus attachments has one OVN subnet - and therefore one VPC and
+// one VNI - per interface, so the VNI of an endpoint must be read from the
+// annotation of the provider that allocated *that* interface's address. The interface is
 // identified by its IP rather than by its name on purpose: multus writes the
 // name into the network-status annotation only after every delegate has
 // returned (multus CmdAdd calls SetNetworkStatus after the delegate loop), so

@@ -31,9 +31,9 @@ const (
 	// reservedLabelsPattern is the prefix pattern for all reserved labels.
 	reservedLabelsPattern = labels.LabelSourceReserved + ":.*"
 	// vniLabelsPattern is the mandatory identity prefix for native-vpc: the
-	// VNI identity label is the policy-plane subnet/logical-switch discriminator
-	// and must never be demoted to an information label by --labels whitelist
-	// configuration.
+	// VNI identity label is the policy-plane VPC discriminator (kube-ovn's
+	// tunnel_key is the VPC logical router key) and must never be demoted to
+	// an information label by --labels whitelist configuration.
 	vniLabelsPattern = labels.LabelSourceVNI + ":.*"
 )
 
@@ -341,7 +341,7 @@ func (cfg *labelPrefixCfg) filterLabels(lbls labels.Labels) (identityLabels, inf
 		// always identity labels. In native-vpc mode the VNI identity label is equally
 		// mandatory: demoting it would merge equal-labeled endpoints from
 		// different VNIs into one numeric identity and make fromEndpoints
-		// subnet-blind even though the ipcache/datapath remain VNI-scoped.
+		// VPC-blind even though the ipcache/datapath remain VNI-scoped.
 		if v.Source == labels.LabelSourceReserved ||
 			(option.Config.EnableNativeVPC && v.Source == labels.LabelSourceVNI) {
 			identityLabels[k] = v

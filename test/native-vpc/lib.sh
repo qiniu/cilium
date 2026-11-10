@@ -57,12 +57,34 @@ cilium_pod() {
   kubectl -n "$CILIUM_NS" get pod -l k8s-app=cilium -o name 2>/dev/null | head -1
 }
 
+# cilium_pod_on_node <node> - the agent pod running on that node
+cilium_pod_on_node() {
+  local node=$1
+  kubectl -n "$CILIUM_NS" get pod -l k8s-app=cilium \
+    --field-selector="spec.nodeName=${node}" -o name 2>/dev/null | head -1
+}
+
 # cilium_exec <args...> - run cilium-dbg inside the agent
 cilium_exec() {
   kubectl -n "$CILIUM_NS" exec "$(cilium_pod)" -c cilium-agent -- "$@" 2>/dev/null
 }
 
+# cilium_exec_pod <agent pod> <args...> - run cilium-dbg inside a given agent
+cilium_exec_pod() {
+  local pod=$1
+  shift
+  kubectl -n "$CILIUM_NS" exec "$pod" -c cilium-agent -- "$@" 2>/dev/null
+}
+
 # pod_vni <namespace> <pod> - the kube-ovn tunnel_key annotation
+# kubeovn_annotate <ns> <pod> <annotation args...> - writes as kube-ovn-controller.
+# kube-ovn's ValidatingAdmissionPolicy lets only that service account add,
+# change or remove a tunnel_key on an existing pod.
+kubeovn_annotate() {
+  local ns=$1 pod=$2
+  shift 2
+  kubectl --as="system:serviceaccount:${KUBE_OVN_NS:-kube-system}:ovn" -n "$ns" annotate pod "$pod" "$@" --overwrite
+}
 pod_vni() {
   kubectl -n "$1" get pod "$2" -o jsonpath='{.metadata.annotations.ovn\.kubernetes\.io/tunnel_key}' 2>/dev/null
 }

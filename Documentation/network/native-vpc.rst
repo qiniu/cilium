@@ -11,12 +11,19 @@ Native VPC Mode (kube-ovn)
 **************************
 
 Cilium can run in native-vpc mode on top of a kube-ovn underlay that provides
-multiple VPCs and overlapping subnets. Cilium deliberately does **not** model
-the kube-ovn VPC object: a VPC is an aggregate that can contain several
-subnets, while each OVN logical switch/subnet has its own tunnel_key/VNI
-(Virtual Network Identifier). The data-plane key is therefore (VNI, IP), not
-(VPC, IP) and not bare IP. Every control/cache/forwarding/observability
-consumer described below uses that VNI scope.
+multiple VPCs and overlapping subnets. The scope of a pod is its VNI (Virtual
+Network Identifier): the tunnel key kube-ovn writes into the pod's
+``tunnel_key`` annotation, which is the tunnel key of the pod's **VPC** (the
+OVN logical router of the VPC). A VPC is the IP uniqueness boundary - subnets
+of one VPC never overlap, different VPCs may - so the data-plane key is
+(VNI, IP), i.e. (VPC, IP), never bare IP. All subnets of a VPC share one
+scope, so a peer in any subnet of the same VPC is resolved with a single
+lookup. Every control/cache/forwarding/observability consumer described below
+uses that VNI scope.
+
+kube-ovn releases before the VPC scope wrote the subnet (logical switch) key
+instead, which split one VPC into one scope per subnet; see
+`Scope changes`_ for moving running pods to the VPC key.
 
 This document describes the tunnel_key contract between kube-ovn and Cilium,
 and the recovery procedure when it is temporarily violated.
@@ -24,15 +31,23 @@ and the recovery procedure when it is temporarily violated.
 The tunnel_key annotation
 =========================
 
-kube-ovn writes the VNI of a pod's OVN subnet as the pod annotation
-``ovn.kubernetes.io/tunnel_key`` (the annotation key is configurable on the
-Cilium side via ``--native-vpc-vni-annotation``). Cilium reads this
-annotation to place the pod in its logical-switch/VNI scope:
+kube-ovn writes the tunnel key of a pod's VPC (``Vpc.status.tunnelKey``) as
+the pod annotation ``ovn.kubernetes.io/tunnel_key`` (the annotation key is
+configurable on the Cilium side via ``--native-vpc-vni-annotation``). Cilium
+reads this annotation to place the pod in its VPC/VNI scope:
 
 * endpoint creation reads it into the endpoint's ``VNIID``;
 * the pod watcher reads it to register VNI-scoped ipcache entries;
 * the datapath loads it into ``bpf_lxc`` as the per-endpoint
-  ``CONFIG(native_vpc_vni)`` value (one compiled template serves all VNIs).
+  ``CONFIG(native_vpc_vni)`` value (one compiled template serves all VNIs);
+* the pod watcher moves a running endpoint when the key changes (see
+  `Scope changes`_).
+
+kube-ovn protects the annotation with the ValidatingAdmissionPolicy
+``kube-ovn-tunnel-key-annotation``: only kube-ovn-controller may add, change
+or remove it on an existing pod. Without that protection a user who can update
+pods could move a pod into another VPC's scope, so it is a prerequisite for
+following key changes at runtime.
 
 kube-ovn side guarantees
 ========================
@@ -42,26 +57,27 @@ kube-ovn guarantees that every non-hostNetwork pod on an OVN subnet carries a
 network is configured (CNI ADD):
 
 1. **Normal pod creation flow.** The kube-ovn controller refuses to allocate
-   an IP (it requeues without persisting anything) while the subnet's tunnel
-   key has not been synced from OVN SB (``status.tunnelKey == 0``), and writes
+   an IP (it requeues without persisting anything) while the tunnel key of the
+   subnet's VPC has not been synced from OVN SB
+   (``Vpc.status.tunnelKey == 0``), and writes
    the ``tunnel_key`` annotation in the same atomic patch as
    ``ovn.kubernetes.io/allocated=true``. The kube-ovn CNI server blocks until
    the pod is allocated, and Cilium (chained after kube-ovn, the primary CNI)
    only runs once kube-ovn's CNI ADD has succeeded, so Cilium always observes
    the annotation.
 
-2. **kube-ovn-controller restart flow.** Pods created before the subnet
-   tunnel key was synced (or before this behavior existed) may keep a missing
-   annotation forever, because the allocation path never re-patches
+2. **kube-ovn-controller restart flow.** Pods created before the VPC tunnel
+   key was synced (or before this behavior existed) may keep a missing or a
+   stale annotation, because the allocation path never re-patches
    already-allocated pods. On startup the kube-ovn controller's init flow
-   enqueues such pods into a dedicated repair queue
-   (``enqueuePodTunnelKeyRepair``) and the repair worker patches the
-   annotation from ``subnet.Status.TunnelKey``, retrying until the key is
-   available.
+   enqueues such pods into a dedicated repair queue and the repair worker
+   patches the annotation from the VPC's ``Status.TunnelKey``, retrying until
+   the key is available. This is also how an upgrade from a subnet-scoped
+   kube-ovn rewrites every pod from its subnet key to its VPC key.
 
 A zero or missing annotation therefore only occurs for pods that are not in
-an OVN logical-switch/VNI scope (hostNetwork pods, non-OVN/vlan subnets) or
-for legacy pods before the backfill above has run.
+an OVN VPC scope (hostNetwork pods, non-OVN/vlan subnets) or for legacy pods
+before the backfill above has run.
 
 Cilium side decision table
 ==========================
@@ -96,6 +112,57 @@ the native scheme on all planes (identity, local ipcache registration and
 ``CONFIG(native_vpc_vni)`` datapath value). The resolver also removes the
 legacy, semantically-wrong ``vpc:vpc=<vni>`` label during upgrade.
 
+Scope changes
+=============
+
+kube-ovn changes the key of a running pod when the scope itself moves, most
+notably on the upgrade from subnet keys to VPC keys, where every OVN pod moves
+from its subnet key N to its VPC key M. Cilium follows such a change without
+recreating the pod:
+
+* **At runtime**, the pod watcher compares the ``tunnel_key`` annotation with
+  the endpoint's scope on every update of the pod and moves each endpoint that
+  differs: the endpoint's ``VNIID`` and its
+  ``vni:io-cilium-native-vpc-vni`` identity label change together, the
+  endpoint manager re-keys its (VNI, IP) references, and identity resolution
+  follows. The new identity re-runs the ipcache identity sync, whose run
+  removes the (N, IP) entry it wrote before and writes (M, IP), and the
+  regeneration reloads ``bpf_lxc`` with ``CONFIG(native_vpc_vni) = M``. The
+  CiliumEndpoint publishes the VNI of the identity it publishes (taken from
+  the identity's VNI label), so other nodes move the entry together with the
+  new identity and never see the new VNI paired with the old identity.
+  One sync per address family does this in its own goroutine, in order, so a
+  quick move away and back (N -> M -> N) cannot remove the entry it writes.
+  Comparing on every update rather than on annotation changes also covers an
+  endpoint that is being created: a change seen before the endpoint was
+  exposed found nothing to move, and the update in which kubelet publishes the
+  pod's addresses always follows, because kubelet reads them from the sandbox
+  after CNI ADD returned.
+* **On restore** (an agent that was down while the key changed), the endpoint
+  takes the new key and its identity label before it is exposed, so the
+  restored identity and everything after it are derived in the new scope. With
+  a kvstore, the first identity sync also removes the key the previous agent
+  wrote under the old scope instead of waiting for its lease to expire. Metadata resolution itself never
+  moves an endpoint. A key that changes in the instant between restore's
+  re-read and exposing the endpoint is followed on the pod's next update or
+  agent restart.
+
+Only a valid non-zero key moves an endpoint; a missing or broken annotation
+never moves it into the shared plain scope. Endpoints converge within seconds
+of kube-ovn rewriting their annotations. Until both peers of a connection have
+moved, a lookup of one in the other's scope misses and endpoint-selecting
+policy denies the traffic, so the rewrite of a VPC's pods should complete in
+one go (kube-ovn rewrites all pods right after it syncs the VPC key).
+
+Upgrade order: first enforce kube-ovn's ``kube-ovn-tunnel-key-annotation``
+policy, because this release trusts the annotation of a running pod (on
+Kubernetes < 1.30, which cannot install it, only if no untrusted user can
+update pods); then upgrade Cilium; then upgrade kube-ovn to the release that
+writes VPC keys. An older agent ignores the change on a running endpoint and
+refuses N -> M on restore, so its endpoints stay in the subnet scope while new
+pods get the VPC scope, and traffic between them is denied until the old pods
+are recreated.
+
 Recovery procedure
 ==================
 
@@ -113,14 +180,14 @@ fallback sequence:
      annotation before the endpoint is exposed to the endpoint manager, and
      the ``vni:io-cilium-native-vpc-vni=<vni>`` identity label is
      re-injected by the metadata
-     resolver, so identities are separated per logical switch/VNI again;
+     resolver, so identities are separated per VPC/VNI again;
    * **cache plane**: the local ipcache registration (identity sync) and the
      pod watcher's VNI-scoped entries are re-created from the annotation;
    * **forwarding plane**: endpoint reload rewrites the per-endpoint
      ``CONFIG(native_vpc_vni)`` load-time value in ``bpf_lxc`` (without
      recompiling a per-VNI template), and the ipcache listener repopulates the VNI-scoped
      ipcache map (``cilium_ipcache_vni``), keyed by (VNI, IP) so that
-     overlapping IPs from different logical switches/VPCs coexist.
+     overlapping IPs from different VPCs coexist.
 
 Observability: the (VNI, IP) chain in Hubble
 ============================================
@@ -133,8 +200,9 @@ Hubble performs to enrich a flow is scoped by (VNI, IP). The chain is:
    emitted it. The parser resolves that endpoint by id and takes its
    ``VNIID``. This is exactly the scope the datapath used: ``bpf_lxc`` resolves
    the peer of an endpoint in ``cilium_ipcache_vni`` with that endpoint's own
-   ``CONFIG(native_vpc_vni)``. For encapsulated packets that Cilium itself
-   decodes, the overlay VNI of the tunnel header takes precedence.
+   ``CONFIG(native_vpc_vni)``. The VNI of a decoded overlay header is not
+   used: OVN puts the logical switch's own key on the wire, which is not the
+   VPC scope.
    Socket-level events (``TraceSock``) derive the same scope from their cgroup
    id through the pod's endpoint, and debug events from their endpoint id.
    For L7 events the VNI is recorded on the proxy access-log record
@@ -182,10 +250,10 @@ Native-vpc mode injects a
 ``vni:io-cilium-native-vpc-vni=<vni>`` identity label (source ``vni``, key
 ``io-cilium-native-vpc-vni``) into every OVN endpoint's identity. The
 Cilium-owned key avoids collision with a user Kubernetes label named ``vni``.
-This is an internal data-plane
-scope, not a kube-ovn VPC identifier: two subnets in the same VPC normally
-have different VNIs and therefore different Cilium identities even when every
-other label and IP are equal.
+The value is the VPC's tunnel key: all subnets of one VPC share it, so
+endpoints of different subnets in one VPC with otherwise equal labels share
+one identity, and a security group selecting them by label works across the
+subnets of the VPC. Endpoints of different VPCs never share an identity.
 
 Generic CNP selectors keep their normal label semantics. For example,
 ``fromEndpoints: {sg: web}`` selects every identity carrying ``sg=web``;
@@ -194,20 +262,18 @@ current deployment requirement because kube-ovn does not provide direct
 inter-VPC reachability; traffic between VPCs goes through an explicit
 interconnection/gateway path and is not a direct (VNI, IP) peer lookup.
 
-If a platform later needs SG policy scoped to one subnet/logical switch, its
-SG-to-CNP translator can explicitly select
-``io-cilium-native-vpc-vni: "36"``. If one SG spans a
-whole kube-ovn VPC with several subnets, the selector must include the set of
-that VPC's subnet VNIs (for example a ``matchExpressions`` ``In`` list), not a
-single value mislabeled as a VPC id. Future inter-VPC policy must explicitly
-model the interconnection gateway and both endpoint-side VNI scopes.
+If a platform needs SG policy scoped to one VPC, its SG-to-CNP translator can
+explicitly select ``io-cilium-native-vpc-vni: "<vpc tunnel key>"``. A subnet
+is not a policy scope of its own; select its pods by their labels instead.
+Future inter-VPC policy must explicitly model the interconnection gateway and
+both endpoint-side VNI scopes.
 
 CIDR/FQDN boundary
 ------------------
 
 ``fromCIDR`` / ``toCIDR`` and the FQDN identity-to-prefix table use plain IP
 prefixes rather than (VNI, IP) keys. They cannot precisely distinguish the
-same prefix/IP on two logical switches. This is not required by the current
+same prefix/IP in two VPCs. This is not required by the current
 feature (there is no direct inter-VPC communication); endpoint/SG membership
 inside the cluster should use VNI-distinct endpoint identities. If direct
 cross-VPC or VNI-aware CIDR/FQDN policy is added later, the CIDR/FQDN identity
@@ -290,7 +356,8 @@ Readers (lookup)
 +---------------------------------------+-----------+-------------------------------------------+
 | datapath bpf_overlay                  | deploy    | plain lookups; only if Cilium tunneling   |
 |                                       |           | is enabled (native-vpc uses kube-ovn      |
-|                                       |           | Geneve, whose VNI scopes a logical switch |
+|                                       |           | Geneve, whose wire VNI is the logical     |
+|                                       |           | switch key, not the VPC scope)            |
 +---------------------------------------+-----------+-------------------------------------------+
 | policy computation (CIDR shadow)      | yes       | shadow checks use ``KeyWithVNI``          |
 +---------------------------------------+-----------+-------------------------------------------+
@@ -736,9 +803,11 @@ annotation could not be read.
 *Downstream* (control -> cache/forwarding/observability): a VNI change is
 propagated by replacing state, never by mutating it in place:
 
-* the identity-sync controller captures the VNI at registration time, so the
-  old controller's ``StopFunc`` deletes exactly the key its ``DoFunc`` wrote
-  (``<ip>@vni:N``) instead of leaking it;
+* the identity-sync controller records the VNI whose key it wrote: when its
+  parameters change to another VNI, its next run deletes that key
+  (``<ip>@vni:N``) before writing the new one, and its ``StopFunc`` deletes
+  the key it wrote last, instead of leaking it. With a kvstore, a failed
+  deletion holds the new key back until a retry succeeds;
 * the endpoint-manager references are replaced from a snapshot of the
   previously registered identifiers;
 * the CiliumEndpoint annotation carries the VNI to the cache plane of the other
@@ -1343,21 +1412,18 @@ Repair
 ~~~~~~
 
 A missing annotation is repaired by restarting kube-ovn-controller (which
-backfills it) and then Cilium; the VNI is re-read on restore. A VNI change on a
-running endpoint is deliberately not hot-applied, and an annotation that
-disappears never downgrades a running endpoint to the plain scheme.
+backfills it) and then Cilium; the VNI is re-read on restore. A changed key
+moves the endpoint (see `Scope changes`_), and an annotation that disappears or
+is broken never downgrades an endpoint to the plain scheme.
 
-The re-read on restore takes a scope, it does not swap one. An endpoint that
-has no VNI yet adopts the annotation's - that is the backfill the sequence
-above exists for. An endpoint that already has one keeps it even if the
-annotation now names another VPC, and says so in the log. The asymmetry is not
-caution for its own sake: the VNI identity label, the numeric identity, the
-CiliumEndpoint annotation other nodes read and the loaded datapath
-configuration all derive from the VNI, and the re-read derives none of them
-again. Adopting a different scope there publishes the address in a VPC while
-the endpoint's identity still names the previous one, so the address ends up in
-both. Moving a pod between VPCs is therefore a recreation, which is also the
-only form in which every derived value is rebuilt.
+Only two paths swap a scope, because only they rebuild everything that derives
+from the VNI - the endpointmanager references, the VNI identity label and the
+numeric identity, the ipcache entry, the CiliumEndpoint annotation other nodes
+read and the loaded datapath configuration: the pod watcher through
+``MigrateEndpointVNI``, and restore before the endpoint is exposed. The
+metadata resolver also re-reads the annotation, but it only takes a first scope
+(the backfill above): the endpoint is exposed by then, and swapping its scope
+there would leave its endpointmanager references in the old one.
 
 The pod watcher follows the same rule from the other side. Its entries are
 placeholders that carry ``reserved:unmanaged`` until the endpoint resolves an
