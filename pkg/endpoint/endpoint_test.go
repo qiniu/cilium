@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cilium/hive/hivetest"
+	"github.com/cilium/statedb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
@@ -1489,8 +1490,8 @@ func TestIdentitySyncStateMoveTo(t *testing.T) {
 
 	// A run removes the previous scope before it writes (DoFunc), so a
 	// failed removal writes nothing: with a removal failing (9 -> 4) and
-	// then succeeding for new params (9 -> 7), nothing is left after the
-	// controller stops.
+	// then succeeding for new params (9 -> 7), only the recorded scope has
+	// an entry, which the StopFunc removes.
 	store := map[uint64]bool{9: true}
 	run := func(s *identitySyncState, vni uint64, fail bool) {
 		if s.moveTo(vni, func(v uint64) error {
@@ -1506,8 +1507,8 @@ func TestIdentitySyncStateMoveTo(t *testing.T) {
 	s = &identitySyncState{vni: 9, ok: true}
 	run(s, 4, true)
 	run(s, 7, false)
-	require.NoError(t, s.scopes(7, func(v uint64) error { delete(store, v); return nil }))
-	require.Empty(t, store)
+	require.Equal(t, map[uint64]bool{7: true}, store)
+	require.Equal(t, identitySyncState{vni: 7, ok: true}, *s)
 
 	// Restore moved the endpoint (5 -> 4): the first run removes the entry
 	// the previous agent wrote, unless the endpoint is back in that scope.
@@ -1517,25 +1518,6 @@ func TestIdentitySyncStateMoveTo(t *testing.T) {
 	deleted = nil
 	require.NoError(t, (&identitySyncState{vni: 5, ok: true}).moveTo(5, del))
 	require.Empty(t, deleted)
-}
-
-// The controller stops with the params of its last run, whose scope is the
-// written one unless that run failed to remove the previous scope or did not
-// run yet after restore moved the endpoint: both are removed then.
-func TestIdentitySyncStateScopes(t *testing.T) {
-	var deleted []uint64
-	del := func(v uint64) error { deleted = append(deleted, v); return nil }
-
-	require.NoError(t, (&identitySyncState{vni: 4, ok: true}).scopes(4, del))
-	require.Equal(t, []uint64{4}, deleted)
-
-	deleted = nil
-	require.NoError(t, (&identitySyncState{}).scopes(4, del))
-	require.Equal(t, []uint64{4}, deleted, "a restored endpoint that never ran removes the previous agent's entry")
-
-	deleted = nil
-	require.NoError(t, (&identitySyncState{vni: 5, ok: true}).scopes(4, del))
-	require.Equal(t, []uint64{4, 5}, deleted, "the written scope is removed too")
 }
 
 // newIdentitySyncTestEndpoint returns a ready endpoint at 10.98.0.2 in scope
@@ -1589,6 +1571,10 @@ func TestIdentitySyncRemovesRestoredScope(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond)
 	require.Equal(t, []string{"-" + ipcache.KeyWithVNI("10.98.0.2", 9), "+" + ipcache.KeyWithVNI("10.98.0.2", 4)}, live.Ops(),
 		"the old entry is removed before the new one is written")
+
+	// Deleting the endpoint removes the entry it wrote.
+	ep.controllers.RemoveAllAndWait()
+	require.Empty(t, live.Keys())
 }
 
 // A run of params registered before an identity change (the controller took
@@ -1619,4 +1605,65 @@ func TestIdentitySyncPairsVNIWithItsIdentity(t *testing.T) {
 	id, ok := live.Identity(key)
 	require.True(t, ok)
 	require.Equal(t, identity.NumericIdentity(1000), id, "(9, IP) keeps the identity of scope 9")
+}
+
+// An endpoint that restore moved (9 -> 4) and that is deleted before its
+// identity sync wrote anything still has the entry the previous agent wrote
+// under 9: the StopFunc removes it together with the entry of 4.
+func TestIdentitySyncStopRemovesWrittenScope(t *testing.T) {
+	live := testipcache.NewLiveIPCache(ipcache.KeyWithVNI("10.98.0.2", 9))
+	ep := newIdentitySyncTestEndpoint(t, live, 4)
+	ep.restoredFromVNI = 9
+	ep.SecurityIdentity = nil // the first run returns before it writes
+
+	ep.unconditionalLock()
+	ep.runIPIdentitySync(ep.IPv4)
+	ep.unlock()
+	ep.controllers.RemoveAllAndWait()
+
+	require.Empty(t, live.Keys())
+	require.Contains(t, live.Ops(), "-"+ipcache.KeyWithVNI("10.98.0.2", 9))
+}
+
+// failingDeleteClient is a kvstore whose removals of keys ending in failSuffix
+// fail; it records every key it was asked to remove.
+type failingDeleteClient struct {
+	kvstore.Client
+	failSuffix string
+	mu         lock.Mutex
+	deleted    []string
+}
+
+func (c *failingDeleteClient) Delete(_ context.Context, key string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deleted = append(c.deleted, key)
+	if strings.HasSuffix(key, c.failSuffix) {
+		return errors.New("kvstore down")
+	}
+	return nil
+}
+
+// The StopFunc runs once: a failed removal of the current scope must not
+// skip the removal of the written one.
+func TestIdentitySyncStopAttemptsBothScopes(t *testing.T) {
+	ep := newIdentitySyncTestEndpoint(t, testipcache.NewLiveIPCache(), 4)
+	ep.restoredFromVNI = 9
+	ep.SecurityIdentity = nil // the first run returns before it writes
+	client := &failingDeleteClient{
+		Client:     kvstore.NewInMemoryClient(statedb.New(), "default"),
+		failSuffix: ipcache.KeyWithVNI("10.98.0.2", 4),
+	}
+	ep.kvstoreSyncher = ipcache.NewIPIdentitySynchronizer(hivetest.Logger(t), client, nil)
+
+	ep.unconditionalLock()
+	ep.runIPIdentitySync(ep.IPv4)
+	ep.unlock()
+	ep.controllers.RemoveAllAndWait()
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	require.Len(t, client.deleted, 2)
+	require.True(t, strings.HasSuffix(client.deleted[1], ipcache.KeyWithVNI("10.98.0.2", 9)),
+		"the written scope is removed although the current one failed")
 }

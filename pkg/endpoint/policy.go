@@ -1122,12 +1122,22 @@ func (e *Endpoint) runIPIdentitySync(endpointIP netip.Addr) {
 				// pod can be given it, and that pod's endpoint registers the
 				// same (VNI, IP). Name the pod this entry belongs to so the
 				// removal cannot take the new owner's entry with it.
-				return written.scopes(vni, func(v uint64) error {
-					if err := e.kvstoreSyncher.Delete(ctx, ip, v, e.K8sNamespace, e.K8sPodName, e.ID); err != nil {
-						return fmt.Errorf("unable to delete endpoint IP '%s' from ipcache: %w", ip, err)
-					}
-					return nil
-				})
+				del := func(v uint64) error {
+					return e.kvstoreSyncher.Delete(ctx, ip, v, e.K8sNamespace, e.K8sPodName, e.ID)
+				}
+				// The params the controller stops with are those of its last
+				// run, whose scope is the written one, unless that run failed to
+				// remove the previous scope or restore moved the endpoint before
+				// the first run: remove the written scope too. StopFunc runs
+				// once, so both removals are attempted.
+				err := del(vni)
+				if written.ok && written.vni != vni {
+					err = errors.Join(err, del(written.vni))
+				}
+				if err != nil {
+					return fmt.Errorf("unable to delete endpoint IP '%s' from ipcache: %w", ip, err)
+				}
+				return nil
 			},
 			RunInterval: 5 * time.Minute,
 			Context:     e.aliveCtx,
@@ -1158,20 +1168,6 @@ func (s *identitySyncState) moveTo(vni uint64, del func(uint64) error) error {
 		}
 	}
 	s.vni, s.ok = vni, true
-	return nil
-}
-
-// scopes removes the entry of vni - the scope of the params the controller
-// stops with, which are those of its last run - and of the written scope if
-// that differs (its removal failed, or restore moved the endpoint before the
-// first run).
-func (s *identitySyncState) scopes(vni uint64, del func(uint64) error) error {
-	if err := del(vni); err != nil {
-		return err
-	}
-	if s.ok && s.vni != vni {
-		return del(s.vni)
-	}
 	return nil
 }
 
