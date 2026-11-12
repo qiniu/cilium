@@ -7,8 +7,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +46,7 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/api"
+	"github.com/cilium/cilium/pkg/source"
 	"github.com/cilium/cilium/pkg/testutils"
 	testidentity "github.com/cilium/cilium/pkg/testutils/identity"
 	testipcache "github.com/cilium/cilium/pkg/testutils/ipcache"
@@ -1520,9 +1523,65 @@ func TestIdentitySyncStateMoveTo(t *testing.T) {
 	require.Empty(t, deleted)
 }
 
+// liveIPCache is the local ipcache of an agent without kvstore, reduced to the
+// keys currently present, the identity each maps to, and the order of the
+// writes ("+key") and removals ("-key") (ipcache.LocalIPCache).
+type liveIPCache struct {
+	mu   lock.Mutex
+	keys map[string]identity.NumericIdentity
+	ops  []string
+}
+
+// newLiveIPCache returns a liveIPCache holding keys.
+func newLiveIPCache(keys ...string) *liveIPCache {
+	l := &liveIPCache{keys: map[string]identity.NumericIdentity{}}
+	for _, k := range keys {
+		l.keys[k] = identity.IdentityUnknown
+	}
+	return l
+}
+
+func (l *liveIPCache) Upsert(ip string, _ net.IP, _ uint8, _ *ipcache.K8sMetadata, id ipcache.Identity) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.keys[ip] = id.ID
+	l.ops = append(l.ops, "+"+ip)
+	return false, nil
+}
+
+func (l *liveIPCache) DeleteOnMetadataMatch(ip string, _ source.Source, _, _ string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.keys, ip)
+	l.ops = append(l.ops, "-"+ip)
+	return false
+}
+
+// Keys returns the present keys, sorted.
+func (l *liveIPCache) Keys() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Sorted(maps.Keys(l.keys))
+}
+
+// Identity returns the identity key maps to.
+func (l *liveIPCache) Identity(key string) (identity.NumericIdentity, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	id, ok := l.keys[key]
+	return id, ok
+}
+
+// Ops returns the writes and removals in order.
+func (l *liveIPCache) Ops() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.ops)
+}
+
 // newIdentitySyncTestEndpoint returns a ready endpoint at 10.98.0.2 in scope
 // vni with identity 1000, whose identity sync writes to live.
-func newIdentitySyncTestEndpoint(t *testing.T, live *testipcache.LiveIPCache, vni uint64) *Endpoint {
+func newIdentitySyncTestEndpoint(t *testing.T, live *liveIPCache, vni uint64) *Endpoint {
 	node.SetTestLocalNodeStore()
 	t.Cleanup(node.UnsetTestLocalNodeStore)
 	node.UpdateLocalNodeInTest(func(n *node.LocalNode) {
@@ -1558,7 +1617,7 @@ func newIdentitySyncTestEndpoint(t *testing.T, live *testipcache.LiveIPCache, vn
 // entry of the old scope, which the previous agent wrote, and then writes the
 // new one: only the recorded scope can have an entry.
 func TestIdentitySyncRemovesRestoredScope(t *testing.T) {
-	live := testipcache.NewLiveIPCache(ipcache.KeyWithVNI("10.98.0.2", 9))
+	live := newLiveIPCache(ipcache.KeyWithVNI("10.98.0.2", 9))
 	ep := newIdentitySyncTestEndpoint(t, live, 4)
 	ep.restoredFromVNI = 9
 
@@ -1581,7 +1640,7 @@ func TestIdentitySyncRemovesRestoredScope(t *testing.T) {
 // them before SetIdentity installed the identity of a new scope) writes the
 // VNI and the identity of those params, never its VNI with the new identity.
 func TestIdentitySyncPairsVNIWithItsIdentity(t *testing.T) {
-	live := testipcache.NewLiveIPCache()
+	live := newLiveIPCache()
 	ep := newIdentitySyncTestEndpoint(t, live, 9)
 	key := ipcache.KeyWithVNI("10.98.0.2", 9)
 
@@ -1611,7 +1670,7 @@ func TestIdentitySyncPairsVNIWithItsIdentity(t *testing.T) {
 // identity sync wrote anything still has the entry the previous agent wrote
 // under 9: the StopFunc removes it together with the entry of 4.
 func TestIdentitySyncStopRemovesWrittenScope(t *testing.T) {
-	live := testipcache.NewLiveIPCache(ipcache.KeyWithVNI("10.98.0.2", 9))
+	live := newLiveIPCache(ipcache.KeyWithVNI("10.98.0.2", 9))
 	ep := newIdentitySyncTestEndpoint(t, live, 4)
 	ep.restoredFromVNI = 9
 	ep.SecurityIdentity = nil // the first run returns before it writes
@@ -1647,7 +1706,7 @@ func (c *failingDeleteClient) Delete(_ context.Context, key string) error {
 // The StopFunc runs once: a failed removal of the current scope must not
 // skip the removal of the written one.
 func TestIdentitySyncStopAttemptsBothScopes(t *testing.T) {
-	ep := newIdentitySyncTestEndpoint(t, testipcache.NewLiveIPCache(), 4)
+	ep := newIdentitySyncTestEndpoint(t, newLiveIPCache(), 4)
 	ep.restoredFromVNI = 9
 	ep.SecurityIdentity = nil // the first run returns before it writes
 	client := &failingDeleteClient{
