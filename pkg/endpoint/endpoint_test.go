@@ -29,6 +29,7 @@ import (
 	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/eventqueue"
+	"github.com/cilium/cilium/pkg/hive"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/identity/cache"
 	"github.com/cilium/cilium/pkg/identity/identitymanager"
@@ -1725,4 +1726,67 @@ func TestIdentitySyncStopAttemptsBothScopes(t *testing.T) {
 	require.Len(t, client.deleted, 2)
 	require.True(t, strings.HasSuffix(client.deleted[1], ipcache.KeyWithVNI("10.98.0.2", 9)),
 		"the written scope is removed although the current one failed")
+}
+
+// gateFence holds restoreIdentity in its unlocked window until released.
+type gateFence struct {
+	entered, release chan struct{}
+}
+
+func (f gateFence) Add(string, hive.WaitFunc) {}
+
+func (f gateFence) Wait(ctx context.Context) error {
+	close(f.entered)
+	select {
+	case <-f.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// The endpoint is exposed while restore allocates its identity, so the pod
+// watcher can move it to another scope meanwhile (9 -> 4). Restore must then
+// leave the identity to the resolution the move started, instead of
+// installing the identity - and the labels - of the scope it read.
+func TestRestoreIdentityYieldsToConcurrentScopeChange(t *testing.T) {
+	prevV4, prevV6 := option.Config.EnableIPv4, option.Config.EnableIPv6
+	option.Config.EnableIPv4, option.Config.EnableIPv6 = false, false // no identity sync
+	t.Cleanup(func() { option.Config.EnableIPv4, option.Config.EnableIPv6 = prevV4, prevV6 })
+
+	logger := hivetest.Logger(t)
+	require.NoError(t, labelsfilter.ParseLabelPrefixCfg(logger, nil, nil, ""))
+	restored := identity.NewIdentity(1000, vniIdentityLabels(9))
+	ep := &Endpoint{
+		ID:               1,
+		VNIID:            9,
+		SecurityIdentity: restored,
+		labels:           labels.NewOpLabels(),
+		state:            StateRestoring,
+		status:           NewEndpointStatus(),
+		controllers:      controller.NewManager(),
+		aliveCtx:         t.Context(),
+		allocator:        testidentity.NewMockIdentityAllocator(nil),
+		identityManager:  identitymanager.NewIDManager(logger),
+	}
+	ep.logger.Store(logger)
+	ep.labels.OrchestrationIdentity = vniIdentityLabels(9)
+	t.Cleanup(ep.controllers.RemoveAllAndWait)
+
+	fence := gateFence{entered: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() { done <- ep.restoreIdentity(&Regenerator{fence: fence, logger: logger}) }()
+
+	<-fence.entered
+	ep.unconditionalLock()
+	_, moved := ep.migrateVNILocked(4)
+	ep.unlock()
+	require.True(t, moved)
+	close(fence.release)
+	require.NoError(t, <-done)
+
+	ep.unconditionalLock()
+	defer ep.unlock()
+	require.Same(t, restored, ep.SecurityIdentity, "the identity allocated for scope 9 is not installed")
+	require.Equal(t, "4", ep.labels.OrchestrationIdentity[labels.VNIKey].Value, "the labels of scope 9 are not restored")
 }
