@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/cilium/hive/cell"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/cilium/cilium/api/v1/models"
 	endpointapi "github.com/cilium/cilium/api/v1/server/restapi/endpoint"
@@ -25,6 +26,7 @@ import (
 	endpointid "github.com/cilium/cilium/pkg/endpoint/id"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/identity"
+	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -747,6 +749,31 @@ func bareIPOfVNIIdentifier(prefix endpointid.PrefixType, value string) (string, 
 		return endpointid.SplitVNIIP(value)
 	}
 	return "", false
+}
+
+// MigrateEndpointVNI moves an exposed endpoint to the native-vpc scope the
+// tunnel_key annotations of pod name (see Endpoint.MigrateVNIFromPodAnnotation)
+// and re-keys its references, which are indexed by (VNI, IP). It reports
+// whether the endpoint moved. Only the endpoints of this pod incarnation move:
+// a pod recreated under the same name can coexist with the endpoint of its
+// previous one.
+func (mgr *endpointManager) MigrateEndpointVNI(ep *endpoint.Endpoint, pod *slim_corev1.Pod) bool {
+	// A static pod's endpoint carries the UID kubelet gave the pod; its API
+	// object is a mirror pod with another UID that names the static one in
+	// its mirror annotation.
+	if uid := ep.GetK8sUID(); uid != "" && uid != string(pod.UID) && pod.Annotations[corev1.MirrorPodAnnotationKey] != uid {
+		return false
+	}
+	if !ep.MigrateVNIFromPodAnnotation(pod) {
+		return false
+	}
+	if err := mgr.UpdateReferences(ep); err != nil {
+		mgr.logger.Warn("Unable to update endpoint references after native-vpc VNI change",
+			logfields.Error, err,
+			logfields.EndpointID, ep.GetID(),
+		)
+	}
+	return true
 }
 
 // UpdateReferences updates maps the contents of mappings to the specified endpoint.

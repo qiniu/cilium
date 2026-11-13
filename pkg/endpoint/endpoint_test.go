@@ -7,11 +7,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"net"
+	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cilium/hive/hivetest"
+	"github.com/cilium/statedb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
@@ -20,9 +25,12 @@ import (
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/annotation"
+	"github.com/cilium/cilium/pkg/controller"
 	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/eventqueue"
+	"github.com/cilium/cilium/pkg/hive"
+	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/identity/cache"
 	"github.com/cilium/cilium/pkg/identity/identitymanager"
 	"github.com/cilium/cilium/pkg/ipcache"
@@ -39,6 +47,7 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/api"
+	"github.com/cilium/cilium/pkg/source"
 	"github.com/cilium/cilium/pkg/testutils"
 	testidentity "github.com/cilium/cilium/pkg/testutils/identity"
 	testipcache "github.com/cilium/cilium/pkg/testutils/ipcache"
@@ -1298,12 +1307,42 @@ func TestSyncVNIFromPodAnnotationScopeChange(t *testing.T) {
 		require.Equal(t, uint64(9), ep.GetVNIID())
 	})
 
-	t.Run("a different scope is refused", func(t *testing.T) {
+	t.Run("restore takes a different scope before the endpoint is exposed", func(t *testing.T) {
+		// kube-ovn moved the key (e.g. subnet -> VPC) while the agent was down:
+		// everything derived from the VNI is derived after this re-read.
 		ep := newEP()
 		ep.logger.Store(hivetest.Logger(t))
 		ep.VNIID = 9
-		require.False(t, ep.SyncVNIFromPodAnnotation(pod("99", false)),
-			"the endpoint must not be moved between VPCs by an annotation alone")
+		ep.labels = labels.NewOpLabels()
+		ep.labels.OrchestrationIdentity[labels.VNIKey] = labels.NewLabel(labels.VNIKey, "9", labels.LabelSourceVNI)
+		require.True(t, ep.SyncVNIFromPodAnnotationBeforeExpose(pod("99", false)))
+		require.Equal(t, uint64(99), ep.GetVNIID())
+		require.Equal(t, uint64(9), ep.restoredFromVNI, "the previous scope is kept for the kvstore cleanup")
+		// The restored identity is allocated from the labels before the
+		// metadata resolver runs.
+		require.Equal(t, "99", ep.labels.OrchestrationIdentity[labels.VNIKey].Value,
+			"the identity label moves with the VNI")
+	})
+
+	t.Run("metadata resolution does not move an exposed endpoint", func(t *testing.T) {
+		// A created endpoint is exposed before its metadata is resolved; moving
+		// it here would leave its endpointmanager references in the old scope.
+		ep := newEP()
+		ep.logger.Store(hivetest.Logger(t))
+		ep.VNIID = 9
+		require.False(t, ep.SyncVNIFromPodAnnotation(pod("99", false)))
+		require.Equal(t, uint64(9), ep.GetVNIID())
+		require.Zero(t, ep.restoredFromVNI)
+	})
+
+	t.Run("a ready endpoint keeps its scope in metadata resolution", func(t *testing.T) {
+		// It moves only through MigrateVNIFromPodAnnotation, together with the
+		// endpointmanager references.
+		ep := newEP()
+		ep.logger.Store(hivetest.Logger(t))
+		ep.VNIID = 9
+		ep.state = StateReady
+		require.False(t, ep.SyncVNIFromPodAnnotation(pod("99", false)))
 		require.Equal(t, uint64(9), ep.GetVNIID())
 	})
 
@@ -1314,4 +1353,440 @@ func TestSyncVNIFromPodAnnotationScopeChange(t *testing.T) {
 		require.False(t, ep.SyncVNIFromPodAnnotation(pod("9", false)))
 		require.Equal(t, uint64(9), ep.GetVNIID())
 	})
+}
+
+func TestMigrateVNILocked(t *testing.T) {
+	newEP := func() *Endpoint {
+		ep := &Endpoint{VNIID: 9, labels: labels.NewOpLabels(), state: StateReady, status: NewEndpointStatus()}
+		ep.logger.Store(hivetest.Logger(t))
+		ep.labels.OrchestrationIdentity[labels.VNIKey] = labels.NewLabel(labels.VNIKey, "9", labels.LabelSourceVNI)
+		ep.labels.OrchestrationIdentity["sg"] = labels.NewLabel("sg", "shared", labels.LabelSourceK8s)
+		return ep
+	}
+
+	t.Run("a new scope moves the VNI and its identity label together", func(t *testing.T) {
+		ep := newEP()
+		rev := ep.identityRevision
+		ep.unconditionalLock()
+		old, moved := ep.migrateVNILocked(4)
+		ep.unlock()
+
+		require.True(t, moved)
+		require.Equal(t, uint64(9), old)
+		require.Equal(t, uint64(4), ep.GetVNIID())
+		require.Equal(t, labels.NewLabel(labels.VNIKey, "4", labels.LabelSourceVNI), ep.labels.OrchestrationIdentity[labels.VNIKey])
+		require.Equal(t, labels.NewLabel("sg", "shared", labels.LabelSourceK8s), ep.labels.OrchestrationIdentity["sg"],
+			"labels of other sources are untouched")
+		require.Equal(t, StateWaitingForIdentity, ep.getState(), "the identity must be resolved again")
+		require.Greater(t, ep.identityRevision, rev)
+	})
+
+	t.Run("the same or a zero scope is not a move", func(t *testing.T) {
+		for _, vni := range []uint64{9, 0} {
+			ep := newEP()
+			ep.unconditionalLock()
+			_, moved := ep.migrateVNILocked(vni)
+			ep.unlock()
+			require.False(t, moved, "vni %d", vni)
+			require.Equal(t, uint64(9), ep.GetVNIID())
+			require.Equal(t, StateReady, ep.getState())
+		}
+	})
+}
+
+func TestMigrateVNIFromPodAnnotationIgnoresUnusableAnnotation(t *testing.T) {
+	prev := option.Config.EnableNativeVPC
+	prevAnn := option.Config.NativeVPCVNIAnnotation
+	option.Config.EnableNativeVPC = true
+	option.Config.NativeVPCVNIAnnotation = "ovn.kubernetes.io/tunnel_key"
+	t.Cleanup(func() {
+		option.Config.EnableNativeVPC = prev
+		option.Config.NativeVPCVNIAnnotation = prevAnn
+	})
+
+	for name, annotations := range map[string]map[string]string{
+		"missing":   {},
+		"zero":      {"ovn.kubernetes.io/tunnel_key": "0"},
+		"invalid":   {"ovn.kubernetes.io/tunnel_key": "x"},
+		"unchanged": {"ovn.kubernetes.io/tunnel_key": "9"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ep := &Endpoint{VNIID: 9, labels: labels.NewOpLabels(), state: StateReady, status: NewEndpointStatus()}
+			ep.logger.Store(hivetest.Logger(t))
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns", Annotations: annotations}}
+			require.False(t, ep.MigrateVNIFromPodAnnotation(pod), "a missing or broken key never moves the endpoint")
+			require.Equal(t, uint64(9), ep.GetVNIID())
+			require.Equal(t, StateReady, ep.getState())
+		})
+	}
+}
+
+// The metadata resolver updates labels with the k8s source filter, which never
+// replaces a label of the vni source; the VNI label must be replaced under its
+// own source on a scope change (restore after N -> M).
+func TestVNILabelReplacedOnlyUnderItsSource(t *testing.T) {
+	ep := &Endpoint{labels: labels.NewOpLabels()}
+	ep.logger.Store(hivetest.Logger(t))
+	ep.labels.OrchestrationIdentity[labels.VNIKey] = labels.NewLabel(labels.VNIKey, "9", labels.LabelSourceVNI)
+
+	ep.unconditionalLock()
+	defer ep.unlock()
+	require.Zero(t, ep.replaceIdentityLabels(labels.LabelSourceK8s, vniIdentityLabels(4)))
+	require.Equal(t, "9", ep.labels.OrchestrationIdentity[labels.VNIKey].Value)
+	require.NotZero(t, ep.replaceIdentityLabels(labels.LabelSourceVNI, vniIdentityLabels(4)))
+	require.Equal(t, "4", ep.labels.OrchestrationIdentity[labels.VNIKey].Value)
+}
+
+// VNIID is written under the endpoint lock while unlocked readers (Hubble, the
+// CiliumEndpoint synchronizer, the endpointmanager via Identifiers) read it.
+func TestVNIIDReadersDuringMigration(t *testing.T) {
+	ep := &Endpoint{VNIID: 9, IPv4: netip.MustParseAddr("10.0.0.1"), labels: labels.NewOpLabels(), state: StateReady, status: NewEndpointStatus()}
+	ep.logger.Store(hivetest.Logger(t))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 1000 {
+			_ = ep.GetVNIID()
+			_ = ep.Identifiers()
+		}
+	}()
+	for vni := uint64(10); vni < 200; vni++ {
+		ep.unconditionalLock()
+		ep.migrateVNILocked(vni)
+		ep.state = StateReady
+		ep.unlock()
+	}
+	<-done
+	require.Equal(t, uint64(199), ep.GetVNIID())
+}
+
+// The identity sync controller of an address family is kept when the
+// endpoint's scope changes and only gets new params, so its run moves the
+// entry: the entry of the scope written before is removed, the current one
+// written.
+func TestIdentitySyncStateMoveTo(t *testing.T) {
+	var deleted []uint64
+	del := func(v uint64) error { deleted = append(deleted, v); return nil }
+
+	s := &identitySyncState{}
+	require.NoError(t, s.moveTo(5, del))
+	require.Empty(t, deleted, "nothing was written before")
+	require.NoError(t, s.moveTo(5, del))
+	require.Empty(t, deleted, "same scope (e.g. a new identity)")
+	require.NoError(t, s.moveTo(4, del))
+	require.Equal(t, []uint64{5}, deleted, "N -> M removes (N, IP)")
+
+	// N -> M -> N with the M params elided by the controller: the entry of
+	// N was never removed and stays.
+	deleted = nil
+	s = &identitySyncState{}
+	require.NoError(t, s.moveTo(5, del))
+	require.NoError(t, s.moveTo(5, del))
+	require.Empty(t, deleted)
+
+	// A failed removal keeps the old scope recorded for the retry.
+	deleted = nil
+	s = &identitySyncState{vni: 5, ok: true}
+	require.Error(t, s.moveTo(4, func(uint64) error { return errors.New("kvstore down") }))
+	require.NoError(t, s.moveTo(4, del))
+	require.Equal(t, []uint64{5}, deleted)
+
+	// A run removes the previous scope before it writes (DoFunc), so a
+	// failed removal writes nothing: with a removal failing (9 -> 4) and
+	// then succeeding for new params (9 -> 7), only the recorded scope has
+	// an entry, which the StopFunc removes.
+	store := map[uint64]bool{9: true}
+	run := func(s *identitySyncState, vni uint64, fail bool) {
+		if s.moveTo(vni, func(v uint64) error {
+			if fail {
+				return errors.New("kvstore down")
+			}
+			delete(store, v)
+			return nil
+		}) == nil {
+			store[vni] = true
+		}
+	}
+	s = &identitySyncState{vni: 9, ok: true}
+	run(s, 4, true)
+	run(s, 7, false)
+	require.Equal(t, map[uint64]bool{7: true}, store)
+	require.Equal(t, identitySyncState{vni: 7, ok: true}, *s)
+
+	// Restore moved the endpoint (5 -> 4): the first run removes the entry
+	// the previous agent wrote, unless the endpoint is back in that scope.
+	deleted = nil
+	require.NoError(t, (&identitySyncState{vni: 5, ok: true}).moveTo(4, del))
+	require.Equal(t, []uint64{5}, deleted)
+	deleted = nil
+	require.NoError(t, (&identitySyncState{vni: 5, ok: true}).moveTo(5, del))
+	require.Empty(t, deleted)
+}
+
+// liveIPCache is the local ipcache of an agent without kvstore, reduced to the
+// keys currently present, the identity each maps to, and the order of the
+// writes ("+key") and removals ("-key") (ipcache.LocalIPCache).
+type liveIPCache struct {
+	mu   lock.Mutex
+	keys map[string]identity.NumericIdentity
+	ops  []string
+}
+
+// newLiveIPCache returns a liveIPCache holding keys.
+func newLiveIPCache(keys ...string) *liveIPCache {
+	l := &liveIPCache{keys: map[string]identity.NumericIdentity{}}
+	for _, k := range keys {
+		l.keys[k] = identity.IdentityUnknown
+	}
+	return l
+}
+
+func (l *liveIPCache) Upsert(ip string, _ net.IP, _ uint8, _ *ipcache.K8sMetadata, id ipcache.Identity) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.keys[ip] = id.ID
+	l.ops = append(l.ops, "+"+ip)
+	return false, nil
+}
+
+func (l *liveIPCache) DeleteOnMetadataMatch(ip string, _ source.Source, _, _ string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.keys, ip)
+	l.ops = append(l.ops, "-"+ip)
+	return false
+}
+
+// Keys returns the present keys, sorted.
+func (l *liveIPCache) Keys() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Sorted(maps.Keys(l.keys))
+}
+
+// Identity returns the identity key maps to.
+func (l *liveIPCache) Identity(key string) (identity.NumericIdentity, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	id, ok := l.keys[key]
+	return id, ok
+}
+
+// Ops returns the writes and removals in order.
+func (l *liveIPCache) Ops() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.ops)
+}
+
+// newIdentitySyncTestEndpoint returns a ready endpoint at 10.98.0.2 in scope
+// vni with identity 1000, whose identity sync writes to live.
+func newIdentitySyncTestEndpoint(t *testing.T, live *liveIPCache, vni uint64) *Endpoint {
+	node.SetTestLocalNodeStore()
+	t.Cleanup(node.UnsetTestLocalNodeStore)
+	node.UpdateLocalNodeInTest(func(n *node.LocalNode) {
+		n.SetNodeInternalIP(net.ParseIP("192.168.0.1"))
+		n.SetNodeInternalIP(net.ParseIP("fd00::1"))
+	})
+
+	logger := hivetest.Logger(t)
+	ep := &Endpoint{
+		ID:               1,
+		IPv4:             netip.MustParseAddr("10.98.0.2"),
+		VNIID:            vni,
+		K8sNamespace:     "ns",
+		K8sPodName:       "p",
+		SecurityIdentity: identity.NewIdentity(1000, labels.Labels{}),
+		labels:           labels.NewOpLabels(),
+		state:            StateReady,
+		status:           NewEndpointStatus(),
+		controllers:      controller.NewManager(),
+		aliveCtx:         t.Context(),
+		wgConfig:         fakeTypes.WireguardConfig{},
+		ipsecConfig:      fakeTypes.IPsecConfig{},
+		kvstoreSyncher:   ipcache.NewIPIdentitySynchronizer(logger, kvstore.SetupDummy(t, kvstore.DisabledBackendName), live),
+	}
+	ep.logger.Store(logger)
+	// Registered after the node store cleanup, so it runs first: no
+	// controller reads the node store once it is unset.
+	t.Cleanup(ep.controllers.RemoveAllAndWait)
+	return ep
+}
+
+// The identity sync of an endpoint that restore moved (9 -> 4) removes the
+// entry of the old scope, which the previous agent wrote, and then writes the
+// new one: only the recorded scope can have an entry.
+func TestIdentitySyncRemovesRestoredScope(t *testing.T) {
+	live := newLiveIPCache(ipcache.KeyWithVNI("10.98.0.2", 9))
+	ep := newIdentitySyncTestEndpoint(t, live, 4)
+	ep.restoredFromVNI = 9
+
+	ep.unconditionalLock()
+	ep.runIPIdentitySync(ep.IPv4)
+	ep.unlock()
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, []string{ipcache.KeyWithVNI("10.98.0.2", 4)}, live.Keys())
+	}, 5*time.Second, 10*time.Millisecond)
+	require.Equal(t, []string{"-" + ipcache.KeyWithVNI("10.98.0.2", 9), "+" + ipcache.KeyWithVNI("10.98.0.2", 4)}, live.Ops(),
+		"the old entry is removed before the new one is written")
+
+	// Deleting the endpoint removes the entry it wrote.
+	ep.controllers.RemoveAllAndWait()
+	require.Empty(t, live.Keys())
+}
+
+// A run of params registered before an identity change (the controller took
+// them before SetIdentity installed the identity of a new scope) writes the
+// VNI and the identity of those params, never its VNI with the new identity.
+func TestIdentitySyncPairsVNIWithItsIdentity(t *testing.T) {
+	live := newLiveIPCache()
+	ep := newIdentitySyncTestEndpoint(t, live, 9)
+	key := ipcache.KeyWithVNI("10.98.0.2", 9)
+
+	ep.unconditionalLock()
+	ep.runIPIdentitySync(ep.IPv4)
+	ep.unlock()
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Len(c, live.Ops(), 1)
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// The identity of scope 4 is installed, but the controller still runs the
+	// params of scope 9.
+	ep.unconditionalLock()
+	ep.SecurityIdentity = identity.NewIdentity(2000, labels.Labels{})
+	ep.unlock()
+	ep.controllers.TriggerController(fmt.Sprintf("sync-IPv4-identity-mapping (%d)", ep.ID))
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Len(c, live.Ops(), 2)
+	}, 5*time.Second, 10*time.Millisecond)
+
+	id, ok := live.Identity(key)
+	require.True(t, ok)
+	require.Equal(t, identity.NumericIdentity(1000), id, "(9, IP) keeps the identity of scope 9")
+}
+
+// An endpoint that restore moved (9 -> 4) and that is deleted before its
+// identity sync wrote anything still has the entry the previous agent wrote
+// under 9: the StopFunc removes it together with the entry of 4.
+func TestIdentitySyncStopRemovesWrittenScope(t *testing.T) {
+	live := newLiveIPCache(ipcache.KeyWithVNI("10.98.0.2", 9))
+	ep := newIdentitySyncTestEndpoint(t, live, 4)
+	ep.restoredFromVNI = 9
+	ep.SecurityIdentity = nil // the first run returns before it writes
+
+	ep.unconditionalLock()
+	ep.runIPIdentitySync(ep.IPv4)
+	ep.unlock()
+	ep.controllers.RemoveAllAndWait()
+
+	require.Empty(t, live.Keys())
+	require.Contains(t, live.Ops(), "-"+ipcache.KeyWithVNI("10.98.0.2", 9))
+}
+
+// failingDeleteClient is a kvstore whose removals of keys ending in failSuffix
+// fail; it records every key it was asked to remove.
+type failingDeleteClient struct {
+	kvstore.Client
+	failSuffix string
+	mu         lock.Mutex
+	deleted    []string
+}
+
+func (c *failingDeleteClient) Delete(_ context.Context, key string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deleted = append(c.deleted, key)
+	if strings.HasSuffix(key, c.failSuffix) {
+		return errors.New("kvstore down")
+	}
+	return nil
+}
+
+// The StopFunc runs once: a failed removal of the current scope must not
+// skip the removal of the written one.
+func TestIdentitySyncStopAttemptsBothScopes(t *testing.T) {
+	ep := newIdentitySyncTestEndpoint(t, newLiveIPCache(), 4)
+	ep.restoredFromVNI = 9
+	ep.SecurityIdentity = nil // the first run returns before it writes
+	client := &failingDeleteClient{
+		Client:     kvstore.NewInMemoryClient(statedb.New(), "default"),
+		failSuffix: ipcache.KeyWithVNI("10.98.0.2", 4),
+	}
+	ep.kvstoreSyncher = ipcache.NewIPIdentitySynchronizer(hivetest.Logger(t), client, nil)
+
+	ep.unconditionalLock()
+	ep.runIPIdentitySync(ep.IPv4)
+	ep.unlock()
+	ep.controllers.RemoveAllAndWait()
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	require.Len(t, client.deleted, 2)
+	require.True(t, strings.HasSuffix(client.deleted[1], ipcache.KeyWithVNI("10.98.0.2", 9)),
+		"the written scope is removed although the current one failed")
+}
+
+// gateFence holds restoreIdentity in its unlocked window until released.
+type gateFence struct {
+	entered, release chan struct{}
+}
+
+func (f gateFence) Add(string, hive.WaitFunc) {}
+
+func (f gateFence) Wait(ctx context.Context) error {
+	close(f.entered)
+	select {
+	case <-f.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// The endpoint is exposed while restore allocates its identity, so the pod
+// watcher can move it to another scope meanwhile (9 -> 4). Restore must then
+// leave the identity to the resolution the move started, instead of
+// installing the identity - and the labels - of the scope it read.
+func TestRestoreIdentityYieldsToConcurrentScopeChange(t *testing.T) {
+	prevV4, prevV6 := option.Config.EnableIPv4, option.Config.EnableIPv6
+	option.Config.EnableIPv4, option.Config.EnableIPv6 = false, false // no identity sync
+	t.Cleanup(func() { option.Config.EnableIPv4, option.Config.EnableIPv6 = prevV4, prevV6 })
+
+	logger := hivetest.Logger(t)
+	require.NoError(t, labelsfilter.ParseLabelPrefixCfg(logger, nil, nil, ""))
+	restored := identity.NewIdentity(1000, vniIdentityLabels(9))
+	ep := &Endpoint{
+		ID:               1,
+		VNIID:            9,
+		SecurityIdentity: restored,
+		labels:           labels.NewOpLabels(),
+		state:            StateRestoring,
+		status:           NewEndpointStatus(),
+		controllers:      controller.NewManager(),
+		aliveCtx:         t.Context(),
+		allocator:        testidentity.NewMockIdentityAllocator(nil),
+		identityManager:  identitymanager.NewIDManager(logger),
+	}
+	ep.logger.Store(logger)
+	ep.labels.OrchestrationIdentity = vniIdentityLabels(9)
+	t.Cleanup(ep.controllers.RemoveAllAndWait)
+
+	fence := gateFence{entered: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() { done <- ep.restoreIdentity(&Regenerator{fence: fence, logger: logger}) }()
+
+	<-fence.entered
+	ep.unconditionalLock()
+	_, moved := ep.migrateVNILocked(4)
+	ep.unlock()
+	require.True(t, moved)
+	close(fence.release)
+	require.NoError(t, <-done)
+
+	ep.unconditionalLock()
+	defer ep.unlock()
+	require.Same(t, restored, ep.SecurityIdentity, "the identity allocated for scope 9 is not installed")
+	require.Equal(t, "4", ep.labels.OrchestrationIdentity[labels.VNIKey].Value, "the labels of scope 9 are not restored")
 }

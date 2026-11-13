@@ -278,7 +278,7 @@ func (r *EndpointResolver) ResolveEndpoint(ip netip.Addr, datapathSecurityIdenti
 
 // vniFromIdentityLabels returns the native-vpc VNI carried by the internal VNI
 // identity label of the given labels, if present. The identity is VNI-distinct
-// (endpoints on different logical switches carry different VNI identity labels),
+// (endpoints in different VPCs carry different VNI identity labels),
 // so the VNI derived here unambiguously identifies the VNI-scoped
 // ipcache/metadata entry
 // of a remote peer.

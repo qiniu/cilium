@@ -27,10 +27,11 @@ another VPC's traffic.
 | `15-key-uniqueness.sh` | after CNI ADD each pod owns exactly one resource per plane under its own (VNI, IP); after CNI DEL only its own are gone, including a DEL that happens while the agent is down; the host stack and the operator commands hold to the same rule |
 | `20-policies.sh`      | applies the three policy scenarios                                            |
 | `30-connectivity.sh`  | runs the connectivity matrix and the cross-VPC leak checks                    |
+| `32-cross-subnet.sh`  | qbox/las#4978: pods in two subnets of one VPC share its VNI, and a shared security group allows them across the subnets |
 | `35-policymap.sh`     | the identity-keyed policy map of each server, as the datapath sees it          |
 | `40-observability.sh` | asserts Hubble attributes every flow to the right VPC                         |
 | `45-hubble-vni.sh`    | per-VPC forwarding-plane records (VNI+IP+identity+verdict) and VNI filtering   |
-| `55-vni-scope-change.sh` | the VPC of a running pod is not changed by an annotation; a real move leaves nothing behind |
+| `55-vni-scope-change.sh` | a running pod follows a changed tunnel_key (at runtime and on restore), a missing key never moves it, and a move leaves nothing behind |
 | `50-datapath.sh`      | BPF map layouts, per-endpoint load-time VNI, and the debug tooling             |
 | `60-service.sh`       | services are resolved by kube-ovn, not rewritten by Cilium                     |
 | `70-lifecycle.sh`     | CEP annotation, annotation loss, agent restart, pod deletion                   |
@@ -84,12 +85,10 @@ to the review in `Documentation/network/native-vpc.rst`.
 | 2 cache      | deleting one VPC leaves the others intact        | `70-lifecycle.sh`                |
 | 2 cache      | a scope change is a delete plus an upsert, never | `55-vni-scope-change.sh`         |
 |              | a second entry under the abandoned VPC           |                                  |
-| 1 control    | a drifting annotation does not move a running    | `55-vni-scope-change.sh`         |
-|              | pod between VPCs, not even across a restart      |                                  |
+| 1 control    | a changed key moves a running pod, at runtime and| `55-vni-scope-change.sh`         |
+|              | on restore; a missing or zero key never does     |                                  |
 | 3 forwarding | VNI-scoped ipcache map and its key layout        | `50-datapath.sh`                 |
-| `50-datapath.sh`                 |
-| 3 forwarding | per-endpoint load-time VNI in bpf_lxc            | `55-vni-scope-change.sh` | the VPC of a running pod is not changed by an annotation; a real move leaves nothing behind |
-| `50-datapath.sh`                 |
+| 3 forwarding | per-endpoint load-time VNI in bpf_lxc            | `50-datapath.sh`                 |
 | 3 forwarding | endpoints addressable as `vni-ipv4:<vni>:<ip>`   | `10-verify-vni.sh`               |
 | 4 policy     | identities, and therefore policy, are VPC-scoped | `30-connectivity.sh`             |
 | 4 policy     | a policy of one VPC cannot affect another        | `30-connectivity.sh`             |
@@ -99,19 +98,16 @@ to the review in `Documentation/network/native-vpc.rst`.
 | 5 conntrack  | the overlap precondition is observable           | `10-verify-vni.sh`               |
 | 6 service    | no service translation for VPC endpoints         | `60-service.sh`                  |
 | 6 service    | services still work (kube-ovn resolves them)     | `60-service.sh`                  |
-| 7 fragments  | the fragment key is VPC scoped                   | `55-vni-scope-change.sh` | the VPC of a running pod is not changed by an annotation; a real move leaves nothing behind |
-| `50-datapath.sh` (key size)      |
+| 7 fragments  | the fragment key is VPC scoped                   | `50-datapath.sh` (key size)      |
 | 8 observ.    | flows carry the VNI on both endpoints            | `40-observability.sh`            |
 | 8 observ.    | verdicts are not mixed between VPCs              | `40-observability.sh`            |
-| 8 observ.    | the tooling shows the VPC scope                  | `55-vni-scope-change.sh` | the VPC of a running pod is not changed by an annotation; a real move leaves nothing behind |
-| `50-datapath.sh`                 |
+| 8 observ.    | the tooling shows the VPC scope                  | `50-datapath.sh`                 |
 | 8 observ.    | per-VPC forwarding records carry VNI+IP+identity | `45-hubble-vni.sh`               |
 | 8 observ.    | verdict/port pattern per VPC matches its policy  | `45-hubble-vni.sh`               |
 | 8 observ.    | flows are filterable by the VNI identity label   | `45-hubble-vni.sh`               |
 | 9 lifecycle  | a restart restores VNI, identities and ipcache   | `70-lifecycle.sh`                |
 | 9 lifecycle  | policy behaviour is unchanged after a restart    | `70-lifecycle.sh`                |
-| 10 assembly  | the agent starts in native-vpc mode              | `55-vni-scope-change.sh` | the VPC of a running pod is not changed by an annotation; a real move leaves nothing behind |
-| `50-datapath.sh` (no fatal log)  |
+| 10 assembly  | the agent starts in native-vpc mode              | `50-datapath.sh` (no fatal log)  |
 | all          | the run produces no error log and no unexpected  | `80-logs.sh`                     |
 |              | warning, drop reason or invalid policy           |                                  |
 

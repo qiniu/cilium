@@ -38,13 +38,22 @@ const testVNIAnnotation = "ovn.kubernetes.io/tunnel_key"
 
 // fakeEndpointManager answers the pod watcher's question "is there a local
 // endpoint for this pod, and which VPC is it actually in?".
-type fakeEndpointManager struct{ eps []*endpoint.Endpoint }
+type fakeEndpointManager struct {
+	eps      []*endpoint.Endpoint
+	migrated *[]*endpoint.Endpoint // records MigrateEndpointVNI calls when set
+}
 
 func (f fakeEndpointManager) GetEndpointsByPodName(string) []*endpoint.Endpoint { return f.eps }
 func (fakeEndpointManager) LookupCEPName(string) *endpoint.Endpoint             { return nil }
 func (fakeEndpointManager) GetEndpoints() []*endpoint.Endpoint                  { return nil }
 func (fakeEndpointManager) GetHostEndpoint() *endpoint.Endpoint                 { return nil }
 func (fakeEndpointManager) UpdatePolicyMaps(context.Context) error              { return nil }
+func (f fakeEndpointManager) MigrateEndpointVNI(ep *endpoint.Endpoint, _ *slim_corev1.Pod) bool {
+	if f.migrated != nil {
+		*f.migrated = append(*f.migrated, ep)
+	}
+	return false
+}
 
 // fakePolicyManager swallows the policy recalculation triggers.
 type fakePolicyManager struct{}
@@ -262,12 +271,12 @@ func TestUpdatePodHostDataVNIChange(t *testing.T) {
 // TestUpdatePodHostDataDriftFollowsEndpoint pins which of the two sources wins
 // when they disagree.
 //
-// A ready endpoint does not adopt a new VNI from its pod annotation: the VNI is
-// an identity and datapath dimension, and only a recreation converges it. The
-// pod watcher therefore must not publish the annotation's scope either -
-// doing so would announce the address in a VPC that no endpoint is in, which is
+// The ipcache entry of a pod with an endpoint follows the endpoint's VNI, not
+// the annotation: the VNI is an identity and datapath dimension that only the
+// endpoint moves (MigrateEndpointVNI). Publishing the annotation's scope here
+// would announce the address in a VPC that no endpoint is in yet, which is
 // exactly the cross-VPC lie the scoping exists to prevent. The entry stays
-// where the datapath actually is until the pod is recreated.
+// where the datapath actually is until the endpoint has moved.
 func TestUpdatePodHostDataDriftFollowsEndpoint(t *testing.T) {
 	prev := option.Config.EnableNativeVPC
 	prevAnn := option.Config.NativeVPCVNIAnnotation
@@ -550,4 +559,55 @@ func TestEndpointUpdatedAttachmentUsesPodName(t *testing.T) {
 	w.endpointDeleted(attachment("10.99.0.12"))
 	require.Equal(t, []string{"10.99.0.12@vni:5"}, ipc.deleted)
 	require.Equal(t, []string{"client"}, ipc.deletedAs)
+}
+
+// Every endpoint of the pod is handed to the endpoint manager, which decides
+// whether it moves (covered by the endpointmanager tests).
+func TestMigratePodEndpointsVNI(t *testing.T) {
+	eps := []*endpoint.Endpoint{{ID: 1}, {ID: 2}}
+	var migrated []*endpoint.Endpoint
+	w := &K8sPodWatcher{
+		logger:          hivetest.Logger(t),
+		endpointManager: fakeEndpointManager{eps: eps, migrated: &migrated},
+	}
+	w.migratePodEndpointsVNI(vniPod("client", "10.99.0.11", "192.168.0.1", "99"))
+	require.Equal(t, eps, migrated)
+}
+
+type nopCgroupManager struct{}
+
+func (nopCgroupManager) OnAddPod(*slim_corev1.Pod)                   {}
+func (nopCgroupManager) OnUpdatePod(oldPod, newPod *slim_corev1.Pod) {}
+func (nopCgroupManager) OnDeletePod(*slim_corev1.Pod)                {}
+
+// The watcher compares the scope on every update of the pod, not only when its
+// tunnel_key changes: a change it saw before the endpoint was exposed (CNI ADD
+// in progress) found nothing to move, and the next update is the one in which
+// kubelet publishes the pod's addresses, with the annotation unchanged.
+func TestUpdateK8sPodV1ComparesScopeOnEveryUpdate(t *testing.T) {
+	prev := option.Config.EnableNativeVPC
+	prevAnn := option.Config.NativeVPCVNIAnnotation
+	option.Config.EnableNativeVPC = true
+	option.Config.NativeVPCVNIAnnotation = testVNIAnnotation
+	t.Cleanup(func() {
+		option.Config.EnableNativeVPC = prev
+		option.Config.NativeVPCVNIAnnotation = prevAnn
+	})
+
+	eps := []*endpoint.Endpoint{{ID: 1}}
+	var migrated []*endpoint.Endpoint
+	w := &K8sPodWatcher{
+		logger:          hivetest.Logger(t),
+		ipcache:         &recordingIPCache{},
+		policyManager:   fakePolicyManager{},
+		cgroupManager:   nopCgroupManager{},
+		endpointManager: fakeEndpointManager{eps: eps, migrated: &migrated},
+		wgConfig:        fakeTypes.WireguardConfig{},
+		ipsecConfig:     fakeTypes.IPsecConfig{},
+	}
+	before := vniPod("client", "", "", "99")
+	before.Status = slim_corev1.PodStatus{}
+	after := vniPod("client", "10.99.0.11", "192.168.0.1", "99")
+	require.NoError(t, w.updateK8sPodV1(before, after))
+	require.Equal(t, eps, migrated)
 }

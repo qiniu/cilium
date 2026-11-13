@@ -22,15 +22,16 @@ for vpc in "${VPCS[@]}"; do
 done
 
 log "removing the annotation from a running pod must not drop its VPC scope"
-before=$(cilium_exec cilium-dbg endpoint get "vni-ipv4:$(pod_vni vpc-b server):${SERVER_IP}" -o jsonpath='{[0].id}')
-kubectl -n vpc-b annotate pod server ovn.kubernetes.io/tunnel_key- >/dev/null 2>&1
+vpcb_vni=$(pod_vni vpc-b server)
+before=$(cilium_exec cilium-dbg endpoint get "vni-ipv4:${vpcb_vni}:${SERVER_IP}" -o jsonpath='{[0].id}')
+kubeovn_annotate vpc-b server ovn.kubernetes.io/tunnel_key- >/dev/null 2>&1
 sleep 8
 after=$(cilium_exec cilium-dbg endpoint get "vni-ipv4:$(kubectl -n vpc-b get cep server -o jsonpath='{.metadata.annotations.native-vpc\.cilium\.io/vni}' 2>/dev/null):${SERVER_IP}" -o jsonpath='{[0].id}' 2>/dev/null)
 assert_eq "$before" "$after" "vpc-b: the endpoint keeps its VPC scope without the annotation"
 still=$(try_connect vpc-b client "$SERVER_IP" "$PORT_ALLOWED")
 assert_eq "open" "$still" "vpc-b: policy still behaves as before"
 # put it back so the rest of the suite sees a consistent cluster
-kubectl -n vpc-b annotate pod server "ovn.kubernetes.io/tunnel_key=7" --overwrite >/dev/null 2>&1
+kubeovn_annotate vpc-b server "ovn.kubernetes.io/tunnel_key=${vpcb_vni}" >/dev/null 2>&1
 
 log "restarting the agent and re-checking every plane"
 kubectl -n "$CILIUM_NS" rollout restart ds/cilium >/dev/null 2>&1

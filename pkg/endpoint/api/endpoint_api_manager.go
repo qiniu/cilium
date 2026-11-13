@@ -636,9 +636,10 @@ func requireVNI(nativeVPCEnabled bool, vni uint64, isHostEndpoint, isK8sPod bool
 // endpoint's address and not from the primary interface's one.
 //
 // For any other pod a missing, empty, non-numeric, zero or out-of-range
-// tunnel_key annotation is an ERROR in native-vpc mode: the OVN subnet always
-// carries a non-zero tunnel key (kube-ovn waits for it before allocating pod
-// IPs), so such a value means misconfiguration or an out-of-date kube-ovn.
+// tunnel_key annotation is an ERROR in native-vpc mode: the VPC of an OVN
+// subnet always carries a non-zero tunnel key (kube-ovn waits for it before
+// allocating pod IPs), so such a value means misconfiguration or an
+// out-of-date kube-ovn.
 // Rejecting the endpoint here is deliberate: silently degrading to the plain
 // IP scheme would collide with overlapping VPC subnets and cause
 // non-deterministic policy verdicts.

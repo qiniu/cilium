@@ -260,6 +260,7 @@ func (e *Endpoint) restoreIdentity(regenerator *Regenerator) error {
 	}
 	// Filter the restored labels with the new daemon's filter
 	l, _ := labelsfilter.Filter(e.labels.AllLabels())
+	myChangeRev := e.identityRevision
 	e.runlock()
 
 	// Getting the ep's identity while we are restoring should block the
@@ -351,6 +352,17 @@ func (e *Endpoint) restoreIdentity(regenerator *Regenerator) error {
 		releaseNewlyAllocatedIdentity()
 		e.getLogger().Warn("Endpoint to restore has been deleted")
 		return err
+	}
+
+	// The endpoint is exposed while the identity is allocated: a label change
+	// meanwhile (e.g. a native-vpc scope change the pod watcher applied)
+	// started its own identity resolution, and the identity allocated for the
+	// labels read above must not overwrite it.
+	if e.identityResolutionIsObsolete(myChangeRev) {
+		e.unlock()
+		releaseNewlyAllocatedIdentity()
+		e.getLogger().Info("Endpoint labels changed while restoring its identity; leaving it to the new identity resolution")
+		return nil
 	}
 
 	e.setState(StateRestoring, "Synchronizing endpoint labels with KVStore")

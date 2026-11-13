@@ -163,9 +163,10 @@ const (
 	// "vni:io-cilium-native-vpc-vni=<vni>". It is injected from the kube-ovn
 	// tunnel_key annotation and
 	// gives the policy/identity layer the same VNI scope used by the
-	// (VNI, IP) ipcache/datapath key. VNI is a logical-switch/subnet property;
-	// it must not be confused with kube-ovn's aggregate VPC object (one VPC can
-	// contain several subnets with different VNIs).
+	// (VNI, IP) ipcache/datapath key. The VNI is the tunnel key of the pod's
+	// VPC (the OVN logical router), so all subnets of a VPC share one scope;
+	// kube-ovn releases before the VPC scope wrote the subnet (logical switch)
+	// key instead.
 	LabelSourceVNI = "vni"
 
 	// VNIKey is the internal label key used with LabelSourceVNI. Use a

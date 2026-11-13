@@ -284,12 +284,9 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 		datapathContext.SrcVNI = vni
 		datapathContext.DstVNI = vni
 	}
-	if decoded.Tunnel != nil && decoded.Tunnel.Vni > 0 {
-		// The overlay VNI is the exact logical-switch context for the
-		// encapsulated endpoint addresses. Preserve it for endpoint resolution.
-		datapathContext.SrcVNI = decoded.Tunnel.Vni
-		datapathContext.DstVNI = decoded.Tunnel.Vni
-	}
+	// The VNI of a decoded overlay header is deliberately not used: OVN puts
+	// the key of the logical switch on the wire, while the native-vpc scope is
+	// the key of the VPC (logical router), so it never names a (VNI, IP) entry.
 	srcEndpoint := p.epResolver.ResolveEndpoint(srcIP, srcLabelID, datapathContext)
 	dstEndpoint := p.epResolver.ResolveEndpoint(dstIP, dstLabelID, datapathContext)
 	var sourceService, destinationService *pb.Service

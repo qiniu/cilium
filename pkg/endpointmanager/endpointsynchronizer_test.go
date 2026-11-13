@@ -216,3 +216,32 @@ func TestCEPOwnerConflict(t *testing.T) {
 	// of another owner, so it is adopted as before.
 	assert.NoError(t, cepOwnerConflict(cepWithOwner(""), "app.7.net1"))
 }
+
+// The CEP must never pair a VNI with the identity of another scope: while a
+// running endpoint migrates, VNIID moves before the identity of the new scope
+// is resolved, so the VNI is taken from the published identity.
+func TestCiliumEndpointVNIAnnotationsFollowIdentity(t *testing.T) {
+	status := func(lbls ...string) *v2.EndpointStatus {
+		return &v2.EndpointStatus{Identity: &v2.EndpointIdentity{ID: 1, Labels: lbls}}
+	}
+	vniLabel := func(vni string) string { return "vni:io-cilium-native-vpc-vni=" + vni }
+
+	for _, tt := range []struct {
+		name  string
+		vniID uint64
+		mdl   *v2.EndpointStatus
+		want  string
+	}{
+		{name: "identity of the old scope during a migration", vniID: 4, mdl: status("k8s:sg=shared", vniLabel("5")), want: "5"},
+		{name: "identity of the current scope", vniID: 4, mdl: status("k8s:sg=shared", vniLabel("4")), want: "4"},
+		{name: "identity without a scope label (init)", vniID: 4, mdl: status("reserved:init"), want: "4"},
+		{name: "no published status", vniID: 4, want: "4"},
+		{name: "unusable scope label", vniID: 4, mdl: status(vniLabel("x")), want: "4"},
+		{name: "not a native-vpc endpoint", mdl: status("k8s:app=x")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ciliumEndpointVNIAnnotations(&endpoint.Endpoint{VNIID: tt.vniID}, tt.mdl)
+			assert.Equal(t, tt.want, got[ciliumEndpointVNIAnnotation])
+		})
+	}
+}

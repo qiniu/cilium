@@ -332,7 +332,8 @@ func (r *endpointRestorer) validateEndpoint(ep *endpoint.Endpoint) (valid bool, 
 		}
 
 		// Native-vpc: re-read the VNI from the pod's tunnel_key annotation
-		// before the endpoint is exposed to the endpoint manager, so the
+		// before the endpoint is exposed to the endpoint manager - the one
+		// point where the endpoint may also move to another scope - so the
 		// identifier index (vni-ipv4/6) and the serialized state are built with
 		// the converged VNI (decision table: absent -> native scheme; valid
 		// non-zero -> VNIID; zero/invalid -> error + native fallback, see
@@ -342,7 +343,7 @@ func (r *endpointRestorer) validateEndpoint(ep *endpoint.Endpoint) (valid bool, 
 		// the tunnel_key+IP resources on the control, cache and forwarding
 		// planes after kube-ovn backfills the annotation.
 		if option.Config.EnableNativeVPC && ep.GetPod() != nil {
-			if ep.SyncVNIFromPodAnnotation(ep.GetPod()) {
+			if ep.SyncVNIFromPodAnnotationBeforeExpose(ep.GetPod()) {
 				r.logger.Info("Native-vpc VNI refreshed from pod annotation on restore",
 					logfields.EndpointID, ep.ID,
 					logfields.K8sPodName, ep.GetK8sNamespaceAndPodName(),

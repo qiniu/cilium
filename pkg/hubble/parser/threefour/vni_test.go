@@ -60,7 +60,19 @@ func (g *vniEndpointGetter) GetEndpointInfoForVNI(ip netip.Addr, vni uint32) (ge
 //
 // Both pods use the same IP in two different VPCs, so any bare-IP lookup in
 // the chain would attribute the flow to the wrong VPC.
+//
+// The encapsulated case carries the foreign VPC's VNI in a VXLAN header: the
+// wire VNI is OVN's per-datapath key, not the native-vpc scope, and must not
+// replace the local endpoint's VNI.
 func TestTraceNotifyVNIChain(t *testing.T) {
+	for _, encapsulated := range []bool{false, true} {
+		t.Run(map[bool]string{false: "plain", true: "overlay header is ignored"}[encapsulated], func(t *testing.T) {
+			testTraceNotifyVNIChain(t, encapsulated)
+		})
+	}
+}
+
+func testTraceNotifyVNIChain(t *testing.T, encapsulated bool) {
 	oldNativeVPC := option.Config.EnableNativeVPC
 	option.Config.EnableNativeVPC = true
 	t.Cleanup(func() { option.Config.EnableNativeVPC = oldNativeVPC })
@@ -140,10 +152,32 @@ func TestTraceNotifyVNIChain(t *testing.T) {
 		SrcLabel: identity.NumericIdentity(11111),
 		Version:  monitor.TraceNotifyVersion2,
 	}
+	var outer []gopacket.SerializableLayer
+	if encapsulated {
+		tn.Flags = monitor.TraceNotifyFlagIsVXLAN
+		outer = []gopacket.SerializableLayer{
+			&layers.Ethernet{
+				SrcMAC:       net.HardwareAddr{1, 2, 3, 4, 5, 6},
+				DstMAC:       net.HardwareAddr{7, 8, 9, 0, 1, 2},
+				EthernetType: layers.EthernetTypeIPv4,
+			},
+			&layers.IPv4{
+				Version:  4,
+				IHL:      5,
+				Length:   99,
+				TTL:      64,
+				Protocol: layers.IPProtocolUDP,
+				SrcIP:    net.IP{192, 168, 1, 1},
+				DstIP:    net.IP{192, 168, 1, 2},
+			},
+			&layers.UDP{SrcPort: 4789, DstPort: 8472},
+			&layers.VXLAN{ValidIDFlag: true, VNI: foreignVNI},
+		}
+	}
 	buf := &bytes.Buffer{}
 	require.NoError(t, binary.Write(buf, byteorder.Native, &tn))
 	packet := gopacket.NewSerializeBuffer()
-	require.NoError(t, gopacket.SerializeLayers(packet, gopacket.SerializeOptions{},
+	require.NoError(t, gopacket.SerializeLayers(packet, gopacket.SerializeOptions{}, append(outer,
 		&layers.Ethernet{
 			SrcMAC:       net.HardwareAddr{1, 2, 3, 4, 5, 6},
 			DstMAC:       net.HardwareAddr{7, 8, 9, 0, 1, 2},
@@ -159,7 +193,7 @@ func TestTraceNotifyVNIChain(t *testing.T) {
 			DstIP:    dstAddr.AsSlice(),
 		},
 		&layers.UDP{SrcPort: 23939, DstPort: 53},
-	))
+	)...))
 	buf.Write(packet.Bytes())
 
 	parser, err := New(hivetest.Logger(t), endpointGetter, identityGetter,
@@ -183,6 +217,9 @@ func TestTraceNotifyVNIChain(t *testing.T) {
 	require.Equal(t, "server", f.GetDestination().GetPodName())
 	require.Equal(t, uint64(localVNI), f.GetDestination().GetVniId())
 	require.NotEqual(t, "foreign", f.GetDestination().GetPodName())
+	if encapsulated {
+		require.Equal(t, foreignVNI, f.GetTunnel().GetVni(), "the overlay header was decoded")
+	}
 }
 
 // TestTraceNotifyNoVNIWhenDisabled verifies the extra endpoint-by-ID lookup is
