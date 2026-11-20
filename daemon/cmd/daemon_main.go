@@ -1238,6 +1238,7 @@ type daemonConfigParams struct {
 	KPRConfig       kpr.KPRConfig
 	KPRInitializer  kprinitializer.KPRInitializer
 	IPSecConfig     datapath.IPsecConfig
+	BandwidthConfig datapath.BandwidthConfig
 	WireguardConfig wgTypes.WireguardConfig
 	ClusterInfo     cmtypes.ClusterInfo
 	ClusterMesh     cmcommon.Config
@@ -1269,6 +1270,7 @@ type daemonParams struct {
 	Devices             statedb.Table[*datapathTables.Device]
 	DirectRoutingDevice datapathTables.DirectRoutingDevice
 	IPsecAgent          datapath.IPsecAgent
+	BandwidthManager    datapath.BandwidthManager
 	SyncHostIPs         *syncHostIPs
 	NodeDiscovery       *nodediscovery.NodeDiscovery
 	IPAM                *ipam.IPAM

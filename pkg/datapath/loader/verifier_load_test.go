@@ -23,6 +23,15 @@ func lxcLoadPermutations() iter.Seq[*config.BPFLXC] {
 				return
 			}
 		}
+
+		// The generic-veth ingress meter is independent of the flags above,
+		// so verify it once instead of doubling the matrix. Only the
+		// complexity-test fixture built without ENABLE_HOST_ROUTING compiles
+		// it in at all.
+		cfg := config.NewBPFLXC(*config.NewNode())
+		cfg.Node.TracingIPOptionType = 1
+		cfg.CniChainingGenericVeth = true
+		yield(cfg)
 	}
 }
 

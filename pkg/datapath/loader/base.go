@@ -182,7 +182,7 @@ func (l *loader) reinitializeEncryption(ctx context.Context, lnc *datapath.Local
 	// the code below, specific to EncryptInterface. Specifically, we will load
 	// bpf_host code in reloadHostDatapath onto the physical devices as selected
 	// by configuration.
-	if !lnc.EnableIPSec || option.Config.AreDevicesRequired(lnc.KPRConfig, lnc.EnableWireguard, lnc.EnableIPSec) {
+	if !lnc.EnableIPSec || option.Config.AreDevicesRequired(lnc.KPRConfig, lnc.EnableWireguard, lnc.EnableIPSec, lnc.EnableBandwidthManager) {
 		return nil
 	}
 

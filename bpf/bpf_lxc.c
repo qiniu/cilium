@@ -25,6 +25,7 @@
 #include "lib/config.h"
 #include "lib/arp.h"
 #include "lib/edt.h"
+#include "lib/token_bucket.h"
 #include "lib/ipv6.h"
 #include "lib/ipv4.h"
 #include "lib/icmp6.h"
@@ -2707,6 +2708,39 @@ int cil_to_container(struct __ctx_buff *ctx)
 	}
 #endif /* ENABLE_HOST_FIREWALL && !ENABLE_ROUTING */
 
+#ifndef ENABLE_HOST_ROUTING
+	/* In generic-veth CNI chaining the packet is delivered to the pod
+	 * directly by the chained CNI and never traverses local_delivery(),
+	 * which is where ingress bandwidth QoS is normally enforced. Apply it
+	 * here instead, gated on the chaining mode so it runs exactly once per
+	 * packet: this site is mutually exclusive with the local_delivery() site,
+	 * which only runs when Cilium itself delivers the packet (non-chaining).
+	 * Metering at both sites would consume tokens twice and halve the
+	 * configured ingress rate. With BPF host routing the packet is delivered
+	 * via redirect_peer() and bypasses this hook entirely, hence the
+	 * !ENABLE_HOST_ROUTING guard. accept() is a no-op unless the bandwidth
+	 * manager is enabled.
+	 *
+	 * Meter the same traffic local_delivery() meters, no more: it skips
+	 * from_host traffic, which here is the hostns (HOST_ID) and the L7
+	 * proxy, so that health probes and proxied connections are not charged
+	 * to the pod's limit. Non-IP traffic (ARP) is skipped as well, as
+	 * local_delivery() is only reached from the IP paths: dropping an ARP
+	 * reply on a saturated link would break the pod's connectivity.
+	 */
+	if (CONFIG(cni_chaining_generic_veth) &&
+	    (proto == bpf_htons(ETH_P_IP) || proto == bpf_htons(ETH_P_IPV6)) &&
+	    identity != HOST_ID &&
+	    magic != MARK_MAGIC_PROXY_INGRESS && magic != MARK_MAGIC_PROXY_EGRESS) {
+		ret = accept(ctx, LXC_ID);
+		/* Drop silently, as local_delivery() does: accept() returns
+		 * CTX_ACT_DROP, not a DROP_* reason, so a drop notification would
+		 * carry a bogus reason code.
+		 */
+		if (IS_ERR(ret))
+			return ret;
+	}
+#endif /* !ENABLE_HOST_ROUTING */
 
 	switch (proto) {
 #if defined(ENABLE_ARP_PASSTHROUGH) || defined(ENABLE_ARP_RESPONDER)
