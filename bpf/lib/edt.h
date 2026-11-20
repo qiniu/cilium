@@ -10,6 +10,12 @@
 
 #define DIRECTION_EGRESS 0
 #define DIRECTION_INGRESS 1
+/* Egress policing for CNI chaining: EDT pacing (DIRECTION_EGRESS) is applied
+ * in cil_to_netdev on a native device, which a chained CNI's packet never
+ * reaches with its aggregate intact, so a separate entry carries the same
+ * limit for the token bucket in cil_from_container.
+ */
+#define DIRECTION_EGRESS_POLICE 2
 
 struct edt_id {
 	__u32		id;

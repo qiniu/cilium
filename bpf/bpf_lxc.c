@@ -1843,6 +1843,27 @@ int cil_from_container(struct __ctx_buff *ctx)
 		goto out;
 	}
 
+	/* In generic-veth CNI chaining the packet leaves Cilium's datapath here:
+	 * the chained CNI (e.g. Kube-OVN via OVS) re-injects it into the stack,
+	 * which drops the EDT aggregate carried in skb->queue_mapping, so
+	 * edt_sched_departure() in cil_to_netdev never matches the endpoint and
+	 * the egress limit is silently not enforced. Police it here instead,
+	 * against the dedicated DIRECTION_EGRESS_POLICE entry the agent only
+	 * writes in this mode: the EDT entry keeps its own meaning (and its
+	 * t_horizon_drop) so pacing is untouched where it does work.
+	 *
+	 * Policing drops rather than paces, which is the only option left once
+	 * the packet is about to leave our datapath. Metered for IP traffic
+	 * only, like the ingress site. Dropped silently, as accept() returns
+	 * CTX_ACT_DROP rather than a DROP_* reason.
+	 */
+	if (CONFIG(cni_chaining_generic_veth) &&
+	    (proto == bpf_htons(ETH_P_IP) || proto == bpf_htons(ETH_P_IPV6))) {
+		ret = accept(ctx, LXC_ID, DIRECTION_EGRESS_POLICE);
+		if (IS_ERR(ret))
+			return ret;
+	}
+
 	switch (proto) {
 #ifdef ENABLE_IPV6
 	case bpf_htons(ETH_P_IPV6):
@@ -2732,7 +2753,7 @@ int cil_to_container(struct __ctx_buff *ctx)
 	    (proto == bpf_htons(ETH_P_IP) || proto == bpf_htons(ETH_P_IPV6)) &&
 	    identity != HOST_ID &&
 	    magic != MARK_MAGIC_PROXY_INGRESS && magic != MARK_MAGIC_PROXY_EGRESS) {
-		ret = accept(ctx, LXC_ID);
+		ret = accept(ctx, LXC_ID, DIRECTION_INGRESS);
 		/* Drop silently, as local_delivery() does: accept() returns
 		 * CTX_ACT_DROP, not a DROP_* reason, so a drop notification would
 		 * carry a bogus reason code.

@@ -136,7 +136,7 @@ local_delivery(struct __ctx_buff *ctx, __u32 seclabel, __u32 magic,
 		 */
 		int ret;
 
-		ret = accept(ctx, ep->lxc_id);
+		ret = accept(ctx, ep->lxc_id, DIRECTION_INGRESS);
 		if (IS_ERR(ret))
 			return ret;
 	}

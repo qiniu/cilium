@@ -13,7 +13,8 @@
 /* For now the map is not thread safe, may add spin lock in the future */
 
 #if defined(ENABLE_BANDWIDTH_MANAGER) && __ctx_is == __ctx_skb
-static __always_inline int accept(struct __ctx_buff *ctx, __u32 ep_id)
+static __always_inline int accept(struct __ctx_buff *ctx, __u32 ep_id,
+				  __u8 direction)
 {
 	__u64 tokens, now, t_last, elapsed_time, bps;
 	struct edt_id aggregate = {};
@@ -24,7 +25,7 @@ static __always_inline int accept(struct __ctx_buff *ctx, __u32 ep_id)
 	if (!aggregate.id)
 		return CTX_ACT_OK;
 
-	aggregate.direction = DIRECTION_INGRESS;
+	aggregate.direction = direction;
 
 	info = map_lookup_elem(&cilium_throttle, &aggregate);
 	if (!info)
@@ -53,7 +54,8 @@ static __always_inline int accept(struct __ctx_buff *ctx, __u32 ep_id)
 }
 #else
 static __always_inline int
-accept(struct __ctx_buff *ctx __maybe_unused, __u32 ep_id __maybe_unused)
+accept(struct __ctx_buff *ctx __maybe_unused, __u32 ep_id __maybe_unused,
+       __u8 direction __maybe_unused)
 {
 	return CTX_ACT_OK;
 }
