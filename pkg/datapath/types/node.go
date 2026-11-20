@@ -181,6 +181,11 @@ type LocalNodeConfiguration struct {
 	// EnableIPSec enables IPSec routes
 	EnableIPSec bool
 
+	// EnableBandwidthManager is the bandwidth manager's effective state
+	// after its probe, used to decide whether the native devices have to be
+	// attached for EDT egress pacing (cil_to_netdev).
+	EnableBandwidthManager bool
+
 	// EncryptNode enables encrypting NodeIP traffic
 	EncryptNode bool
 

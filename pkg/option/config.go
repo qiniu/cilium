@@ -1180,6 +1180,10 @@ type DaemonConfig struct {
 	DatapathMode string // Datapath mode
 	RoutingMode  string // Routing mode
 
+	// CNIChainingMode configures which CNI plugin Cilium is chained with.
+	// Mirrored from the cni cell's flag for datapath config use.
+	CNIChainingMode string
+
 	DryMode bool // Do not create BPF maps, devices, ..
 
 	// RestoreState enables restoring the state from previous running daemons.
@@ -1974,9 +1978,12 @@ func (c *DaemonConfig) TunnelingEnabled() bool {
 
 // AreDevicesRequired returns true if the agent needs to attach to the native
 // devices to implement some features.
-func (c *DaemonConfig) AreDevicesRequired(kprCfg kpr.KPRConfig, wireguardEnabled, ipsecEnabled bool) bool {
+// The bandwidth manager is in the list because EDT egress pacing runs in
+// cil_to_netdev, which is only attached to the native devices when they are
+// required.
+func (c *DaemonConfig) AreDevicesRequired(kprCfg kpr.KPRConfig, wireguardEnabled, ipsecEnabled, bandwidthManagerEnabled bool) bool {
 	return kprCfg.KubeProxyReplacement || c.EnableBPFMasquerade || c.EnableHostFirewall || wireguardEnabled ||
-		c.EnableL2Announcements || c.ForceDeviceRequired || ipsecEnabled
+		c.EnableL2Announcements || c.ForceDeviceRequired || ipsecEnabled || bandwidthManagerEnabled
 }
 
 // NeedEgressOnWireGuardDevice returns true if the agent needs to attach
@@ -2424,6 +2431,7 @@ func (c *DaemonConfig) Populate(logger *slog.Logger, vp *viper.Viper) {
 	c.CGroupRoot = vp.GetString(CGroupRoot)
 	c.ClusterID = vp.GetUint32(clustermeshTypes.OptClusterID)
 	c.ClusterName = vp.GetString(clustermeshTypes.OptClusterName)
+	c.CNIChainingMode = vp.GetString(CNIChainingMode)
 	c.MaxConnectedClusters = vp.GetUint32(clustermeshTypes.OptMaxConnectedClusters)
 	c.DatapathMode = vp.GetString(DatapathMode)
 	c.DebugVerbose = vp.GetStringSlice(DebugVerbose)

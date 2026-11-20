@@ -123,6 +123,7 @@ func (e Edt) TableHeader() []string {
 			"Status",
 		}
 	}
+	// Ingress and policed egress carry a limit and nothing else.
 	return []string{
 		"EndpointID",
 		"BitsPerSecond",

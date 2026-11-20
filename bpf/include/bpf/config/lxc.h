@@ -22,3 +22,6 @@ DECLARE_CONFIG(__u64, endpoint_netns_cookie, "The endpoint's network namespace c
  * every VPC; the loader rewrites it when loading the endpoint program.
  */
 DECLARE_CONFIG(__u32, native_vpc_vni, "The endpoint's native-vpc VNI")
+
+DECLARE_CONFIG(bool, cni_chaining_generic_veth,
+	       "Cilium is chained with a generic-veth CNI plugin (e.g. Kube-OVN)")

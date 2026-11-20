@@ -72,8 +72,11 @@ func listBandwidth(bpfBandwidthList map[string][]string) {
 		}
 		if len(keys) > 1 {
 			dir, _ := strconv.Atoi(strings.TrimSpace(keys[1]))
-			if dir == 1 {
+			switch dir {
+			case 1:
 				dirStr = "Ingress"
+			case 2:
+				dirStr = "Egress (policed)"
 			}
 		}
 

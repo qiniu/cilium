@@ -56,10 +56,15 @@ const (
 	BestEffortQoSDefaultPriority = 5 + 1
 )
 
-// Must be in sync with DIRECTION_* in <bpf/lib/common.h>
+// Must be in sync with DIRECTION_* in <bpf/lib/edt.h>
 const (
 	DirectionEgress  uint8 = 0
 	DirectionIngress uint8 = 1
+	// DirectionEgressPolice carries the egress limit for the token bucket in
+	// cil_from_container. It only exists in generic-veth CNI chaining, where
+	// the chained CNI re-injects the packet into the stack and the EDT
+	// aggregate never reaches cil_to_netdev, so pacing cannot be applied.
+	DirectionEgressPolice uint8 = 2
 )
 
 type manager struct {
@@ -112,19 +117,36 @@ func (m *manager) UpdateBandwidthLimit(epID uint16, bytesPerSecond uint64, prio 
 			txn,
 			bwmap.NewEdt(epID, DirectionEgress, bytesPerSecond, prio),
 		)
+		if m.egressPoliced() {
+			m.params.EdtTable.Insert(
+				txn,
+				bwmap.NewEdt(epID, DirectionEgressPolice, bytesPerSecond, 0),
+			)
+		}
 		txn.Commit()
 	}
+}
+
+// egressPoliced reports whether the egress limit has to be policed in
+// cil_from_container instead of paced in cil_to_netdev, which is the case when
+// a chained CNI owns the path from the pod to the wire: the EDT aggregate is
+// carried in skb->queue_mapping and does not survive the chained CNI
+// re-injecting the packet into the stack.
+func (m *manager) egressPoliced() bool {
+	return m.params.DaemonConfig.CNIChainingMode == "generic-veth"
 }
 
 func (m *manager) DeleteBandwidthLimit(epID uint16) {
 	if m.enabled {
 		txn := m.params.DB.WriteTxn(m.params.EdtTable)
-		obj, _, found := m.params.EdtTable.Get(txn, bwmap.EdtIDIndex.Query(bwmap.EdtIDKey{
-			EndpointID: epID,
-			Direction:  DirectionEgress,
-		}))
-		if found {
-			m.params.EdtTable.Delete(txn, obj)
+		for _, direction := range []uint8{DirectionEgress, DirectionEgressPolice} {
+			obj, _, found := m.params.EdtTable.Get(txn, bwmap.EdtIDIndex.Query(bwmap.EdtIDKey{
+				EndpointID: epID,
+				Direction:  direction,
+			}))
+			if found {
+				m.params.EdtTable.Delete(txn, obj)
+			}
 		}
 		txn.Commit()
 	}
