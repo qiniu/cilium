@@ -25,6 +25,7 @@
 #include "lib/config.h"
 #include "lib/arp.h"
 #include "lib/edt.h"
+#include "lib/token_bucket.h"
 #include "lib/ipv6.h"
 #include "lib/ipv4.h"
 #include "lib/icmp6.h"
@@ -685,6 +686,74 @@ struct {
 	__uint(max_entries, 1);
 } cilium_tail_call_buffer6 __section_maps_btf;
 
+/* Hands the pod's egress packet to a pacing qdisc when a chained CNI owns the
+ * path from here to the wire.
+ *
+ * EDT pacing marks the packet in cil_from_container and applies the rate in
+ * cil_to_netdev on a native device, relying on skb->queue_mapping to carry the
+ * endpoint's aggregate in between. With a chained CNI the packet leaves our
+ * datapath here: it is handed to the chained CNI (e.g. Kube-OVN's OVS), which
+ * re-injects it into the stack through its own port, so the skb reaching
+ * cil_to_netdev is a forwarded one, without the aggregate and usually already
+ * SNATed or encapsulated. Pacing there is therefore impossible.
+ *
+ * Compute the departure time here instead, where the endpoint is known, and
+ * redirect to the agent's ifb device, whose FQ qdisc does the pacing before
+ * handing the packet back to its original path. The BPF redirect keeps the
+ * departure time (skb_set_redirected_noclear()) and the ifb re-injection sets
+ * tc_skip_classify, so the packet resumes after this program instead of
+ * running it again.
+ *
+ * The length charged here is the one of the ingress hook, skb->len: it leaves
+ * out the Ethernet header and, for a GSO packet, the headers of all segments
+ * but the first. The rate on the wire is therefore a few percent above the
+ * limit, about 5% for full-sized TCP segments, where cil_to_netdev
+ * would charge the wire length.
+ *
+ * TODO: the IPv6 path (tail_handle_ipv6_cont) mirrors the IPv4 one but has
+ * neither a BPF test nor a run on a cluster with IPv6 enabled behind it.
+ */
+static __always_inline __maybe_unused int
+bwm_chained_egress(struct __ctx_buff *ctx __maybe_unused, __be16 proto __maybe_unused,
+		   int verdict)
+{
+#if defined(ENABLE_BANDWIDTH_MANAGER)
+	bool paced = false;
+	int ret;
+
+	/* Only traffic handed to the stack, which is where the chained CNI
+	 * picks it up. Anything Cilium delivers itself (local endpoints, the
+	 * proxy) never reaches a pacing qdisc, exactly as with EDT on a native
+	 * device.
+	 */
+	if (verdict != CTX_ACT_OK)
+		return verdict;
+	/* Set only when the egress limits are paced on the ifb, which is a
+	 * chained CNI only.
+	 */
+	if (!CONFIG(bwm_ifb_ifindex))
+		return verdict;
+
+	ret = edt_sched_departure_aggregate(ctx, proto, LXC_ID, true, &paced);
+	if (IS_ERR(ret))
+		return ret;
+	/* Endpoints without a limit keep their path: the detour is only worth
+	 * its queueing for a packet that has a departure time to honour.
+	 */
+	if (!paced)
+		return verdict;
+
+	/* The aggregate has been accounted for here, so clear it: a later EDT
+	 * site must not pace the same packet twice.
+	 */
+	edt_set_aggregate(ctx, 0);
+
+	return ctx_redirect(ctx, CONFIG(bwm_ifb_ifindex), 0);
+#else
+	return verdict;
+#endif /* ENABLE_BANDWIDTH_MANAGER */
+}
+
 #ifdef ENABLE_IPV6
 static __always_inline int
 ipv6_forward_to_destination(struct __ctx_buff *ctx, struct ipv6hdr *ip6,
@@ -1090,6 +1159,7 @@ int tail_handle_ipv6_cont(struct __ctx_buff *ctx)
 	__s8 ext_err = 0;
 	int ret = handle_ipv6_from_lxc(ctx, &dst_sec_identity, &ext_err);
 
+	ret = bwm_chained_egress(ctx, bpf_htons(ETH_P_IPV6), ret);
 	if (IS_ERR(ret))
 		return send_drop_notify_ext(ctx, SECLABEL_IPV6, dst_sec_identity,
 					    TRACE_EP_ID_UNKNOWN, ret, ext_err,
@@ -1691,6 +1761,7 @@ int tail_handle_ipv4_cont(struct __ctx_buff *ctx)
 
 	int ret = handle_ipv4_from_lxc(ctx, &dst_sec_identity, &ext_err);
 
+	ret = bwm_chained_egress(ctx, bpf_htons(ETH_P_IP), ret);
 	if (IS_ERR(ret))
 		return send_drop_notify_ext(ctx, SECLABEL_IPV4, dst_sec_identity,
 					    TRACE_EP_ID_UNKNOWN, ret, ext_err,
@@ -2707,6 +2778,39 @@ int cil_to_container(struct __ctx_buff *ctx)
 	}
 #endif /* ENABLE_HOST_FIREWALL && !ENABLE_ROUTING */
 
+#ifndef ENABLE_HOST_ROUTING
+	/* In generic-veth CNI chaining the packet is delivered to the pod
+	 * directly by the chained CNI and never traverses local_delivery(),
+	 * which is where ingress bandwidth QoS is normally enforced. Apply it
+	 * here instead, gated on the chaining mode so it runs exactly once per
+	 * packet: this site is mutually exclusive with the local_delivery() site,
+	 * which only runs when Cilium itself delivers the packet (non-chaining).
+	 * Metering at both sites would consume tokens twice and halve the
+	 * configured ingress rate. With BPF host routing the packet is delivered
+	 * via redirect_peer() and bypasses this hook entirely, hence the
+	 * !ENABLE_HOST_ROUTING guard. accept() is a no-op unless the bandwidth
+	 * manager is enabled.
+	 *
+	 * Meter the same traffic local_delivery() meters, no more: it skips
+	 * from_host traffic, which here is the hostns (HOST_ID) and the L7
+	 * proxy, so that health probes and proxied connections are not charged
+	 * to the pod's limit. Non-IP traffic (ARP) is skipped as well, as
+	 * local_delivery() is only reached from the IP paths: dropping an ARP
+	 * reply on a saturated link would break the pod's connectivity.
+	 */
+	if (CONFIG(cni_chaining_generic_veth) &&
+	    (proto == bpf_htons(ETH_P_IP) || proto == bpf_htons(ETH_P_IPV6)) &&
+	    identity != HOST_ID &&
+	    magic != MARK_MAGIC_PROXY_INGRESS && magic != MARK_MAGIC_PROXY_EGRESS) {
+		ret = accept(ctx, LXC_ID);
+		/* Drop silently, as local_delivery() does: accept() returns
+		 * CTX_ACT_DROP, not a DROP_* reason, so a drop notification would
+		 * carry a bogus reason code.
+		 */
+		if (IS_ERR(ret))
+			return ret;
+	}
+#endif /* !ENABLE_HOST_ROUTING */
 
 	switch (proto) {
 #if defined(ENABLE_ARP_PASSTHROUGH) || defined(ENABLE_ARP_RESPONDER)

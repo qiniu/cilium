@@ -8,11 +8,32 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/cilium/cilium/pkg/testutils"
 )
+
+// TestWriteSkbHeader pins the macro the EDT pacing depends on: with it the
+// datapath hands the departure time over with bpf_skb_set_tstamp(), without it
+// it falls back to writing ctx->tstamp, which is all a pre-5.18 kernel can do.
+// Emitting it unconditionally would stop the datapath from loading there.
+func TestWriteSkbHeader(t *testing.T) {
+	for _, available := range []bool{true, false} {
+		buf := new(bytes.Buffer)
+		probes := &FeatureProbes{ProgramHelpers: map[ProgramHelper]bool{
+			{ebpf.SchedCLS, asm.FnSkbSetTstamp}: available,
+		}}
+		assert.NoError(t, writeSkbHeader(buf, probes))
+		if available {
+			assert.Contains(t, buf.String(), "#define HAVE_SKB_SET_TSTAMP 1")
+		} else {
+			assert.NotContains(t, buf.String(), "HAVE_SKB_SET_TSTAMP 1")
+		}
+	}
+}
 
 func TestWriteFeatureHeader(t *testing.T) {
 	testCases := []struct {

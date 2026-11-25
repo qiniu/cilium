@@ -252,7 +252,11 @@ func attachNetworkDevices(logger *slog.Logger, ep datapath.Endpoint, lnc *datapa
 			return fmt.Errorf("interface %s ingress: %w", device, err)
 		}
 
-		if option.Config.AreDevicesRequired(lnc.KPRConfig, lnc.EnableWireguard, lnc.EnableIPSec) {
+		// The bandwidth manager needs cil_to_netdev only where it paces;
+		// with a chained CNI it paces on its own ifb instead, and a
+		// failure to set that up must not move it onto the node's devices.
+		pacesHere := lnc.EnableBandwidthManager && !option.Config.GenericVethChaining()
+		if option.Config.IsEgressProgramRequired(lnc.KPRConfig, lnc.EnableWireguard, lnc.EnableIPSec, pacesHere) {
 			// Attach cil_to_netdev to egress.
 			if err := attachSKBProgram(logger, iface, netdevObj.ToNetdev, symbolToHostNetdevEp,
 				linkDir, netlink.HANDLE_MIN_EGRESS, option.Config.EnableTCX); err != nil {
