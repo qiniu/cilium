@@ -17,6 +17,7 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 type ops struct {
@@ -52,6 +53,14 @@ func (ops *ops) Update(ctx context.Context, txn statedb.ReadTxn, _ statedb.Revis
 	if err != nil {
 		return fmt.Errorf("LinkByIndex: %w", err)
 	}
+
+	return setupPacingQdisc(ops.log, link, q.FqHorizon, q.FqBuckets)
+}
+
+// setupPacingQdisc gives the device the FQ qdisc the EDT pacing of the
+// bandwidth manager needs, for the native devices as well as for the ifb the
+// chained-CNI path paces on.
+func setupPacingQdisc(log *slog.Logger, link netlink.Link, fqHorizon time.Duration, fqBuckets uint32) error {
 	device := link.Attrs().Name
 
 	// Check if the qdiscs are already set up as expected.
@@ -72,14 +81,23 @@ func (ops *ops) Update(ctx context.Context, txn statedb.ReadTxn, _ statedb.Revis
 			if qdisc.Type() == "mq" {
 				updatedQdiscs++
 			}
+			// A device without mq support, such as the ifb the
+			// chained-CNI path paces on, carries the fq itself.
+			// Without this it would be replaced on every call,
+			// dropping whatever the qdisc holds.
+			if fq, ok := qdisc.(*netlink.Fq); ok &&
+				fq.Horizon == uint32(fqHorizon.Microseconds()) &&
+				fq.Buckets == fqBuckets {
+				updatedQdiscs++
+			}
 		default:
 			if qdisc.Type() == "fq" {
 				fq, _ := qdisc.(*netlink.Fq)
 
 				// If it's "fq" and with our parameters, then assume this was
 				// already set up and there wasn't any MQ support.
-				ok := fq.Horizon == uint32(q.FqHorizon.Microseconds()) &&
-					fq.Buckets == q.FqBuckets
+				ok := fq.Horizon == uint32(fqHorizon.Microseconds()) &&
+					fq.Buckets == fqBuckets
 				if ok {
 					updatedQdiscs++
 				}
@@ -129,7 +147,7 @@ func (ops *ops) Update(ctx context.Context, txn statedb.ReadTxn, _ statedb.Revis
 		}
 		which = "fq"
 	}
-	ops.log.Info("Setting qdisc",
+	log.Info("Setting qdisc",
 		logfields.Qdisc, which,
 		logfields.Device, device)
 

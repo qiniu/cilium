@@ -22,6 +22,7 @@ import (
 	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/defaults"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+	"github.com/cilium/cilium/pkg/kpr"
 	"github.com/cilium/cilium/pkg/util"
 )
 
@@ -1209,4 +1210,29 @@ func TestApiRateLimitValidation(t *testing.T) {
 		"endpoint-list": "auto-adjust:true,estimated-processing-duration:300ms,rate-limit:16/s,rate-burst:32,min-parallel-requests:8,max-parallel-requests:16,log:false", 
 		"endpoint-patch": "auto-adjust:true,estimated-processing-duration:200ms,rate-limit:16/s,rate-burst:32,min-parallel-requests:16,max-parallel-requests:128,log:false"
 		}`), "must accept JSON object")
+}
+
+// TestAreDevicesRequired pins that enabling the bandwidth manager alone makes
+// the native devices required: EDT egress pacing runs in cil_to_netdev, which
+// is only attached when they are.
+func TestAreDevicesRequired(t *testing.T) {
+	var none DaemonConfig
+	assert.False(t, none.AreDevicesRequired(kpr.KPRConfig{}, false, false))
+	assert.True(t, none.AreDevicesRequired(kpr.KPRConfig{KubeProxyReplacement: true}, false, false))
+	assert.True(t, (&DaemonConfig{EnableHostFirewall: true}).AreDevicesRequired(kpr.KPRConfig{}, false, false))
+}
+
+// TestIsEgressProgramRequired pins that the bandwidth manager pulls in
+// cil_to_netdev, which is where EDT paces, without pulling in the features
+// AreDevicesRequired() gates: requiring a single direct routing device would
+// refuse to start a node that has none, such as one whose devices are selected
+// explicitly and whose node IP sits on a management interface.
+func TestIsEgressProgramRequired(t *testing.T) {
+	var none DaemonConfig
+	assert.False(t, none.IsEgressProgramRequired(kpr.KPRConfig{}, false, false, false))
+	assert.True(t, none.IsEgressProgramRequired(kpr.KPRConfig{}, false, false, true),
+		"the bandwidth manager alone needs the egress program")
+	assert.False(t, none.AreDevicesRequired(kpr.KPRConfig{}, false, false),
+		"and nothing else: a direct routing device is not one of its needs")
+	assert.True(t, none.IsEgressProgramRequired(kpr.KPRConfig{KubeProxyReplacement: true}, false, false, false))
 }

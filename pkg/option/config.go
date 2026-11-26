@@ -1180,6 +1180,10 @@ type DaemonConfig struct {
 	DatapathMode string // Datapath mode
 	RoutingMode  string // Routing mode
 
+	// CNIChainingMode configures which CNI plugin Cilium is chained with.
+	// Mirrored from the cni cell's flag for datapath config use.
+	CNIChainingMode string
+
 	DryMode bool // Do not create BPF maps, devices, ..
 
 	// RestoreState enables restoring the state from previous running daemons.
@@ -1979,6 +1983,24 @@ func (c *DaemonConfig) AreDevicesRequired(kprCfg kpr.KPRConfig, wireguardEnabled
 		c.EnableL2Announcements || c.ForceDeviceRequired || ipsecEnabled
 }
 
+// GenericVethChaining returns true if Cilium is chained behind a generic-veth
+// CNI plugin, which then owns the path between the endpoints and the wire.
+func (c *DaemonConfig) GenericVethChaining() bool {
+	return c.CNIChainingMode == "generic-veth"
+}
+
+// IsEgressProgramRequired returns true if cil_to_netdev has to be attached to
+// the egress of the native devices.
+//
+// The bandwidth manager needs it because that is where EDT paces the traffic,
+// but unlike the features in AreDevicesRequired() it has no use for a single
+// direct routing device: it paces every device it is attached to. Requiring
+// one would refuse to start a node whose devices are selected explicitly and
+// whose node IP sits on a separate management interface.
+func (c *DaemonConfig) IsEgressProgramRequired(kprCfg kpr.KPRConfig, wireguardEnabled, ipsecEnabled, bandwidthManagerEnabled bool) bool {
+	return c.AreDevicesRequired(kprCfg, wireguardEnabled, ipsecEnabled) || bandwidthManagerEnabled
+}
+
 // NeedEgressOnWireGuardDevice returns true if the agent needs to attach
 // cil_to_wireguard on the Egress of Cilium's WireGuard device
 func (c *DaemonConfig) NeedEgressOnWireGuardDevice(kprCfg kpr.KPRConfig, wireguardEnabled bool) bool {
@@ -2424,6 +2446,7 @@ func (c *DaemonConfig) Populate(logger *slog.Logger, vp *viper.Viper) {
 	c.CGroupRoot = vp.GetString(CGroupRoot)
 	c.ClusterID = vp.GetUint32(clustermeshTypes.OptClusterID)
 	c.ClusterName = vp.GetString(clustermeshTypes.OptClusterName)
+	c.CNIChainingMode = vp.GetString(CNIChainingMode)
 	c.MaxConnectedClusters = vp.GetUint32(clustermeshTypes.OptMaxConnectedClusters)
 	c.DatapathMode = vp.GetString(DatapathMode)
 	c.DebugVerbose = vp.GetStringSlice(DebugVerbose)

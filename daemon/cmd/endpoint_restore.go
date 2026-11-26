@@ -90,6 +90,7 @@ type endpointRestorerParams struct {
 	EndpointMetadata    endpointmetadata.EndpointMetadataFetcher
 	EndpointAPIFence    endpointapi.Fence
 	IPSecAgent          datapath.IPsecAgent
+	BandwidthManager    datapath.BandwidthManager
 	IPAMManager         *ipam.IPAM
 	CacheStatus         k8sSynced.CacheStatus
 	DirReadStatus       policyDirectory.DirectoryWatcherReadStatus
@@ -108,6 +109,7 @@ type endpointRestorer struct {
 	endpointMetadata    endpointmetadata.EndpointMetadataFetcher
 	endpointAPIFence    endpointapi.Fence
 	ipSecAgent          datapath.IPsecAgent
+	bandwidthManager    datapath.BandwidthManager
 	ipamManager         *ipam.IPAM
 	lxcMap              lxcmap.Map
 
@@ -134,6 +136,7 @@ func newEndpointRestorer(params endpointRestorerParams) *endpointRestorer {
 		endpointMetadata:    params.EndpointMetadata,
 		endpointAPIFence:    params.EndpointAPIFence,
 		ipSecAgent:          params.IPSecAgent,
+		bandwidthManager:    params.BandwidthManager,
 		ipamManager:         params.IPAMManager,
 		lxcMap:              params.LXCMap,
 
@@ -701,6 +704,12 @@ func (r *endpointRestorer) handleRestoredEndpointsRegeneration(endpoints []*endp
 		logfields.Failed, failed,
 		logfields.Total, total,
 	)
+	// Every restored endpoint now runs a program built for this
+	// configuration. One that failed still runs the previous one, which may
+	// redirect its egress to the pacing device.
+	if failed == 0 {
+		r.bandwidthManager.ReleaseEgressIfb()
+	}
 	close(r.endpointRegenerateComplete)
 }
 

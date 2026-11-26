@@ -115,6 +115,7 @@ type orchestratorParams struct {
 	MaglevConfig        maglev.Config
 	WgAgent             wgTypes.WireguardAgent
 	IPsecConfig         datapath.IPsecConfig
+	BandwidthManager    datapath.BandwidthManager
 	BIGTCPConfig        *bigtcp.Configuration
 }
 
@@ -218,6 +219,8 @@ func (o *orchestrator) reconciler(ctx context.Context, health cell.Health) error
 			o.params.MTU,
 			o.params.WgAgent,
 			o.params.IPsecConfig,
+			o.params.BandwidthManager.Enabled(),
+			o.params.BandwidthManager.EgressIfbIfIndex(),
 		)
 		if err != nil {
 			health.Degraded("failed to get local node configuration", err)

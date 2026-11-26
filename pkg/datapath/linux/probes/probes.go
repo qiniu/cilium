@@ -529,6 +529,7 @@ func ExecuteHeaderProbes(logger *slog.Logger) *FeatureProbes {
 		{ebpf.XDP, asm.FnXdpGetBuffLen},
 		{ebpf.XDP, asm.FnXdpLoadBytes},
 		{ebpf.XDP, asm.FnXdpStoreBytes},
+		{ebpf.SchedCLS, asm.FnSkbSetTstamp},
 	}
 	for _, ph := range progHelpers {
 		probes.ProgramHelpers[ph] = (HaveProgramHelper(logger, ph.Program, ph.Helper) == nil)
@@ -548,7 +549,9 @@ func writeCommonHeader(writer io.Writer, probes *FeatureProbes) error {
 
 // writeSkbHeader defines macros for bpf/include/bpf/features_skb.h
 func writeSkbHeader(writer io.Writer, probes *FeatureProbes) error {
-	featuresSkb := map[string]bool{}
+	featuresSkb := map[string]bool{
+		"HAVE_SKB_SET_TSTAMP": probes.ProgramHelpers[ProgramHelper{ebpf.SchedCLS, asm.FnSkbSetTstamp}],
+	}
 
 	return writeFeatureHeader(writer, featuresSkb, false)
 }

@@ -5,6 +5,8 @@
 
 #include <bpf/ctx/ctx.h>
 
+#include <bpf/features_skb.h>
+
 #include "common.h"
 #include "time.h"
 
@@ -61,8 +63,15 @@ static __always_inline __u32 edt_get_aggregate(struct __ctx_buff *ctx)
 	return aggregate;
 }
 
+/* Computes the earliest departure time for the given aggregate and hands it to
+ * the FQ qdisc of the device the packet is about to be queued on. The
+ * aggregate is explicit because the chained-CNI path knows the endpoint it
+ * runs for, while cil_to_netdev has to read it back from the skb (see
+ * edt_sched_departure()).
+ */
 static __always_inline int
-edt_sched_departure(struct __ctx_buff *ctx, __be16 proto)
+edt_sched_departure_aggregate(struct __ctx_buff *ctx, __be16 proto, __u32 aggregate_id,
+			      bool from_endpoint, bool *paced)
 {
 	__u64 delay, now, t, t_next;
 	struct edt_id aggregate = {};
@@ -74,7 +83,7 @@ edt_sched_departure(struct __ctx_buff *ctx, __be16 proto)
 	    proto != bpf_htons(ETH_P_IPV6))
 		return CTX_ACT_OK;
 
-	aggregate.id = edt_get_aggregate(ctx);
+	aggregate.id = aggregate_id;
 	if (!aggregate.id)
 		return CTX_ACT_OK;
 
@@ -86,8 +95,22 @@ edt_sched_departure(struct __ctx_buff *ctx, __be16 proto)
 	if (!info->bps)
 		goto out;
 
+	if (paced)
+		*paced = true;
+
 	now = ktime_get_ns();
-	t = ctx->tstamp;
+	/* What skb->tstamp holds depends on where the program runs. At the
+	 * egress of a device it is a departure time or zero: the forwarding
+	 * paths clear anything else. On the endpoint's own egress program,
+	 * which runs on the ingress hook of its veth, the packet has just been
+	 * received, and any skb that carries no departure time is given its
+	 * receive timestamp, in CLOCK_REALTIME, as soon as something on the
+	 * node asks for timestamps (an NTP daemon, a packet capture). Taking
+	 * that for a departure time would move t_last decades ahead of the
+	 * monotonic clock and have every later packet of the aggregate dropped
+	 * at the horizon.
+	 */
+	t = from_endpoint ? 0 : ctx->tstamp;
 	if (t < now)
 		t = now;
 	delay = ((__u64)ctx_wire_len(ctx)) * NSEC_PER_SEC / info->bps;
@@ -104,7 +127,20 @@ edt_sched_departure(struct __ctx_buff *ctx, __be16 proto)
 	if (t_next - now >= info->t_horizon_drop)
 		return DROP_EDT_HORIZON;
 	WRITE_ONCE(info->t_last, t_next);
+	/* Hand the departure time over as a monotonic delivery time. Writing
+	 * ctx->tstamp alone leaves skb->tstamp_type untouched, so on the
+	 * chained-CNI path, which runs on the ingress hook of the veth where
+	 * the skb may carry a receive timestamp, sch_fq would read the
+	 * departure time back as a realtime one (see fq_skb_tstamp_to_mono()).
+	 * The helper needs a 5.18 kernel, below that there is no tstamp type
+	 * to get wrong and writing the field is all there is.
+	 */
+#ifdef HAVE_SKB_SET_TSTAMP
+	if (skb_set_tstamp(ctx, t_next, BPF_SKB_TSTAMP_DELIVERY_MONO))
+		return DROP_INVALID;
+#else
 	ctx->tstamp = t_next;
+#endif
 out:
 	/* TODO: Hack to avoid defaulting prio 0 when user doesn't specify anything.
 	 * Priority set by user will always be 1 greater than what scheduler expects.
@@ -112,6 +148,12 @@ out:
 	if (info->prio)
 		ctx->priority = info->prio - 1;
 	return CTX_ACT_OK;
+}
+
+static __always_inline int
+edt_sched_departure(struct __ctx_buff *ctx, __be16 proto)
+{
+	return edt_sched_departure_aggregate(ctx, proto, edt_get_aggregate(ctx), false, NULL);
 }
 #else
 static __always_inline void

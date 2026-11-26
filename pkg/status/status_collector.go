@@ -17,6 +17,7 @@ import (
 	"github.com/cilium/cilium/pkg/annotation"
 	"github.com/cilium/cilium/pkg/backoff"
 	"github.com/cilium/cilium/pkg/controller"
+	"github.com/cilium/cilium/pkg/datapath/linux/bandwidth"
 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
 	datapathOption "github.com/cilium/cilium/pkg/datapath/option"
 	datapathTables "github.com/cilium/cilium/pkg/datapath/tables"
@@ -207,6 +208,15 @@ func (d *statusCollector) getBandwidthManagerStatus() *models.BandwidthManager {
 	s.CongestionControl = models.BandwidthManagerCongestionControlCubic
 	if d.statusParams.BandwidthManager.BBREnabled() {
 		s.CongestionControl = models.BandwidthManagerCongestionControlBbr
+	}
+
+	if d.statusParams.DaemonConfig.GenericVethChaining() {
+		// The egress limits are paced on the manager's own device then,
+		// and on nothing at all if it could not be set up.
+		if d.statusParams.BandwidthManager.EgressIfbIfIndex() != 0 {
+			s.Devices = []string{bandwidth.IfbDevice}
+		}
+		return s
 	}
 
 	devs, _ := datapathTables.SelectedDevices(d.statusParams.Devices, d.statusParams.DB.ReadTxn())

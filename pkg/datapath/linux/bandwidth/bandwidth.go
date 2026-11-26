@@ -65,6 +65,10 @@ const (
 type manager struct {
 	enabled bool
 
+	// ifbIfIndex is the pacing device of the chained-CNI path, 0 when
+	// unused. See ifb.go.
+	ifbIfIndex int
+
 	params bandwidthManagerParams
 }
 
@@ -209,6 +213,26 @@ func (m *manager) init() error {
 
 	if err := bwmap.ThrottleMap().OpenOrCreate(); err != nil {
 		return fmt.Errorf("failed to access ThrottleMap: %w", err)
+	}
+	return m.setupPacing()
+}
+
+// setupPacing prepares whatever holds the pacing queue: the manager's own
+// device with a chained CNI, the node's devices otherwise.
+func (m *manager) setupPacing() error {
+	if m.egressViaIfb() {
+		// The settings below tune pacing on the native devices, which the
+		// endpoints' traffic never reaches here: leave the node's qdisc
+		// default and congestion control as the operator set them.
+		if err := m.setupIfb(); err != nil {
+			// Without the device the egress limits are not applied,
+			// but taking the agent down with us would take the
+			// node's networking with it.
+			m.params.Log.Error("Cannot pace the egress of chained endpoints, their egress bandwidth limits will not be applied",
+				logfields.Error, err,
+				logfields.Device, IfbDevice)
+		}
+		return nil
 	}
 
 	if err := setBaselineSysctls(m.params); err != nil {

@@ -43,12 +43,20 @@ type registerParams struct {
 	Table            statedb.RWTable[*tables.BandwidthQDisc]
 	BWM              types.BandwidthManager
 	Config           types.BandwidthConfig
+	DaemonConfig     *option.DaemonConfig
 	DeriveParams     statedb.DeriveParams[*tables.Device, *tables.BandwidthQDisc]
 	ReconcilerParams reconciler.Params
 }
 
 func registerReconciler(p registerParams) error {
 	if !p.Config.EnableBandwidthManager {
+		return nil
+	}
+
+	if egressViaIfb(p.DaemonConfig) {
+		// The pacing qdisc lives on the manager's own device then (see
+		// ifb.go), and replacing the qdisc of the node's devices would
+		// only disturb its own traffic for nothing.
 		return nil
 	}
 

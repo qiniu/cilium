@@ -41,6 +41,14 @@ type BandwidthManager interface {
 	UpdateBandwidthLimit(endpointID uint16, bytesPerSecond uint64, prio uint32)
 	DeleteBandwidthLimit(endpointID uint16)
 
+	// EgressIfbIfIndex returns the ifindex of the device the egress of
+	// chained endpoints is paced on, or 0 when pacing happens in
+	// cil_to_netdev as usual.
+	EgressIfbIfIndex() int
+	// ReleaseEgressIfb removes that device if this configuration does not
+	// use it. Only to be called once no endpoint program of a previous run
+	// can redirect to it any more.
+	ReleaseEgressIfb()
 	UpdateIngressBandwidthLimit(endpointID uint16, bytesPerSecond uint64)
 	DeleteIngressBandwidthLimit(endpointID uint16)
 }

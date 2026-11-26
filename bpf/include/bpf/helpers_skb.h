@@ -35,6 +35,9 @@ static int BPF_FUNC(l4_csum_replace, struct __sk_buff *skb, __u32 off,
 static int BPF_FUNC(skb_adjust_room, struct __sk_buff *skb, __s32 len_diff,
 		    __u32 mode, __u64 flags);
 
+static int BPF_FUNC(skb_set_tstamp, struct __sk_buff *skb, __u64 tstamp,
+		    __u32 tstamp_type);
+
 static int BPF_FUNC(skb_change_type, struct __sk_buff *skb, __u32 type);
 static int BPF_FUNC(skb_change_proto, struct __sk_buff *skb, __u32 proto,
 		    __u32 flags);
