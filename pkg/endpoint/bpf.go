@@ -901,7 +901,7 @@ func (e *Endpoint) deleteMaps() []error {
 		e.bandwidthManager.DeleteBandwidthLimit(e.ID)
 	}
 	if e.ingressBps != 0 {
-		e.bandwidthManager.DeleteIngressBandwidthLimit(e.ID)
+		e.bandwidthManager.DeleteIngressBandwidthLimit(e.ID, e.ifName)
 	}
 
 	// Remove program array pins as the last step. This permanently invalidates

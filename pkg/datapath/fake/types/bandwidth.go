@@ -15,13 +15,12 @@ func (fbm *BandwidthManager) DeleteBandwidthLimit(endpointID uint16) {
 func (fbm *BandwidthManager) UpdateBandwidthLimit(endpointID uint16, bytesPerSecond uint64, prio uint32) {
 }
 
-func (fbm *BandwidthManager) EgressIfbIfIndex() int { return 0 }
+func (fbm *BandwidthManager) ReleaseUnusedPacing() {}
 
-func (fbm *BandwidthManager) ReleaseEgressIfb() {}
+func (fbm *BandwidthManager) UpdateIngressBandwidthLimit(endpointID uint16, ifName string, bytesPerSecond uint64) {
+}
 
-func (fbm *BandwidthManager) UpdateIngressBandwidthLimit(endpointID uint16, bytesPerSecond uint64) {}
-
-func (fbm *BandwidthManager) DeleteIngressBandwidthLimit(endpointID uint16) {}
+func (fbm *BandwidthManager) DeleteIngressBandwidthLimit(endpointID uint16, ifName string) {}
 
 func (fbm *BandwidthManager) BBREnabled() bool {
 	return false

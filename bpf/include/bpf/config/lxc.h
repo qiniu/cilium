@@ -25,6 +25,3 @@ DECLARE_CONFIG(__u32, native_vpc_vni, "The endpoint's native-vpc VNI")
 
 DECLARE_CONFIG(bool, cni_chaining_generic_veth,
 	       "Cilium is chained with a generic-veth CNI plugin (e.g. Kube-OVN)")
-
-DECLARE_CONFIG(__u32, bwm_ifb_ifindex,
-	       "Ifindex of the ifb device pacing the egress of chained endpoints")

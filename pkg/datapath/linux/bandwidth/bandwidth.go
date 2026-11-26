@@ -16,6 +16,7 @@ import (
 	"github.com/cilium/ebpf/asm"
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/datapath/linux/config/defines"
 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
 	"github.com/cilium/cilium/pkg/datapath/tables"
@@ -65,9 +66,8 @@ const (
 type manager struct {
 	enabled bool
 
-	// ifbIfIndex is the pacing device of the chained-CNI path, 0 when
-	// unused. See ifb.go.
-	ifbIfIndex int
+	// throttle is the BPF map the EDT table is reconciled to.
+	throttle *bpf.Map
 
 	params bandwidthManagerParams
 }
@@ -93,30 +93,75 @@ func (m *manager) defines() (defines.Map, error) {
 }
 
 func (m *manager) UpdateBandwidthLimit(epID uint16, bytesPerSecond uint64, prio uint32) {
-	if m.enabled {
-		txn := m.params.DB.WriteTxn(m.params.EdtTable)
-
-		// Set host endpoint to guaranteed QoS class
-		// TODO: This attempts to lookup host endpoint for every BW manager update event.
-		// Find a way to get host endpoint ID during BW manager initialization and move this section to init().
-		// * init() seems to be too early to call node.GetEndpointID()
-		// * Adding a dependency to node manager to call GetHostEndpoint() introduces a nested import.
-		hostEpID := uint16(node.GetEndpointID())
-		_, _, found := m.params.EdtTable.Get(txn, bwmap.EdtIDIndex.Query(bwmap.EdtIDKey{
-			EndpointID: epID,
-			Direction:  DirectionEgress,
-		}))
-		if !found {
-			m.params.EdtTable.Insert(
-				txn,
-				bwmap.NewEdt(hostEpID, DirectionEgress, 0, GuaranteedQoSDefaultPriority),
-			)
+	if !m.enabled {
+		return
+	}
+	edt := bwmap.NewEdt(epID, DirectionEgress, bytesPerSecond, prio)
+	if m.egressViaIfb() {
+		if bytesPerSecond != 0 {
+			// The device comes first: the datapath redirects to
+			// whatever the entry names. On failure whatever limit
+			// is in place stays as it is.
+			// shortcut: no retry, the next update of the endpoint's
+			// bandwidth or restart of the agent tries again.
+			ifindex, err := setupIfb(epID)
+			if err != nil {
+				m.params.Log.Error("Cannot pace the egress of the endpoint, its egress bandwidth limit is not updated",
+					logfields.Error, err,
+					logfields.EndpointID, epID,
+					logfields.Device, ifbName(epID))
+				return
+			}
+			edt.IfIndex = uint32(ifindex)
+		} else {
+			// Before the new entry is committed: this takes the old
+			// one out of the BPF map, and must not take the new one.
+			m.removeIfb(epID)
 		}
+	}
+
+	txn := m.params.DB.WriteTxn(m.params.EdtTable)
+
+	// Set host endpoint to guaranteed QoS class
+	// TODO: This attempts to lookup host endpoint for every BW manager update event.
+	// Find a way to get host endpoint ID during BW manager initialization and move this section to init().
+	// * init() seems to be too early to call node.GetEndpointID()
+	// * Adding a dependency to node manager to call GetHostEndpoint() introduces a nested import.
+	hostEpID := uint16(node.GetEndpointID())
+	_, _, found := m.params.EdtTable.Get(txn, bwmap.EdtIDIndex.Query(bwmap.EdtIDKey{
+		EndpointID: epID,
+		Direction:  DirectionEgress,
+	}))
+	if !found {
 		m.params.EdtTable.Insert(
 			txn,
-			bwmap.NewEdt(epID, DirectionEgress, bytesPerSecond, prio),
+			bwmap.NewEdt(hostEpID, DirectionEgress, 0, GuaranteedQoSDefaultPriority),
 		)
-		txn.Commit()
+	}
+	m.params.EdtTable.Insert(txn, edt)
+	txn.Commit()
+}
+
+// removeIfb removes the pacing device of an endpoint that no longer has an
+// egress limit.
+func (m *manager) removeIfb(epID uint16) {
+	// The datapath redirects to the device for as long as the entry in the
+	// BPF map names it, and the table is only reconciled to the map a
+	// moment from now: take the entry out first, or what the endpoint
+	// sends in between is dropped with the device. The reconciler writes
+	// the entry again if the table still has one.
+	if m.throttle != nil {
+		if _, err := m.throttle.SilentDelete(&bwmap.EdtId{Id: uint32(epID), Direction: DirectionEgress}); err != nil {
+			m.params.Log.Warn("Cannot remove the egress limit of the endpoint from the datapath",
+				logfields.Error, err,
+				logfields.EndpointID, epID)
+		}
+	}
+	if err := removeIfb(ifbName(epID)); err != nil {
+		m.params.Log.Warn("Cannot remove the egress pacing device of the endpoint",
+			logfields.Error, err,
+			logfields.EndpointID, epID,
+			logfields.Device, ifbName(epID))
 	}
 }
 
@@ -131,31 +176,63 @@ func (m *manager) DeleteBandwidthLimit(epID uint16) {
 			m.params.EdtTable.Delete(txn, obj)
 		}
 		txn.Commit()
-	}
-}
 
-func (m *manager) UpdateIngressBandwidthLimit(epID uint16, bytesPerSecond uint64) {
-	if m.enabled {
-		txn := m.params.DB.WriteTxn(m.params.EdtTable)
-		m.params.EdtTable.Insert(
-			txn,
-			bwmap.NewEdt(epID, DirectionIngress, bytesPerSecond, 0),
-		)
-		txn.Commit()
-	}
-}
-
-func (m *manager) DeleteIngressBandwidthLimit(epID uint16) {
-	if m.enabled {
-		txn := m.params.DB.WriteTxn(m.params.EdtTable)
-		obj, _, found := m.params.EdtTable.Get(txn, bwmap.EdtIDIndex.Query(bwmap.EdtIDKey{
-			EndpointID: epID,
-			Direction:  DirectionIngress,
-		}))
-		if found {
-			m.params.EdtTable.Delete(txn, obj)
+		if m.egressViaIfb() {
+			m.removeIfb(epID)
 		}
-		txn.Commit()
+	}
+}
+
+func (m *manager) UpdateIngressBandwidthLimit(epID uint16, ifName string, bytesPerSecond uint64) {
+	if !m.enabled {
+		return
+	}
+	edt := bwmap.NewEdt(epID, DirectionIngress, bytesPerSecond, 0)
+	// Policed, unless shaped below.
+	edt.TimeHorizonDrop = 0
+	if m.ingressViaFq() {
+		// The qdisc comes first: a departure time nothing honours is no
+		// limit at all.
+		// On failure whatever limit is in place stays as it is: a limit
+		// that worked is better than none.
+		// shortcut: no retry, the next update of the endpoint's bandwidth
+		// or restart of the agent tries again. Add one if failures turn
+		// out to be transient in practice.
+		if err := setupIngressFq(ifName); err != nil {
+			m.params.Log.Error("Cannot shape the ingress of the endpoint, its ingress bandwidth limit is not updated",
+				logfields.Error, err,
+				logfields.EndpointID, epID,
+				logfields.Interface, ifName)
+			return
+		}
+		edt.TimeHorizonDrop = uint64(IngressHorizon)
+	}
+	txn := m.params.DB.WriteTxn(m.params.EdtTable)
+	m.params.EdtTable.Insert(txn, edt)
+	txn.Commit()
+}
+
+func (m *manager) DeleteIngressBandwidthLimit(epID uint16, ifName string) {
+	if !m.enabled {
+		return
+	}
+	txn := m.params.DB.WriteTxn(m.params.EdtTable)
+	obj, _, found := m.params.EdtTable.Get(txn, bwmap.EdtIDIndex.Query(bwmap.EdtIDKey{
+		EndpointID: epID,
+		Direction:  DirectionIngress,
+	}))
+	if found {
+		m.params.EdtTable.Delete(txn, obj)
+	}
+	txn.Commit()
+
+	if m.ingressViaFq() {
+		if err := removeIngressFqByName(ifName); err != nil {
+			m.params.Log.Warn("Cannot remove the ingress pacing qdisc of the endpoint",
+				logfields.Error, err,
+				logfields.EndpointID, epID,
+				logfields.Interface, ifName)
+		}
 	}
 }
 
@@ -173,9 +250,14 @@ func (m *manager) probe() error {
 	if !m.params.Config.EnableBandwidthManager {
 		return nil
 	}
-	if _, err := m.params.Sysctl.Read([]string{"net", "core", "default_qdisc"}); err != nil {
-		m.params.Log.Warn("BPF bandwidth manager could not read procfs. Disabling the feature.", logfields.Error, err)
-		return nil
+	// The node's settings are only written to pace on its devices. With a
+	// chained CNI they are left alone, and a node that is a container
+	// itself (kind) does not have this one.
+	if !m.egressViaIfb() {
+		if _, err := m.params.Sysctl.Read([]string{"net", "core", "default_qdisc"}); err != nil {
+			m.params.Log.Warn("BPF bandwidth manager could not read procfs. Disabling the feature.", logfields.Error, err)
+			return nil
+		}
 	}
 	if m.params.Config.EnableBBR {
 		// We at least need 5.18 kernel for Pod-based BBR TCP congestion
@@ -211,27 +293,20 @@ func (m *manager) probe() error {
 func (m *manager) init() error {
 	m.params.Log.Info("Setting up BPF bandwidth manager")
 
-	if err := bwmap.ThrottleMap().OpenOrCreate(); err != nil {
+	m.throttle = bwmap.ThrottleMap()
+	if err := m.throttle.OpenOrCreate(); err != nil {
 		return fmt.Errorf("failed to access ThrottleMap: %w", err)
 	}
 	return m.setupPacing()
 }
 
-// setupPacing prepares whatever holds the pacing queue: the manager's own
-// device with a chained CNI, the node's devices otherwise.
+// setupPacing prepares the node for pacing on its devices. With a chained CNI
+// the endpoints are paced on devices of their own, set up with their limits.
 func (m *manager) setupPacing() error {
 	if m.egressViaIfb() {
 		// The settings below tune pacing on the native devices, which the
 		// endpoints' traffic never reaches here: leave the node's qdisc
 		// default and congestion control as the operator set them.
-		if err := m.setupIfb(); err != nil {
-			// Without the device the egress limits are not applied,
-			// but taking the agent down with us would take the
-			// node's networking with it.
-			m.params.Log.Error("Cannot pace the egress of chained endpoints, their egress bandwidth limits will not be applied",
-				logfields.Error, err,
-				logfields.Device, IfbDevice)
-		}
 		return nil
 	}
 

@@ -16,7 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
-	"github.com/cilium/cilium/pkg/datapath/linux/bandwidth"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/testutils"
@@ -234,24 +233,20 @@ func TestWaitForFirstRun(t *testing.T) {
 
 type stubBandwidthManager struct {
 	fakeTypes.BandwidthManager
-	ifindex int
 }
 
-func (*stubBandwidthManager) Enabled() bool           { return true }
-func (s *stubBandwidthManager) EgressIfbIfIndex() int { return s.ifindex }
+func (*stubBandwidthManager) Enabled() bool { return true }
 
-// TestBandwidthManagerStatusWhenChained pins that the status names the device
-// the egress limits are actually paced on. With a chained CNI that is the
-// manager's own device, and nothing if it could not be set up: listing the
-// node's devices there would report limits as applied when they are not.
+// TestBandwidthManagerStatusWhenChained pins that the status does not list the
+// node's devices with a chained CNI: the limits are paced on a device per
+// endpoint there, and naming the node's devices would report them as the
+// place where limits are applied when they are not.
 func TestBandwidthManagerStatusWhenChained(t *testing.T) {
-	for ifindex, want := range map[int][]string{7: {bandwidth.IfbDevice}, 0: nil} {
-		d := &statusCollector{statusParams: statusParams{
-			DaemonConfig:     &option.DaemonConfig{CNIChainingMode: "generic-veth"},
-			BandwidthManager: &stubBandwidthManager{ifindex: ifindex},
-		}}
-		s := d.getBandwidthManagerStatus()
-		require.True(t, s.Enabled)
-		require.Equal(t, want, s.Devices)
-	}
+	d := &statusCollector{statusParams: statusParams{
+		DaemonConfig:     &option.DaemonConfig{CNIChainingMode: "generic-veth"},
+		BandwidthManager: &stubBandwidthManager{},
+	}}
+	s := d.getBandwidthManagerStatus()
+	require.True(t, s.Enabled)
+	require.Empty(t, s.Devices)
 }

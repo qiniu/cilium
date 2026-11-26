@@ -181,10 +181,6 @@ type LocalNodeConfiguration struct {
 	// EnableIPSec enables IPSec routes
 	EnableIPSec bool
 
-	// EgressIfbIfIndex is the ifindex of the device the egress of chained
-	// endpoints is paced on, 0 when pacing happens in cil_to_netdev.
-	EgressIfbIfIndex int
-
 	// EnableBandwidthManager is the bandwidth manager's effective state
 	// after its probe, used to decide whether the native devices have to be
 	// attached for EDT egress pacing (cil_to_netdev).

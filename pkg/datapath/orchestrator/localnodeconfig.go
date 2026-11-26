@@ -64,7 +64,6 @@ func newLocalNodeConfig(
 	wgAgent wgTypes.WireguardAgent,
 	ipsecCfg datapath.IPsecConfig,
 	bandwidthManagerEnabled bool,
-	egressIfbIfIndex int,
 ) (datapath.LocalNodeConfiguration, <-chan struct{}, error) {
 	auxPrefixes := []*cidr.CIDR{}
 
@@ -149,7 +148,6 @@ func newLocalNodeConfig(
 		WireguardIfIndex:             wgIndex,
 		EnableIPSec:                  ipsecCfg.Enabled(),
 		EnableBandwidthManager:       bandwidthManagerEnabled,
-		EgressIfbIfIndex:             egressIfbIfIndex,
 		EncryptNode:                  config.EncryptNode,
 		IPv4PodSubnets:               cidr.NewCIDRSlice(config.IPv4PodSubnets),
 		IPv6PodSubnets:               cidr.NewCIDRSlice(config.IPv6PodSubnets),
