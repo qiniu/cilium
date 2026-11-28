@@ -91,3 +91,5 @@ jobs:
           kubectl -n kube-system rollout status ds/cilium --timeout=5m
       - name: Check four concurrent caps, policy and live updates
         run: bash test/chaining-qos/class-kind.sh
+      - name: Check isolation between two limited Pods on the same node
+        run: WITH_NEIGHBOR=1 bash test/chaining-qos/class-kind.sh

@@ -24,7 +24,8 @@ def leaf(window, direction, minor, when):
     return stamp, queue
 
 
-def check(root, backend, peer, vip, internal):
+def check(root, backend, peer, vip, internal, role='limited'):
+    caps = {'ew-in': 30, 'ew-out': 60, 'ns-in': 5, 'ns-out': 8} if role == 'neighbor' else {}
     for name, base, expected in [
         ('ew-in', 100, (internal, backend, internal, backend)),
         ('ew-out', 200, (backend, internal, backend, internal)),
@@ -46,13 +47,18 @@ def check(root, backend, peer, vip, internal):
         stamp = server['start']['timestamp']
         origin = stamp.get('timemillisecs', stamp['timesecs'] * 1000) / 1000
         traffic, direction = name.split('-')
+        previous = None
         for phase, factor in [('baseline', 1), ('double', 2), ('restored', 1)]:
-            cap = base * factor
+            cap = caps.get(name, base * factor)
             minor = '3' if traffic == 'ew' else '4'
             start, before = leaf(root / phase, direction, minor, 'before')
             end, after = leaf(root / phase, direction, minor, 'after')
             if before['handle'] != after['handle'] or before['parent'] != after['parent']:
                 raise ValueError(f'{phase} {name}: queue replaced during measurement')
+            if role == 'neighbor' and previous is not None:
+                if (before['parent'], before['handle']) != (previous['parent'], previous['handle']) or before['bytes'] < previous['bytes']:
+                    raise ValueError(f'{phase} {name}: updating A replaced B queue')
+            previous = after
             # Exclude partial intervals and a second of clock granularity at
             # either boundary. Use receiver bytes, not offered traffic.
             samples = [i['sum'] for i in server['intervals']
@@ -63,7 +69,7 @@ def check(root, backend, peer, vip, internal):
                 raise ValueError(f'{phase} {name}: incomplete receiver window ({seconds:.2f}s)')
             rx = 8 * sum(s['bytes'] for s in samples) / seconds / 1e6
             wire = 8 * (after['bytes'] - before['bytes']) / (end - start) / 1e6
-            print(f'{phase:8} {name:6}: cap={cap:3} queue={wire:.2f} rx={rx:.2f} Mbps')
+            print(f'{role:8} {phase:8} {name:6}: cap={cap:3} queue={wire:.2f} rx={rx:.2f} Mbps')
             if not (.90 * cap <= rx <= 1.05 * cap and .95 * cap <= wire <= 1.05 * cap):
                 raise ValueError(f'{phase} {name}: classification or rate mismatch')
 
