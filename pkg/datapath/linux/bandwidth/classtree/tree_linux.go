@@ -79,6 +79,9 @@ type Tree struct {
 	root    *netlink.Htb
 	mtu     uint32
 	classes []class
+	// A failed netlink change may mean a class no longer exists. Even if
+	// all earlier changes roll back, the cached plan cannot prove otherwise.
+	needsRestage bool
 }
 
 func (t *Tree) kernelClass(c class) *netlink.HtbClass {
@@ -86,11 +89,14 @@ func (t *Tree) kernelClass(c class) *netlink.HtbClass {
 	return netlink.NewHtbClass(attrs, netlink.HtbClassAttrs{Rate: c.rate, Ceil: c.ceil, Quantum: t.mtu})
 }
 
-// ErrRestage means a topology change needs a newly prepared device; the old
-// tree still enforces the old policy. Rate-only updates retain all queues.
-var ErrRestage = errors.New("class topology changed; stage a new tree")
+// ErrRestage means the requested topology differs, or the kernel tree no
+// longer has a known configuration. Prepare a replacement on a staging link.
+var ErrRestage = errors.New("class scheduler needs a newly staged tree")
 
 func (t *Tree) Update(limits Limits) error {
+	if t.needsRestage {
+		return ErrRestage
+	}
 	next, err := plan(limits)
 	if err != nil {
 		return err
@@ -113,7 +119,8 @@ func (t *Tree) Update(limits Limits) error {
 					err = errors.Join(err, netlink.ClassChange(t.kernelClass(t.classes[j])))
 				}
 			}
-			return fmt.Errorf("change HTB class %x: %w", c.minor, err)
+			t.needsRestage = true
+			return errors.Join(ErrRestage, fmt.Errorf("change HTB class %x: %w", c.minor, err))
 		}
 	}
 	t.classes = next

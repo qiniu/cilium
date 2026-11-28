@@ -13,6 +13,7 @@ import (
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
+	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/testutils"
 	"github.com/cilium/cilium/pkg/testutils/netns"
 )
@@ -60,11 +61,11 @@ func TestPrivilegedClassBandwidth(t *testing.T) {
 	require.NoError(t, ns.Do(func() error {
 		a := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "east"}, PeerName: "west"}
 		require.NoError(t, netlink.LinkAdd(a))
-		b, err := netlink.LinkByName("west")
+		b, err := safenetlink.LinkByName("west")
 		require.NoError(t, err)
 		require.NoError(t, netlink.LinkSetUp(a))
 		require.NoError(t, netlink.LinkSetUp(b))
-		aLink, err := netlink.LinkByName("east")
+		aLink, err := safenetlink.LinkByName("east")
 		require.NoError(t, err)
 		const M = 1000000
 		p, err := ParsePolicy(map[string]string{
@@ -98,8 +99,31 @@ func TestPrivilegedClassBandwidth(t *testing.T) {
 		updated := probe.run(t, []int{1, 2})
 		check(updated[1], 6)
 		check(updated[2], 4)
+		// Lose the second leaf, so the first change succeeds and the next
+		// fails. Check rollback on the kernel tree, not just the cached plan.
+		require.NoError(t, netlink.ClassDel(ra.kernelClass(ra.classes[1])))
+		require.ErrorIs(t, ra.Update(Limits{EastWest: 2 * M, NorthSouth: 8 * M}), ErrRestage)
+		remaining, err := safenetlink.ClassList(aLink, ClassID(0))
+		require.NoError(t, err)
+		var restored uint64
+		for _, c := range remaining {
+			if h, ok := c.(*netlink.HtbClass); ok && h.Handle == ClassID(EastWest) {
+				restored = h.Ceil * 8
+			}
+		}
+		require.EqualValues(t, 6*M, restored)
+		require.ErrorIs(t, ra.Update(Limits{EastWest: 6 * M, NorthSouth: 4 * M}), ErrRestage)
 		require.NoError(t, ra.Remove())
 		require.NoError(t, rb.Remove())
+		// No direction total and no external cap: neither an unclassified
+		// peer nor an external peer inherits the internal cap.
+		one, err := Install(aLink, Limits{EastWest: 3 * M})
+		require.NoError(t, err)
+		partial := probe.run(t, []int{0, 1, 2})
+		check(partial[1], 3)
+		require.Greater(t, partial[0], 6.0)
+		require.Greater(t, partial[2], 6.0)
+		require.NoError(t, one.Remove())
 		_, err = Install(aLink, Limits{Total: 10 * M, EastWest: 3 * M, NorthSouth: 9 * M})
 		require.NoError(t, err)
 		rate := probe.run(t, []int{1, 2})
