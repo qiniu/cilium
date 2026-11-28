@@ -1,0 +1,11 @@
+# Chained endpoint default and north-south bandwidth (#74)
+
+The scheduler applies to one direction of one generic-veth endpoint. Without `qos.cilium.io/north-south-{ingress,egress}-bandwidth` in that direction, `ParsePolicy` returns no tree: the ordinary `kubernetes.io/{ingress,egress}-bandwidth` annotation remains an aggregate limit enforced by the existing bandwidth manager. This PR provides a backend, not traffic classification or agent integration.
+
+With a north-south override the existing Kubernetes bandwidth value becomes the **default** for that direction. Internal and unclassified traffic share a single HTB leaf. Confirmed external traffic uses a separate leaf capped by the override, not by a shared parent. For example `kubernetes.io/egress-bandwidth: 200M` plus `qos.cilium.io/north-south-egress-bandwidth: 20M` allows 200M default and 20M external concurrently. No east-west annotation is needed. With no Kubernetes default, unmatched traffic has no configured ceiling. Host/proxy exclusions and deciding which packets are external belong to the caller, not the Pod. Do not trust a socket-provided class ID.
+
+Values are Kubernetes quantities representing bit/s. In split mode supported rates are whole-byte rates of 8 kbit/s through `(2^32-1)` bytes/s. An invalid snapshot is rejected as a whole; delete an override to return that direction to legacy aggregate mode. No new bounds apply to legacy-only Pods.
+
+`Install` prepares a fresh tree without overwriting an operator-owned root. FQ-CoDel leaves are independent queues, not guarantees of minimum throughput. With a default, HTB sends unmatched packets to that leaf and disables its direct FIFO. Without a default it uses a bounded direct FIFO, even on an IFB with txqueuelen=0. Rate changes preserving the topology can use `Update`; topology changes or a failed kernel update require restaging (`ErrRestage`). A failed update attempts rollback and preserves the kernel error.
+
+Run `PRIVILEGED_TESTS=1 go test -count=1 -v ./pkg/datapath/linux/bandwidth/classtree` on Linux. Tests cover direction-specific opt-in, simultaneous independent rates, unknown/internal sharing the default, queue ownership and update failure. These tests inject known class IDs; they do not prove NAT classification.
