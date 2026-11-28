@@ -1667,16 +1667,22 @@ func (m *Manager) installHostTrafficMarkRule(prog runnable) error {
 	matchFromProxyEPID := fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkIsProxyEPID, linux_defaults.MagicMarkProxyMask)
 	markAsFromHost := fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkHost, linux_defaults.MagicMarkHostMask)
 
-	return prog.runProg([]string{
-		"-t", "filter",
-		"-A", ciliumOutputChain,
+	args := []string{"-t", "filter", "-A", ciliumOutputChain}
+	if m.cniConfigManager.GetChainingMode() == "generic-veth" {
+		// IPVS also sends forwarded VIP traffic through LOCAL_OUT. Before
+		// POSTROUTING masquerades it, the source is still the client. Do
+		// not label such traffic HOST_ID: cil_to_container exempts actual
+		// host traffic from the chained endpoint's ingress bandwidth cap.
+		args = append(args, "-m", "addrtype", "--src-type", "LOCAL")
+	}
+	return prog.runProg(append(args,
 		"-m", "mark", "!", "--mark", matchFromIPSecDecrypt, // Don't match ipsec traffic
 		"-m", "mark", "!", "--mark", matchEncrypted, // Don't match Cilium's encrypted traffic
 		"-m", "mark", "!", "--mark", matchOverlay, // Don't match Cilium's overlay traffic
 		"-m", "mark", "!", "--mark", matchFromProxy, // Don't match proxy traffic
 		"-m", "mark", "!", "--mark", matchFromProxyEPID, // Don't match proxy traffic
 		"-m", "comment", "--comment", "cilium: host->any mark as from host",
-		"-j", "MARK", "--set-xmark", markAsFromHost})
+		"-j", "MARK", "--set-xmark", markAsFromHost))
 }
 
 func (m *Manager) doInstallRules(state desiredState, firstInit bool) error {

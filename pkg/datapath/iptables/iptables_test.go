@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cilium/cilium/daemon/cmd/cni/fake"
 )
 
 type expectation struct {
@@ -81,6 +83,35 @@ var mockManager = &Manager{
 		EnableIPv4: true,
 		EnableIPv6: true,
 	},
+}
+
+type cniMode struct {
+	fake.FakeCNIConfigManager
+	mode string
+}
+
+func (c cniMode) GetChainingMode() string { return c.mode }
+
+func TestChainedHostMarkSource(t *testing.T) {
+	const exclusions = " -m mark ! --mark 0x00000d00/0x00000f00" +
+		" -m mark ! --mark 0x00000e00/0x00000f00" +
+		" -m mark ! --mark 0x00000400/0x00000f00" +
+		" -m mark ! --mark 0x00000a00/0x00000e00" +
+		" -m mark ! --mark 0x00000800/0x00000e00"
+	const mark = " -m comment --comment cilium: host->any mark as from host" +
+		" -j MARK --set-xmark 0x00000c00/0x00000f00"
+	for _, mode := range []string{"none", "generic-veth"} {
+		t.Run(mode, func(t *testing.T) {
+			match := ""
+			if mode == "generic-veth" {
+				match = " -m addrtype --src-type LOCAL"
+			}
+			ipt := &mockIptables{t: t, expectations: []expectation{{args: "-t filter -A CILIUM_OUTPUT" + match + exclusions + mark}}}
+			m := &Manager{cniConfigManager: &cniMode{mode: mode}}
+			require.NoError(t, m.installHostTrafficMarkRule(ipt))
+			require.NoError(t, ipt.checkExpectations())
+		})
+	}
 }
 
 func TestRenameCustomChain(t *testing.T) {
