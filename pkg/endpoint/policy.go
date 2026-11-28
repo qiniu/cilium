@@ -1254,12 +1254,10 @@ func (e *Endpoint) UpdateNoTrackRules(noTrackPort string) {
 
 // UpdateBandwidthPolicy updates the egress/ingress bandwidth of this endpoint to
 // progagate the throttle rate to the BPF data path.
-func (e *Endpoint) UpdateBandwidthPolicy(bandwidthEgress, bandwidthIngress, priority string) {
+func (e *Endpoint) UpdateBandwidthPolicy(annotations map[string]string) {
 	ch, err := e.eventQueue.Enqueue(eventqueue.NewEvent(&EndpointPolicyBandwidthEvent{
-		ep:               e,
-		bandwidthEgress:  bandwidthEgress,
-		bandwidthIngress: bandwidthIngress,
-		priority:         priority,
+		ep:          e,
+		annotations: annotations,
 	}))
 	if err != nil {
 		e.getLogger().Error(

@@ -9,6 +9,9 @@ var _ types.BandwidthManager = (*BandwidthManager)(nil)
 
 type BandwidthManager struct{}
 
+func (*BandwidthManager) UpdateClassBandwidth(uint16, string, map[string]string) error { return nil }
+func (*BandwidthManager) DeleteClassBandwidth(uint16, string) error                    { return nil }
+
 func (fbm *BandwidthManager) DeleteBandwidthLimit(endpointID uint16) {
 }
 

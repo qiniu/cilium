@@ -92,14 +92,21 @@ func (m *manager) Start(cell.HookContext) error {
 	err := m.probe()
 	if err != nil {
 		return err
-	} else if !m.enabled {
+	}
+	if err := m.initClasses(); err != nil {
+		return err
+	}
+	if !m.enabled {
 		return nil
 	}
 
 	return m.init()
 }
 
-func (*manager) Stop(cell.HookContext) error {
+func (m *manager) Stop(cell.HookContext) error {
+	if m.classes != nil {
+		return m.classes.redirects.Close()
+	}
 	return nil
 }
 

@@ -896,6 +896,9 @@ func (e *Endpoint) deleteMaps() []error {
 		errors = append(errors, fmt.Errorf("removing endpoint program from global policy map: %w", err))
 	}
 
+	if err := e.bandwidthManager.DeleteClassBandwidth(e.ID, e.ifName); err != nil {
+		errors = append(errors, err)
+	}
 	// Remove rate limit from bandwidth manager map.
 	if e.bps != 0 {
 		e.bandwidthManager.DeleteBandwidthLimit(e.ID)

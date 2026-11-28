@@ -65,6 +65,7 @@ const (
 
 type manager struct {
 	enabled bool
+	classes *classState
 
 	// throttle is the BPF map the EDT table is reconciled to.
 	throttle *bpf.Map
@@ -87,6 +88,9 @@ func (m *manager) defines() (defines.Map, error) {
 		cDefinesMap["ENABLE_BANDWIDTH_MANAGER"] = "1"
 	}
 
+	if m.classes != nil {
+		cDefinesMap["ENABLE_CHAINED_QOS_CLASSES"] = "1"
+	}
 	cDefinesMap["THROTTLE_MAP_SIZE"] = fmt.Sprintf("%d", bwmap.MapSize)
 
 	return cDefinesMap, nil

@@ -38,6 +38,7 @@ cilium-agent hive [flags]
       --bpf-policy-stats-map-max int                              Maximum number of entries in bpf policy stats map (default 65536)
       --bpf-sock-rev-map-max int                                  Maximum number of entries for the SockRevNAT BPF map
       --certificates-directory string                             Root directory to find certificates specified in L7 TLS policy enforcement (default "/var/run/cilium/certs")
+      --chained-qos-north-south-cidrs string                      Comma-separated trusted external peer prefixes for generic-veth class QoS (do not include NAT gateway addresses)
       --cluster-id uint32                                         Unique identifier of the cluster
       --cluster-name string                                       Name of the cluster. It must consist of at most 32 lower case alphanumeric characters and '-', start and end with an alphanumeric character. (default "default")
       --clustermesh-cache-ttl duration                            The time to live for the cache of a remote cluster after connectivity is lost. If the connection is not re-established within this duration, the cached data is revoked to prevent stale state. If not specified or set to 0s, the cache is never revoked.

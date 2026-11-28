@@ -1,0 +1,93 @@
+name: Chained Class QoS
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/tests-chained-class-qos.yaml'
+      - 'test/chaining-qos/**'
+      - 'pkg/datapath/linux/bandwidth/**'
+      - 'pkg/datapath/types/bandwidth.go'
+      - 'pkg/endpoint/events.go'
+      - 'pkg/k8s/watchers/pod.go'
+      - 'bpf/bpf_lxc.c'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chained-qos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bandwidth:
+    name: Four concurrent class limits and live reconfiguration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      CLUSTER: qos-ci
+      EXTERNAL: qos-ci-peer
+      IMAGE: qos-ci/iperf:local
+    steps:
+      - name: Check out Cilium
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Check out the primary CNI chart
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: kubeovn/kube-ovn
+          ref: a0e8fb099bcfd86a1be85b82bbb692c106a5142b # v1.15.10
+          path: .kube-ovn
+          sparse-checkout: charts/kube-ovn
+          persist-credentials: false
+      - name: Build this revision of the agent, CNI and datapath
+        run: |
+          d=$(mktemp -d)
+          CGO_ENABLED=0 go build -mod=vendor -o "$d/cilium-agent" ./daemon
+          CGO_ENABLED=0 go build -mod=vendor -o "$d/cilium-cni" ./plugins/cilium-cni
+          cp -r bpf "$d/bpf"
+          docker build -t qos-ci/agent:local -f - "$d" <<'EOF'
+          FROM quay.io/cilium/cilium:v1.19.2
+          COPY cilium-agent /usr/bin/cilium-agent
+          COPY cilium-cni /opt/cni/bin/cilium-cni
+          COPY bpf /var/lib/cilium/bpf
+          EOF
+          docker build -t "$IMAGE" - <<'EOF'
+          FROM alpine:3.22
+          RUN apk add --no-cache iperf3 iproute2
+          EOF
+      - name: Create the two-node test cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          cluster_name: qos-ci
+          node_image: kindest/node:v1.35.1
+          config: test/chaining-qos/ci-kind.yaml
+          wait: 0 # Nodes cannot become Ready before the primary CNI is installed.
+      - name: Install primary CNI and chain Cilium
+        run: |
+          kubectl taint node "$CLUSTER-control-plane" node-role.kubernetes.io/control-plane:NoSchedule-
+          helm install ovn .kube-ovn/charts/kube-ovn -n kube-system
+          kubectl -n kube-system rollout status ds/kube-ovn-cni --timeout=6m
+          for node in $(kind get nodes --name "$CLUSTER"); do
+            docker exec "$node" jq '.plugins += [{"type":"cilium-cni","chaining-mode":"generic-veth"}]' /etc/cni/net.d/01-kube-ovn.conflist > /tmp/chain.conflist
+            docker cp /tmp/chain.conflist "$node":/etc/cni/net.d/00-chain.conflist
+          done
+          kind load docker-image --name "$CLUSTER" "$IMAGE" qos-ci/agent:local
+          docker run -d --name "$EXTERNAL" --network kind --cap-add NET_ADMIN --entrypoint iperf3 "$IMAGE" -s -J
+          peer=$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "$EXTERNAL")
+          helm install cilium install/kubernetes/cilium -n kube-system \
+            --set image.repository=docker.io/qos-ci/agent,image.tag=local,image.useDigest=false,image.pullPolicy=IfNotPresent \
+            --set operator.replicas=1,operator.unmanagedPodWatcher.restart=false \
+            --set cni.chainingMode=generic-veth,cni.customConf=true,cni.exclusive=false \
+            --set routingMode=native,ipam.mode=kubernetes,enableIPv4Masquerade=false,bpf.hostLegacyRouting=true \
+            --set bandwidthManager.enabled=true,kubeProxyReplacement=false,envoy.enabled=false,l7Proxy=false,hubble.enabled=false \
+            --set-string extraConfig.chained-qos-north-south-cidrs="$peer/32"
+          kubectl -n kube-system rollout status ds/cilium --timeout=5m
+      - name: Check four concurrent caps, policy and live updates
+        run: bash test/chaining-qos/class-kind.sh

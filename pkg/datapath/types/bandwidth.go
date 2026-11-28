@@ -15,6 +15,9 @@ type BandwidthConfig struct {
 	// EnableBandwidthManager enables EDT-based pacing
 	EnableBandwidthManager bool
 
+	// Operator-defined, disjoint peer prefixes in a single routing domain.
+	ChainedQoSNorthSouthCIDRs string
+
 	// EnableBBR enables BBR TCP congestion control for the node including Pods
 	EnableBBR bool
 
@@ -23,6 +26,7 @@ type BandwidthConfig struct {
 }
 
 func (def BandwidthConfig) Flags(flags *pflag.FlagSet) {
+	flags.String("chained-qos-north-south-cidrs", "", "Comma-separated trusted external peer prefixes for generic-veth class QoS (do not include NAT gateway addresses)")
 	flags.Bool(EnableBandwidthManagerFlag, def.EnableBandwidthManager, "Enable BPF bandwidth manager")
 	flags.Bool(EnableBBRFlag, def.EnableBBR, "Enable BBR for the bandwidth manager")
 	flags.Bool(EnableBBRHostnsOnlyFlag, def.EnableBBRHostnsOnly, "Enable BBR only in the host network namespace.")
@@ -40,6 +44,8 @@ type BandwidthManager interface {
 
 	UpdateBandwidthLimit(endpointID uint16, bytesPerSecond uint64, prio uint32)
 	DeleteBandwidthLimit(endpointID uint16)
+	UpdateClassBandwidth(endpointID uint16, ifName string, annotations map[string]string) error
+	DeleteClassBandwidth(endpointID uint16, ifName string) error
 
 	// ReleaseUnusedPacing removes the devices and qdiscs chained endpoints
 	// were paced on and that no limit of this run uses. Only to be called
