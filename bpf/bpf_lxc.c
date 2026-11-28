@@ -686,6 +686,48 @@ struct {
 	__uint(max_entries, 1);
 } cilium_tail_call_buffer6 __section_maps_btf;
 
+#ifdef ENABLE_CHAINED_QOS_CLASSES
+struct qos_link_key {
+	__u32 ep_id;
+	__u32 ifindex;
+};
+
+/* One publication switches both directions: the egress IFB ifindex and
+ * the classid of a fully populated PRIO band on the host-side veth.
+ */
+struct qos_links {
+	__u32 out;
+	__u32 in;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, struct qos_link_key);
+	__type(value, struct qos_links);
+	__uint(max_entries, THROTTLE_MAP_SIZE);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} cilium_qos_ifb __section_maps_btf;
+
+static __always_inline __u32 qos_class_target(const struct __ctx_buff *ctx, bool ingress)
+{
+	struct qos_link_key key = { .ep_id = LXC_ID, .ifindex = ctx->ifindex };
+	struct qos_links *links = map_lookup_elem(&cilium_qos_ifb, &key);
+
+	return links ? (ingress ? links->in : links->out) : 0;
+}
+
+static __always_inline int qos_class_redirect(struct __ctx_buff *ctx, __u32 ifindex)
+{
+	/* Class selection belongs to the host's classifier on the IFB. Never
+	 * let a socket select a class (or the HTB direct FIFO) by priority.
+	 */
+	ctx->priority = 0;
+	edt_set_aggregate(ctx, 0);
+	return ctx_redirect(ctx, ifindex, 0);
+}
+
+#endif
+
 /* Hands the pod's egress packet to a pacing qdisc when a chained CNI owns the
  * path from here to the wire.
  *
@@ -725,6 +767,11 @@ bwm_chained_egress(struct __ctx_buff *ctx __maybe_unused, __be16 proto __maybe_u
 	if (!CONFIG(cni_chaining_generic_veth))
 		return verdict;
 
+#ifdef ENABLE_CHAINED_QOS_CLASSES
+	ifindex = qos_class_target(ctx, false);
+	if (ifindex)
+		return qos_class_redirect(ctx, ifindex);
+#endif
 	ret = edt_sched_departure_aggregate(ctx, proto, LXC_ID, DIRECTION_EGRESS, true,
 					    &ifindex);
 	if (IS_ERR(ret))
@@ -2725,6 +2772,15 @@ int cil_to_container(struct __ctx_buff *ctx)
 	__u16 proto;
 	int ret;
 
+#ifdef ENABLE_CHAINED_QOS_CLASSES
+	/* The veth qdisc is after policy. Only the trusted endpoint program
+	 * selects a staging band; host/proxy and non-IP use its default FQ.
+	 */
+	__u32 class_band = qos_class_target(ctx, true);
+
+	if (class_band)
+		ctx->priority = 0;
+#endif
 	if (!validate_ethertype(ctx, &proto)) {
 		ret = DROP_UNSUPPORTED_L2;
 		goto out;
@@ -2795,11 +2851,19 @@ int cil_to_container(struct __ctx_buff *ctx)
 	if (CONFIG(cni_chaining_generic_veth) &&
 	    identity != HOST_ID &&
 	    magic != MARK_MAGIC_PROXY_INGRESS && magic != MARK_MAGIC_PROXY_EGRESS) {
-		ret = edt_sched_departure_aggregate(ctx, proto, LXC_ID, DIRECTION_INGRESS,
-						    true, NULL);
-		if (IS_ERR(ret))
-			return send_drop_notify(ctx, identity, sec_label, LXC_ID,
-						ret, METRIC_INGRESS);
+#ifdef ENABLE_CHAINED_QOS_CLASSES
+		if (class_band && (proto == bpf_htons(ETH_P_IP) ||
+				   proto == bpf_htons(ETH_P_IPV6)))
+			ctx->priority = class_band;
+		else
+#endif
+		{
+			ret = edt_sched_departure_aggregate(ctx, proto, LXC_ID, DIRECTION_INGRESS,
+							    true, NULL);
+			if (IS_ERR(ret))
+				return send_drop_notify(ctx, identity, sec_label, LXC_ID,
+							ret, METRIC_INGRESS);
+		}
 	}
 #endif /* !ENABLE_HOST_ROUTING && ENABLE_BANDWIDTH_MANAGER */
 

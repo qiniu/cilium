@@ -159,10 +159,9 @@ func (ev *EndpointNoTrackEvent) Handle(res chan any) {
 // EndpointPolicyBandwidthEvent contains all fields necessary to update
 // the Pod's bandwidth policy.
 type EndpointPolicyBandwidthEvent struct {
-	ep               *Endpoint
-	bandwidthEgress  string
-	bandwidthIngress string
-	priority         string
+	ep                                          *Endpoint
+	annotations                                 map[string]string
+	bandwidthEgress, bandwidthIngress, priority string
 }
 
 // Handle handles the policy bandwidth update.
@@ -189,6 +188,7 @@ func (ev *EndpointPolicyBandwidthEvent) Handle(res chan any) {
 		e.unlock()
 	}()
 
+	ev.bandwidthEgress, ev.bandwidthIngress, ev.priority = ev.annotations[bandwidth.EgressBandwidth], ev.annotations[bandwidth.IngressBandwidth], ev.annotations[bandwidth.Priority]
 	bwmUpdateNeeded := false
 	var err error
 	if ev.bandwidthEgress != "" {
@@ -292,9 +292,13 @@ func (ev *EndpointPolicyBandwidthEvent) Handle(res chan any) {
 		ev.ep.bandwidthManager.DeleteIngressBandwidthLimit(e.ID, e.ifName)
 	}
 
-	res <- &EndpointRegenerationResult{
-		err: nil,
+	// Keep the legacy direction totals available during staging and when a
+	// requested class policy is invalid or cannot be installed.
+	err = e.bandwidthManager.UpdateClassBandwidth(e.ID, e.ifName, ev.annotations)
+	if err != nil {
+		e.getLogger().Warn("Cannot update chained class bandwidth", logfields.Error, err)
 	}
+	res <- &EndpointRegenerationResult{err: err}
 }
 
 // InitEventQueue initializes the endpoint's event queue. Note that this

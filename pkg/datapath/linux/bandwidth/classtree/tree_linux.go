@@ -63,7 +63,7 @@ type Tree struct {
 }
 
 func (t *Tree) kernelClass(c class) *netlink.HtbClass {
-	attrs := netlink.ClassAttrs{LinkIndex: t.root.LinkIndex, Parent: t.root.Handle, Handle: ClassID(c.minor)}
+	attrs := netlink.ClassAttrs{LinkIndex: t.root.LinkIndex, Parent: t.root.Handle, Handle: t.root.Handle | uint32(c.minor)}
 	return netlink.NewHtbClass(attrs, netlink.HtbClassAttrs{Rate: c.rate, Ceil: c.rate, Quantum: t.mtu})
 }
 
@@ -113,13 +113,18 @@ func (t *Tree) Remove() error { return netlink.QdiscDel(t.root) }
 // to prepare this tree. QdiscAdd is exclusive; an operator-owned root or a
 // second installation is never overwritten. On failure roll back only the
 // root we just created (and thus its children).
-func Install(link netlink.Link, limits Limits) (tree *Tree, err error) {
+func Install(link netlink.Link, limits Limits) (*Tree, error) {
+	return InstallAt(link, limits, netlink.HANDLE_ROOT, major)
+}
+
+// InstallAt stages a tree under a selected band on the endpoint veth.
+func InstallAt(link netlink.Link, limits Limits, parentHandle uint32, treeMajor uint16) (tree *Tree, err error) {
 	classes, err := plan(limits)
 	if err != nil {
 		return nil, err
 	}
 	idx := link.Attrs().Index
-	q := netlink.NewHtb(netlink.QdiscAttrs{LinkIndex: idx, Parent: netlink.HANDLE_ROOT, Handle: ClassID(0)})
+	q := netlink.NewHtb(netlink.QdiscAttrs{LinkIndex: idx, Parent: parentHandle, Handle: netlink.MakeHandle(treeMajor, 0)})
 	if limits.Default != 0 {
 		q.Defcls = DefaultClass
 		// Internal and unclassified share one default; no direct bypass.

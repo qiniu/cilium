@@ -98,6 +98,16 @@ func setupIngressFq(ifName string) error {
 	if err != nil {
 		return err
 	}
+	q, err := rootQdisc(link)
+	if err != nil {
+		return err
+	}
+	if isClassRoot(q) {
+		return ensureDefaultBand(link)
+	}
+	if q != nil && q.Attrs().Handle != 0 && !isIngressFq(q) {
+		return fmt.Errorf("foreign root %s on %s", q.Type(), ifName)
+	}
 	return ensureFq(link, ingressFq)
 }
 
@@ -149,6 +159,9 @@ func removeAllIngressFq() error {
 // until then their limits may not have been read yet, and their programs are
 // the ones the previous run loaded, which still redirect to the devices.
 func (m *manager) ReleaseUnusedPacing() {
+	if err := m.sweepClasses(); err != nil {
+		m.params.Log.Warn("Cannot clean up unused class schedulers", logfields.Error, err)
+	}
 	if err := m.removeUnusedIfbs(); err != nil {
 		m.params.Log.Warn("Cannot remove the unused egress pacing devices",
 			logfields.Error, err)

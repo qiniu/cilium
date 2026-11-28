@@ -27,7 +27,6 @@ import (
 	"github.com/cilium/cilium/pkg/annotation"
 	"github.com/cilium/cilium/pkg/completion"
 	"github.com/cilium/cilium/pkg/controller"
-	"github.com/cilium/cilium/pkg/datapath/linux/bandwidth"
 	linuxrouting "github.com/cilium/cilium/pkg/datapath/linux/routing"
 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
@@ -2198,11 +2197,7 @@ func (e *Endpoint) metadataResolver(ctx context.Context,
 		value, _ := annotation.Get(pod, annotation.NoTrack, annotation.NoTrackAlias)
 		return value
 	}())
-	e.UpdateBandwidthPolicy(
-		pod.Annotations[bandwidth.EgressBandwidth],
-		pod.Annotations[bandwidth.IngressBandwidth],
-		pod.Annotations[bandwidth.Priority],
-	)
+	e.UpdateBandwidthPolicy(pod.Annotations)
 
 	// Handle DisableSourceIPVerification annotation.
 	// This must happen before UpdateLabels so we can track if SIP setting changed

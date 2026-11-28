@@ -72,6 +72,7 @@ cilium-agent [flags]
       --bpf-sock-rev-map-max int                                  Maximum number of entries for the SockRevNAT BPF map
       --certificates-directory string                             Root directory to find certificates specified in L7 TLS policy enforcement (default "/var/run/cilium/certs")
       --cgroup-root string                                        Path to Cgroup2 filesystem
+      --chained-qos-north-south-cidrs string                      Comma-separated trusted external peer prefixes for generic-veth class QoS (do not include NAT gateway addresses)
       --cluster-health-port int                                   TCP port for cluster-wide network connectivity health API (default 4240)
       --cluster-id uint32                                         Unique identifier of the cluster
       --cluster-name string                                       Name of the cluster. It must consist of at most 32 lower case alphanumeric characters and '-', start and end with an alphanumeric character. (default "default")
