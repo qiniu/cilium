@@ -23,11 +23,11 @@ func TestParsePolicy(t *testing.T) {
 	p, err := ParsePolicy(annotations)
 	require.NoError(t, err)
 	require.Equal(t, Policy{}, p)
-	const key = "qos.cilium.io/east-west-ingress-bandwidth"
+	const key = "qos.cilium.io/north-south-ingress-bandwidth"
 	annotations[key] = "1.5M"
 	p, err = ParsePolicy(annotations)
 	require.NoError(t, err)
-	require.Equal(t, Policy{Ingress: &Limits{Total: 50000000, EastWest: 1500000}}, p)
+	require.Equal(t, Policy{Ingress: &Limits{Default: 50000000, NorthSouth: 1500000}}, p)
 	for _, v := range []string{"", "0", "-1M", "12345.6", "18446744073709551616", "oops"} {
 		annotations["qos.cilium.io/north-south-egress-bandwidth"] = v
 		p, err = ParsePolicy(annotations)
@@ -37,19 +37,16 @@ func TestParsePolicy(t *testing.T) {
 }
 
 func TestLimits(t *testing.T) {
-	for _, limits := range []Limits{{}, {Total: 100000}, {EastWest: 1}, {NorthSouth: 8001}, {EastWest: 1 << 40}} {
+	for _, limits := range []Limits{{}, {Default: 100000}, {NorthSouth: 1}, {NorthSouth: 8001}, {Default: 1 << 40, NorthSouth: 16000}} {
 		_, err := plan(limits)
 		require.Error(t, err)
 	}
-	classes, err := plan(Limits{80000, 160000, 0})
+	classes, err := plan(Limits{80000, 160000})
 	require.NoError(t, err)
-	require.Len(t, classes, 4)
-	for _, c := range classes {
-		require.EqualValues(t, 80000, c.ceil)
-	}
-	classes, err = plan(Limits{EastWest: 160000})
+	require.Equal(t, []class{{DefaultClass, 80000}, {NorthSouth, 160000}}, classes)
+	classes, err = plan(Limits{NorthSouth: 160000})
 	require.NoError(t, err)
-	require.Equal(t, []class{{EastWest, 0, 160000, 160000}}, classes)
+	require.Equal(t, []class{{NorthSouth, 160000}}, classes)
 }
 
 // A veth and its peer stand for the two endpoint queues. Inject class IDs on
@@ -69,9 +66,9 @@ func TestPrivilegedClassBandwidth(t *testing.T) {
 		require.NoError(t, err)
 		const M = 1000000
 		p, err := ParsePolicy(map[string]string{
-			"qos.cilium.io/east-west-egress-bandwidth":    "3M",
+			"kubernetes.io/egress-bandwidth":              "3M",
 			"qos.cilium.io/north-south-egress-bandwidth":  "7M",
-			"qos.cilium.io/east-west-ingress-bandwidth":   "5M",
+			"kubernetes.io/ingress-bandwidth":             "5M",
 			"qos.cilium.io/north-south-ingress-bandwidth": "9M",
 		})
 		require.NoError(t, err)
@@ -79,7 +76,7 @@ func TestPrivilegedClassBandwidth(t *testing.T) {
 		require.NoError(t, err)
 		rb, err := Install(b, *p.Ingress)
 		require.NoError(t, err)
-		_, err = Install(aLink, Limits{EastWest: M})
+		_, err = Install(aLink, Limits{NorthSouth: M})
 		require.Error(t, err, "must not replace installed root")
 		probe := newProbe(t, aLink, b)
 		reverse := newProbe(t, b, aLink)
@@ -94,49 +91,48 @@ func TestPrivilegedClassBandwidth(t *testing.T) {
 		check(fwd[2], 7)
 		check(rev[1], 5)
 		check(rev[2], 9)
-		require.NoError(t, ra.Update(Limits{EastWest: 6 * M, NorthSouth: 4 * M}))
-		require.ErrorIs(t, ra.Update(Limits{EastWest: M}), ErrRestage)
+		require.NoError(t, ra.Update(Limits{Default: 6 * M, NorthSouth: 4 * M}))
+		require.ErrorIs(t, ra.Update(Limits{NorthSouth: M}), ErrRestage)
 		updated := probe.run(t, []int{1, 2})
 		check(updated[1], 6)
 		check(updated[2], 4)
 		// Lose the second leaf, so the first change succeeds and the next
 		// fails. Check rollback on the kernel tree, not just the cached plan.
 		require.NoError(t, netlink.ClassDel(ra.kernelClass(ra.classes[1])))
-		require.ErrorIs(t, ra.Update(Limits{EastWest: 2 * M, NorthSouth: 8 * M}), ErrRestage)
+		require.ErrorIs(t, ra.Update(Limits{Default: 2 * M, NorthSouth: 8 * M}), ErrRestage)
 		remaining, err := safenetlink.ClassList(aLink, ClassID(0))
 		require.NoError(t, err)
 		var restored uint64
 		for _, c := range remaining {
-			if h, ok := c.(*netlink.HtbClass); ok && h.Handle == ClassID(EastWest) {
+			if h, ok := c.(*netlink.HtbClass); ok && h.Handle == ClassID(DefaultClass) {
 				restored = h.Ceil * 8
 			}
 		}
 		require.EqualValues(t, 6*M, restored)
-		require.ErrorIs(t, ra.Update(Limits{EastWest: 6 * M, NorthSouth: 4 * M}), ErrRestage)
+		require.ErrorIs(t, ra.Update(Limits{Default: 6 * M, NorthSouth: 4 * M}), ErrRestage)
 		require.NoError(t, ra.Remove())
 		require.NoError(t, rb.Remove())
-		// No direction total and no external cap: neither an unclassified
-		// peer nor an external peer inherits the internal cap.
-		one, err := Install(aLink, Limits{EastWest: 3 * M})
+		// An override without a default leaves other traffic uncapped.
+		one, err := Install(aLink, Limits{NorthSouth: 3 * M})
 		require.NoError(t, err)
 		partial := probe.run(t, []int{0, 1, 2})
-		check(partial[1], 3)
+		check(partial[2], 3)
 		require.Greater(t, partial[0], 6.0)
-		require.Greater(t, partial[2], 6.0)
+		require.Greater(t, partial[1], 6.0)
 		require.NoError(t, one.Remove())
-		_, err = Install(aLink, Limits{Total: 10 * M, EastWest: 3 * M, NorthSouth: 9 * M})
+		_, err = Install(aLink, Limits{Default: 3 * M, NorthSouth: 9 * M})
 		require.NoError(t, err)
-		rate := probe.run(t, []int{1, 2})
-		t.Logf("shared parent %v Mbit/s", rate)
-		check(rate[1], 3)
-		check(rate[2]+rate[1], 10)
+		rate := probe.run(t, []int{0, 1, 2})
+		t.Logf("unknown + internal share default; external independent: %v Mbit/s", rate)
+		check(rate[0]+rate[1], 3)
+		check(rate[2], 9)
 		rate = probe.run(t, []int{2})
 		check(rate[2], 9) // no fixed partition
 		rate = probe.run(t, []int{0})
-		check(rate[0], 10) // unknown is not a bypass
+		check(rate[0], 3) // unknown uses the default
 		require.NoError(t, unix.SetsockoptInt(probe.tx[0], unix.SOL_SOCKET, unix.SO_PRIORITY, int(ClassID(0))))
 		rate = probe.run(t, []int{0})
-		require.Zero(t, rate[0], "direct FIFO must be disabled when the parent is capped")
+		require.Zero(t, rate[0], "direct FIFO must be disabled when the default is capped")
 		return nil
 	}))
 }
@@ -151,7 +147,7 @@ func TestPrivilegedClassOnlyIFB(t *testing.T) {
 		require.NoError(t, netlink.LinkAdd(dev))
 		require.NoError(t, netlink.LinkSetTxQLen(dev, 0))
 		require.NoError(t, netlink.LinkSetUp(dev))
-		tree, err := Install(dev, Limits{EastWest: 3_000_000})
+		tree, err := Install(dev, Limits{NorthSouth: 3_000_000})
 		require.NoError(t, err)
 		qs, err := safenetlink.QdiscList(dev)
 		require.NoError(t, err)
@@ -189,7 +185,7 @@ func newProbe(t *testing.T, src, dst netlink.Link) *wireProbe {
 	}
 	p := &wireProbe{rx: open(), dst: unix.SockaddrLinklayer{Protocol: be, Ifindex: src.Attrs().Index, Halen: 6}}
 	require.NoError(t, unix.Bind(p.rx, &unix.SockaddrLinklayer{Protocol: be, Ifindex: dst.Attrs().Index}))
-	for i, id := range []uint16{0, EastWest, NorthSouth} {
+	for i, id := range []uint16{0, DefaultClass, NorthSouth} {
 		fd := open()
 		p.tx[i] = fd
 		if id != 0 {

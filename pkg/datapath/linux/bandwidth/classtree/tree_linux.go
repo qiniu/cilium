@@ -13,15 +13,14 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// Limits are in bits/s. Zero means no limit at that level.
-type Limits struct{ Total, EastWest, NorthSouth uint64 }
+// Limits (bits/s) are independent. Default is shared by all traffic that
+// does not match the north-south override, including unknown peers.
+type Limits struct{ Default, NorthSouth uint64 }
 
 const (
-	major      = 0xc1
-	parent     = 1
-	Unknown    = 2
-	EastWest   = 3
-	NorthSouth = 4
+	major        = 0xc1
+	DefaultClass = 3
+	NorthSouth   = 4
 )
 
 // ClassID is written to skb->priority by a trusted classifier immediately
@@ -30,15 +29,15 @@ const (
 func ClassID(minor uint16) uint32 { return netlink.MakeHandle(major, minor) }
 
 type class struct {
-	minor, parent uint16
-	rate, ceil    uint64
+	minor uint16
+	rate  uint64
 }
 
 func plan(l Limits) ([]class, error) {
-	if l.EastWest == 0 && l.NorthSouth == 0 {
-		return nil, errors.New("no class cap; use the existing aggregate shaper")
+	if l.NorthSouth == 0 {
+		return nil, errors.New("no north-south override; use the existing aggregate shaper")
 	}
-	for _, v := range []uint64{l.Total, l.EastWest, l.NorthSouth} {
+	for _, v := range []uint64{l.Default, l.NorthSouth} {
 		// netlink's HTB rate table and burst calculations use whole bytes
 		// and 32-bit timing fields. Reject unsupported values, never wrap.
 		if v != 0 && (v < 8000 || v > math.MaxUint32*8 || v%8 != 0) {
@@ -46,31 +45,10 @@ func plan(l Limits) ([]class, error) {
 		}
 	}
 	var classes []class
-	if l.Total != 0 {
-		classes = append(classes, class{parent, 0, l.Total, l.Total})
+	if l.Default != 0 {
+		classes = append(classes, class{DefaultClass, l.Default})
 	}
-	for _, leaf := range []struct {
-		minor uint16
-		limit uint64
-	}{{Unknown, 0}, {EastWest, l.EastWest}, {NorthSouth, l.NorthSouth}} {
-		ceil := leaf.limit
-		if l.Total == 0 {
-			// No aggregate: independent classes, with the direct queue for
-			// unknown/unlimited traffic. No synthetic node/link speed cap.
-			if ceil != 0 {
-				classes = append(classes, class{leaf.minor, 0, ceil, ceil})
-			}
-			continue
-		}
-		if ceil == 0 || ceil > l.Total {
-			ceil = l.Total
-		}
-		// Rate distributes service under contention; ceil, not rate, is
-		// the cap. A lone active leaf can borrow up to its full ceiling.
-		share := min(ceil, (l.Total/8/3)*8)
-		classes = append(classes, class{leaf.minor, parent, share, ceil})
-	}
-	return classes, nil
+	return append(classes, class{NorthSouth, l.NorthSouth}), nil
 }
 
 // Tree is exclusively managed by the caller for the lifetime of the link.
@@ -85,8 +63,8 @@ type Tree struct {
 }
 
 func (t *Tree) kernelClass(c class) *netlink.HtbClass {
-	attrs := netlink.ClassAttrs{LinkIndex: t.root.LinkIndex, Parent: ClassID(c.parent), Handle: ClassID(c.minor)}
-	return netlink.NewHtbClass(attrs, netlink.HtbClassAttrs{Rate: c.rate, Ceil: c.ceil, Quantum: t.mtu})
+	attrs := netlink.ClassAttrs{LinkIndex: t.root.LinkIndex, Parent: t.root.Handle, Handle: ClassID(c.minor)}
+	return netlink.NewHtbClass(attrs, netlink.HtbClassAttrs{Rate: c.rate, Ceil: c.rate, Quantum: t.mtu})
 }
 
 // ErrRestage means the requested topology differs, or the kernel tree no
@@ -105,7 +83,7 @@ func (t *Tree) Update(limits Limits) error {
 		return ErrRestage
 	}
 	for i, c := range next {
-		if c.minor != t.classes[i].minor || c.parent != t.classes[i].parent {
+		if c.minor != t.classes[i].minor {
 			return ErrRestage
 		}
 	}
@@ -142,10 +120,9 @@ func Install(link netlink.Link, limits Limits) (tree *Tree, err error) {
 	}
 	idx := link.Attrs().Index
 	q := netlink.NewHtb(netlink.QdiscAttrs{LinkIndex: idx, Parent: netlink.HANDLE_ROOT, Handle: ClassID(0)})
-	if limits.Total != 0 {
-		q.Defcls = Unknown
-		// With a total, every delivered packet must go through a child of
-		// parent. Even an explicit major:0 cannot use HTB's direct FIFO.
+	if limits.Default != 0 {
+		q.Defcls = DefaultClass
+		// Internal and unclassified share one default; no direct bypass.
 		zero := uint32(0)
 		q.DirectQlen = &zero
 	} else {
@@ -168,15 +145,10 @@ func Install(link netlink.Link, limits Limits) (tree *Tree, err error) {
 		if err = netlink.ClassAdd(cl); err != nil {
 			return nil, fmt.Errorf("add HTB class %x: %w", c.minor, err)
 		}
-		if c.minor != parent {
-			// Separate queues: a backlogged low-rate class must not hold up
-			// other classes. Limit the leaf backlog even when the device is
-			// an IFB with a small or zero txqueuelen.
-			fq := netlink.NewFqCodel(netlink.QdiscAttrs{LinkIndex: idx, Parent: cl.Handle, Handle: netlink.MakeHandle(major+c.minor, 0)})
-			fq.Limit = 1024
-			if err = netlink.QdiscAdd(fq); err != nil {
-				return nil, fmt.Errorf("add queue to class %x: %w", c.minor, err)
-			}
+		fq := netlink.NewFqCodel(netlink.QdiscAttrs{LinkIndex: idx, Parent: cl.Handle})
+		fq.Limit = 1024
+		if err = netlink.QdiscAdd(fq); err != nil {
+			return nil, fmt.Errorf("add queue to class %x: %w", c.minor, err)
 		}
 	}
 	return t, nil

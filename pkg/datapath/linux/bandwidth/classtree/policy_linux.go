@@ -26,18 +26,15 @@ func ParsePolicy(annotations map[string]string) (Policy, error) {
 		name   string
 		limits **Limits
 	}{{"ingress", &p.Ingress}, {"egress", &p.Egress}} {
-		ew := "qos.cilium.io/east-west-" + d.name + "-bandwidth"
 		ns := "qos.cilium.io/north-south-" + d.name + "-bandwidth"
-		_, internal := annotations[ew]
-		_, external := annotations[ns]
-		if !internal && !external {
+		if _, override := annotations[ns]; !override {
 			continue
 		}
 		l := new(Limits)
 		for _, field := range []struct {
 			key   string
 			value *uint64
-		}{{ew, &l.EastWest}, {ns, &l.NorthSouth}, {"kubernetes.io/" + d.name + "-bandwidth", &l.Total}} {
+		}{{ns, &l.NorthSouth}, {"kubernetes.io/" + d.name + "-bandwidth", &l.Default}} {
 			s, ok := annotations[field.key]
 			if !ok {
 				continue
