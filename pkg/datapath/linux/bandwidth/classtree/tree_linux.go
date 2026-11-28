@@ -148,6 +148,11 @@ func Install(link netlink.Link, limits Limits) (tree *Tree, err error) {
 		// parent. Even an explicit major:0 cannot use HTB's direct FIFO.
 		zero := uint32(0)
 		q.DirectQlen = &zero
+	} else {
+		// Unmatched packets have no cap in this mode. Do not inherit
+		// txqueuelen: on a zero-queue IFB this would drop every one.
+		capacity := uint32(1024)
+		q.DirectQlen = &capacity
 	}
 	if err = netlink.QdiscAdd(q); err != nil {
 		return nil, fmt.Errorf("add class scheduler: %w", err)

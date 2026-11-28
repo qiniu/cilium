@@ -141,6 +141,31 @@ func TestPrivilegedClassBandwidth(t *testing.T) {
 	}))
 }
 
+// Unlike a veth, an IFB with txqueuelen=0 can keep a zero-length direct
+// FIFO when HTB is installed. Check the kernel configuration, not our spec.
+func TestPrivilegedClassOnlyIFB(t *testing.T) {
+	testutils.PrivilegedTest(t)
+	ns := netns.NewNetNS(t)
+	require.NoError(t, ns.Do(func() error {
+		dev := &netlink.Ifb{LinkAttrs: netlink.LinkAttrs{Name: "stage0", MTU: 1500}}
+		require.NoError(t, netlink.LinkAdd(dev))
+		require.NoError(t, netlink.LinkSetTxQLen(dev, 0))
+		require.NoError(t, netlink.LinkSetUp(dev))
+		tree, err := Install(dev, Limits{EastWest: 3_000_000})
+		require.NoError(t, err)
+		qs, err := safenetlink.QdiscList(dev)
+		require.NoError(t, err)
+		var capacity uint32
+		for _, q := range qs {
+			if h, ok := q.(*netlink.Htb); ok && h.Parent == netlink.HANDLE_ROOT && h.DirectQlen != nil {
+				capacity = *h.DirectQlen
+			}
+		}
+		require.Positive(t, capacity, "uncapped traffic needs a usable direct FIFO")
+		return tree.Remove()
+	}))
+}
+
 const frameSize = 1014
 
 type wireProbe struct {
