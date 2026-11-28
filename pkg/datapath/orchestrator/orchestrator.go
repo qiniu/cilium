@@ -220,7 +220,6 @@ func (o *orchestrator) reconciler(ctx context.Context, health cell.Health) error
 			o.params.WgAgent,
 			o.params.IPsecConfig,
 			o.params.BandwidthManager.Enabled(),
-			o.params.BandwidthManager.EgressIfbIfIndex(),
 		)
 		if err != nil {
 			health.Degraded("failed to get local node configuration", err)

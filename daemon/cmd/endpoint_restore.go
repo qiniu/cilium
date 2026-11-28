@@ -708,7 +708,7 @@ func (r *endpointRestorer) handleRestoredEndpointsRegeneration(endpoints []*endp
 	// configuration. One that failed still runs the previous one, which may
 	// redirect its egress to the pacing device.
 	if failed == 0 {
-		r.bandwidthManager.ReleaseEgressIfb()
+		r.bandwidthManager.ReleaseUnusedPacing()
 	}
 	close(r.endpointRegenerateComplete)
 }

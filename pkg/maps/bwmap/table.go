@@ -35,6 +35,9 @@ type Edt struct {
 	// delta in future.
 	TimeHorizonDrop uint64
 
+	// IfIndex is the device the egress of a chained endpoint is paced on.
+	IfIndex uint32
+
 	// Status is the BPF map reconciliation status of this throttle entry.
 	Status reconciler.Status
 }
@@ -106,8 +109,11 @@ func (e Edt) BinaryValue() encoding.BinaryMarshaler {
 		// egress
 		v.TimeHorizonDropOrTokens = e.TimeHorizonDrop
 		v.Prio = e.Prio
+		v.IfIndex = e.IfIndex
 	} else {
 		v.TimeHorizonDropOrTokens = 0
+		// Set when the limit is shaped (chained CNI), zero when policed.
+		v.TimeHorizonIngress = e.TimeHorizonDrop
 	}
 
 	return bpf.StructBinaryMarshaler{Target: &v}

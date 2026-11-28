@@ -271,7 +271,7 @@ func (ev *EndpointPolicyBandwidthEvent) Handle(res chan any) {
 			}
 			return
 		}
-		ev.ep.bandwidthManager.UpdateIngressBandwidthLimit(e.ID, ingressBps)
+		ev.ep.bandwidthManager.UpdateIngressBandwidthLimit(e.ID, e.ifName, ingressBps)
 
 		bpsOld = "inf"
 		bpsNew = "inf"
@@ -289,7 +289,7 @@ func (ev *EndpointPolicyBandwidthEvent) Handle(res chan any) {
 
 		e.ingressBps = ingressBps
 	} else {
-		ev.ep.bandwidthManager.DeleteIngressBandwidthLimit(e.ID)
+		ev.ep.bandwidthManager.DeleteIngressBandwidthLimit(e.ID, e.ifName)
 	}
 
 	res <- &EndpointRegenerationResult{

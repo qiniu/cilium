@@ -52,9 +52,6 @@ func Endpoint(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfigur
 	// local_delivery() where ingress bandwidth QoS is normally enforced.
 	// Signal the datapath to apply the ingress meter in cil_to_container.
 	cfg.CniChainingGenericVeth = option.Config.GenericVethChaining()
-	// With a chained CNI the egress limit is paced on the agent's ifb
-	// device, as the packet leaves our datapath at the endpoint's veth.
-	cfg.BwmIfbIfIndex = uint32(lnc.EgressIfbIfIndex)
 
 	if option.Config.EnableVTEP {
 		cfg.VTEPMask = byteorder.NetIPv4ToHost32(net.IP(option.Config.VtepCidrMask))

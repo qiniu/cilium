@@ -253,9 +253,6 @@ func (in *LocalNodeConfiguration) DeepEqual(other *LocalNodeConfiguration) bool 
 	if in.EnableIPSec != other.EnableIPSec {
 		return false
 	}
-	if in.EgressIfbIfIndex != other.EgressIfbIfIndex {
-		return false
-	}
 	if in.EnableBandwidthManager != other.EnableBandwidthManager {
 		return false
 	}

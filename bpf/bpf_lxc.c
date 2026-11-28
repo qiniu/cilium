@@ -704,12 +704,6 @@ struct {
  * tc_skip_classify, so the packet resumes after this program instead of
  * running it again.
  *
- * The length charged here is the one of the ingress hook, skb->len: it leaves
- * out the Ethernet header and, for a GSO packet, the headers of all segments
- * but the first. The rate on the wire is therefore a few percent above the
- * limit, about 5% for full-sized TCP segments, where cil_to_netdev
- * would charge the wire length.
- *
  * TODO: the IPv6 path (tail_handle_ipv6_cont) mirrors the IPv4 one but has
  * neither a BPF test nor a run on a cluster with IPv6 enabled behind it.
  */
@@ -718,7 +712,7 @@ bwm_chained_egress(struct __ctx_buff *ctx __maybe_unused, __be16 proto __maybe_u
 		   int verdict)
 {
 #if defined(ENABLE_BANDWIDTH_MANAGER)
-	bool paced = false;
+	__u32 ifindex = 0;
 	int ret;
 
 	/* Only traffic handed to the stack, which is where the chained CNI
@@ -728,19 +722,18 @@ bwm_chained_egress(struct __ctx_buff *ctx __maybe_unused, __be16 proto __maybe_u
 	 */
 	if (verdict != CTX_ACT_OK)
 		return verdict;
-	/* Set only when the egress limits are paced on the ifb, which is a
-	 * chained CNI only.
-	 */
-	if (!CONFIG(bwm_ifb_ifindex))
+	if (!CONFIG(cni_chaining_generic_veth))
 		return verdict;
 
-	ret = edt_sched_departure_aggregate(ctx, proto, LXC_ID, true, &paced);
+	ret = edt_sched_departure_aggregate(ctx, proto, LXC_ID, DIRECTION_EGRESS, true,
+					    &ifindex);
 	if (IS_ERR(ret))
 		return ret;
 	/* Endpoints without a limit keep their path: the detour is only worth
-	 * its queueing for a packet that has a departure time to honour.
+	 * its queueing for a packet that has a departure time to honour. The
+	 * agent names the device in the entry of every endpoint it limits.
 	 */
-	if (!paced)
+	if (!ifindex)
 		return verdict;
 
 	/* The aggregate has been accounted for here, so clear it: a later EDT
@@ -748,7 +741,7 @@ bwm_chained_egress(struct __ctx_buff *ctx __maybe_unused, __be16 proto __maybe_u
 	 */
 	edt_set_aggregate(ctx, 0);
 
-	return ctx_redirect(ctx, CONFIG(bwm_ifb_ifindex), 0);
+	return ctx_redirect(ctx, ifindex, 0);
 #else
 	return verdict;
 #endif /* ENABLE_BANDWIDTH_MANAGER */
@@ -2778,39 +2771,37 @@ int cil_to_container(struct __ctx_buff *ctx)
 	}
 #endif /* ENABLE_HOST_FIREWALL && !ENABLE_ROUTING */
 
-#ifndef ENABLE_HOST_ROUTING
+#if !defined(ENABLE_HOST_ROUTING) && defined(ENABLE_BANDWIDTH_MANAGER)
 	/* In generic-veth CNI chaining the packet is delivered to the pod
 	 * directly by the chained CNI and never traverses local_delivery(),
-	 * which is where ingress bandwidth QoS is normally enforced. Apply it
-	 * here instead, gated on the chaining mode so it runs exactly once per
-	 * packet: this site is mutually exclusive with the local_delivery() site,
-	 * which only runs when Cilium itself delivers the packet (non-chaining).
-	 * Metering at both sites would consume tokens twice and halve the
-	 * configured ingress rate. With BPF host routing the packet is delivered
-	 * via redirect_peer() and bypasses this hook entirely, hence the
-	 * !ENABLE_HOST_ROUTING guard. accept() is a no-op unless the bandwidth
-	 * manager is enabled.
+	 * which is where the ingress limit is normally policed. This program
+	 * is the only one that sees it, and it runs at the egress of the
+	 * host-side veth: right in front of a qdisc. So shape instead of
+	 * police. The departure time computed here is honoured by the FQ the
+	 * agent installs on the veth of an endpoint with an ingress limit
+	 * (which is also what guarantees the horizon to be set in the entry).
+	 * Packets wait instead of being dropped, up to the horizon.
 	 *
-	 * Meter the same traffic local_delivery() meters, no more: it skips
+	 * With BPF host routing the packet is delivered via redirect_peer()
+	 * and bypasses this hook entirely, hence the !ENABLE_HOST_ROUTING
+	 * guard.
+	 *
+	 * Charge the same traffic local_delivery() charges, no more: it skips
 	 * from_host traffic, which here is the hostns (HOST_ID) and the L7
-	 * proxy, so that health probes and proxied connections are not charged
-	 * to the pod's limit. Non-IP traffic (ARP) is skipped as well, as
-	 * local_delivery() is only reached from the IP paths: dropping an ARP
-	 * reply on a saturated link would break the pod's connectivity.
+	 * proxy, so that health probes and proxied connections neither count
+	 * against the pod's limit nor wait behind its queue. Non-IP traffic
+	 * (ARP) is left alone by the EDT code itself.
 	 */
 	if (CONFIG(cni_chaining_generic_veth) &&
-	    (proto == bpf_htons(ETH_P_IP) || proto == bpf_htons(ETH_P_IPV6)) &&
 	    identity != HOST_ID &&
 	    magic != MARK_MAGIC_PROXY_INGRESS && magic != MARK_MAGIC_PROXY_EGRESS) {
-		ret = accept(ctx, LXC_ID);
-		/* Drop silently, as local_delivery() does: accept() returns
-		 * CTX_ACT_DROP, not a DROP_* reason, so a drop notification would
-		 * carry a bogus reason code.
-		 */
+		ret = edt_sched_departure_aggregate(ctx, proto, LXC_ID, DIRECTION_INGRESS,
+						    true, NULL);
 		if (IS_ERR(ret))
-			return ret;
+			return send_drop_notify(ctx, identity, sec_label, LXC_ID,
+						ret, METRIC_INGRESS);
 	}
-#endif /* !ENABLE_HOST_ROUTING */
+#endif /* !ENABLE_HOST_ROUTING && ENABLE_BANDWIDTH_MANAGER */
 
 	switch (proto) {
 #if defined(ENABLE_ARP_PASSTHROUGH) || defined(ENABLE_ARP_RESPONDER)

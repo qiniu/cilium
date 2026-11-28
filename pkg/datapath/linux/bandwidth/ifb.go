@@ -8,25 +8,36 @@ package bandwidth
 import (
 	"errors"
 	"fmt"
-	"log/slog"
+	"strconv"
+	"strings"
 
 	"github.com/vishvananda/netlink"
 
 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/maps/bwmap"
 	"github.com/cilium/cilium/pkg/option"
 )
 
-// IfbDevice is the device the egress of chained endpoints is paced on. EDT
-// pacing needs an FQ qdisc on the device the packet is queued on, and with a
-// chained CNI the packet leaves Cilium's datapath at the endpoint's veth,
-// which has no egress qdisc for that direction. cil_from_container therefore
-// redirects to this ifb, whose FQ applies the rate before the ifb hands the
-// packet back to the path it came from.
-const IfbDevice = "cilium_bwm"
+// IfbPrefix starts the name of the device the egress of a chained endpoint is
+// paced on; the endpoint ID follows. EDT pacing needs an FQ qdisc on the
+// device the packet is queued on, and with a chained CNI the packet leaves
+// Cilium's datapath at the endpoint's veth, which has no qdisc in that
+// direction. cil_from_container therefore redirects to an ifb, whose FQ holds
+// the packet until its departure time before the ifb hands it back to the
+// path it came from.
+//
+// Each endpoint with an egress limit has an ifb of its own. An ifb handles a
+// queue on one CPU at a time, the way of the packet back into the stack
+// included, so endpoints sharing one share that capacity: on one device for
+// the node, an endpoint flooding small packets within its own limit took the
+// egress of every other limited endpoint down with it.
+const IfbPrefix = "cilium_bwm"
 
 // egressViaIfb reports whether the endpoints' egress limits have to be paced
-// on the ifb device rather than in cil_to_netdev. With a chained CNI the
+// on an ifb rather than in cil_to_netdev.
+//
+// That is the case with a chained CNI (generic-veth, e.g. Kube-OVN): the
 // packet is re-injected into the stack by the chained CNI, so the skb reaching
 // cil_to_netdev carries no aggregate (skb->queue_mapping is gone) and is
 // usually already SNATed or encapsulated: there is nothing left to pace per
@@ -34,7 +45,7 @@ const IfbDevice = "cilium_bwm"
 //
 // Nothing the bandwidth manager does to the native devices or to the node's
 // TCP settings has any effect on the endpoints then, so in this mode it leaves
-// both alone and only manages its own device.
+// both alone.
 func egressViaIfb(cfg *option.DaemonConfig) bool {
 	return cfg.GenericVethChaining()
 }
@@ -43,92 +54,94 @@ func (m *manager) egressViaIfb() bool {
 	return egressViaIfb(m.params.DaemonConfig)
 }
 
-// EgressIfbIfIndex returns the ifindex of the pacing device, or 0 when the
-// egress limit is paced in cil_to_netdev as usual.
-func (m *manager) EgressIfbIfIndex() int {
-	return m.ifbIfIndex
+func ifbName(epID uint16) string {
+	return IfbPrefix + strconv.Itoa(int(epID))
 }
 
-// ReleaseEgressIfb removes the pacing device of a previous run when this
-// configuration does not pace on it, so that the device does not outlive the
-// configuration that asked for it.
-//
-// It must only be called once the restored endpoints have been regenerated:
-// until then their programs are the ones the previous run loaded, and they
-// still redirect the endpoints' egress to the device, which would be dropped
-// if the device were gone.
-func (m *manager) ReleaseEgressIfb() {
-	if m.ifbIfIndex != 0 {
-		return
+// setupIfb creates (or picks up) the pacing device of the endpoint and returns
+// its ifindex. A device and a qdisc that are already in place are left alone,
+// so that an update of the limit or a restart of the agent drops nothing.
+func setupIfb(epID uint16) (int, error) {
+	name := ifbName(epID)
+	link, err := safenetlink.LinkByName(name)
+	if err != nil {
+		if !errors.As(err, &netlink.LinkNotFoundError{}) {
+			return 0, err
+		}
+		if err := netlink.LinkAdd(&netlink.Ifb{LinkAttrs: netlink.LinkAttrs{Name: name}}); err != nil {
+			return 0, fmt.Errorf("creating: %w", err)
+		}
+		if link, err = safenetlink.LinkByName(name); err != nil {
+			return 0, err
+		}
 	}
-	if err := removeIfb(m.params.Log); err != nil {
-		m.params.Log.Warn("Cannot remove the unused pacing device",
-			logfields.Error, err,
-			logfields.Device, IfbDevice)
+	// Only an ifb can be the one we created.
+	if link.Type() != "ifb" {
+		return 0, fmt.Errorf("device exists and is a %s, not an ifb", link.Type())
 	}
+	// An ifb drops every packet while the device is down.
+	if err := netlink.LinkSetUp(link); err != nil {
+		return 0, fmt.Errorf("setting up: %w", err)
+	}
+	if err := ensureFq(link, netlink.Fq{
+		PacketLimit:     pacingFqLimit,
+		FlowPacketLimit: pacingFqLimit,
+		Horizon:         uint32(FqDefaultHorizon.Microseconds()),
+	}); err != nil {
+		return 0, fmt.Errorf("qdisc: %w", err)
+	}
+	return link.Attrs().Index, nil
 }
 
-// isOurIfb guards against a device that merely has our name: only an ifb can
-// be the one we created, anything else is left alone.
-func isOurIfb(link netlink.Link) bool {
-	return link.Type() == "ifb"
-}
-
-func removeIfb(log *slog.Logger) error {
-	link, err := safenetlink.LinkByName(IfbDevice)
+func removeIfb(name string) error {
+	link, err := safenetlink.LinkByName(name)
 	if err != nil {
 		if errors.As(err, &netlink.LinkNotFoundError{}) {
 			return nil
 		}
-		return fmt.Errorf("retrieving device %s: %w", IfbDevice, err)
+		return err
 	}
-	if !isOurIfb(link) {
+	if link.Type() != "ifb" {
 		return nil
 	}
-
-	if err := netlink.LinkDel(link); err != nil {
-		return fmt.Errorf("removing device %s: %w", IfbDevice, err)
-	}
-
-	log.Info("Removed the pacing device of the chained-CNI egress path",
-		logfields.Device, IfbDevice)
-	return nil
+	return netlink.LinkDel(link)
 }
 
-// setupIfb creates (or picks up) the pacing device and gives it the same FQ
-// qdisc the native devices get.
-func (m *manager) setupIfb() error {
-	link, err := safenetlink.LinkByName(IfbDevice)
+// removeUnusedIfbs removes the pacing devices no egress limit of this run is
+// paced on: those of endpoints that are gone or lost their limit while the
+// agent was down, all of them when this configuration does not pace on ifbs,
+// and the single device an earlier version shared between all endpoints.
+func (m *manager) removeUnusedIfbs() error {
+	links, err := safenetlink.LinkList()
 	if err != nil {
-		if !errors.As(err, &netlink.LinkNotFoundError{}) {
-			return fmt.Errorf("retrieving device %s: %w", IfbDevice, err)
+		return fmt.Errorf("listing devices: %w", err)
+	}
+	var errs []error
+	for _, link := range links {
+		name := link.Attrs().Name
+		if link.Type() != "ifb" || !strings.HasPrefix(name, IfbPrefix) || m.ifbInUse(name) {
+			continue
 		}
-		ifb := &netlink.Ifb{LinkAttrs: netlink.LinkAttrs{Name: IfbDevice}}
-		if err := netlink.LinkAdd(ifb); err != nil {
-			return fmt.Errorf("creating device %s: %w", IfbDevice, err)
+		if err := netlink.LinkDel(link); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			continue
 		}
-		link, err = safenetlink.LinkByName(IfbDevice)
-		if err != nil {
-			return fmt.Errorf("retrieving device %s: %w", IfbDevice, err)
-		}
+		m.params.Log.Info("Removed an unused egress pacing device", logfields.Device, name)
 	}
+	return errors.Join(errs...)
+}
 
-	if !isOurIfb(link) {
-		return fmt.Errorf("device %s exists and is a %s, not an ifb", IfbDevice, link.Type())
+func (m *manager) ifbInUse(name string) bool {
+	if !m.enabled || !m.egressViaIfb() {
+		return false
 	}
-
-	// An ifb drops every packet while the device is down.
-	if err := netlink.LinkSetUp(link); err != nil {
-		return fmt.Errorf("setting device %s up: %w", IfbDevice, err)
+	epID, err := strconv.ParseUint(strings.TrimPrefix(name, IfbPrefix), 10, 16)
+	if err != nil {
+		return false
 	}
-
-	if err := setupPacingQdisc(m.params.Log, link, FqDefaultHorizon, FqDefaultBuckets); err != nil {
-		return fmt.Errorf("setting up the pacing qdisc of %s: %w", IfbDevice, err)
-	}
-
-	m.ifbIfIndex = link.Attrs().Index
-	m.params.Log.Info("Pacing the egress of chained endpoints",
-		logfields.Device, IfbDevice,
-		logfields.Interface, m.ifbIfIndex)
-	return nil
+	edt, _, found := m.params.EdtTable.Get(m.params.DB.ReadTxn(), bwmap.EdtIDIndex.Query(bwmap.EdtIDKey{
+		EndpointID: uint16(epID),
+		Direction:  DirectionEgress,
+	}))
+	return found && edt.IfIndex != 0
 }

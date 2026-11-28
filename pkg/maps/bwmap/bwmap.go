@@ -45,8 +45,9 @@ type EdtInfo struct {
 	TimeLast                uint64    `align:"t_last"`
 	TimeHorizonDropOrTokens uint64    `align:"$union0"`
 	Prio                    uint32    `align:"prio"`
-	Pad32                   uint32    `align:"pad_32"`
-	Pad                     [3]uint64 `align:"pad"`
+	IfIndex                 uint32    `align:"ifindex"`
+	TimeHorizonIngress      uint64    `align:"t_horizon_ingress"`
+	Pad                     [2]uint64 `align:"pad"`
 }
 
 func (v *EdtInfo) String() string {

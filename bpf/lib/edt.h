@@ -27,8 +27,14 @@ struct edt_info {
 		__u64	tokens;
 	};
 	__u32		prio;
-	__u32		pad_32;
-	__u64		pad[3];
+	/* The device the egress of a chained endpoint is paced on. */
+	__u32		ifindex;
+	/* The horizon of a shaped ingress limit. It has a field of its own
+	 * because the policer keeps its tokens in the union above: a policer
+	 * still loaded while the agent is being upgraded would overwrite it.
+	 */
+	__u64		t_horizon_ingress;
+	__u64		pad[2];
 };
 
 struct {
@@ -63,17 +69,49 @@ static __always_inline __u32 edt_get_aggregate(struct __ctx_buff *ctx)
 	return aggregate;
 }
 
+/* The length to charge to the limit. At the egress of a device this is what
+ * the qdisc layer computed, the length on the wire. The egress of a chained
+ * endpoint is seen on the ingress hook of its veth, where a GSO packet has to
+ * be accounted for by hand: skb->len, which includes the Ethernet header while
+ * the program runs, counts the headers of the first segment only.
+ *
+ * This starts from skb->len rather than from the qdisc layer's length, which
+ * on that hook is skb->len without the Ethernet header up to Linux 6.18 and
+ * accounts for the segments from 6.19 on.
+ *
+ * shortcut: the headers of a GSO segment are taken to be those of TCP with
+ * timestamps over an IP header without options, which is off by a few bytes
+ * per segment for anything else. Parse them if that ever matters.
+ */
+static __always_inline __u64
+edt_wire_len(const struct __ctx_buff *ctx, __be16 proto, bool at_ingress_hook)
+{
+	__u32 len, hdr;
+
+	if (!at_ingress_hook)
+		return ctx_wire_len(ctx);
+
+	len = ctx->len;
+	/* Ethernet, IP and TCP headers, which skb->len counts once. */
+	hdr = ETH_HLEN + 32 +
+	      (proto == bpf_htons(ETH_P_IP) ? sizeof(struct iphdr) : sizeof(struct ipv6hdr));
+	if (ctx->gso_size && len > hdr + ctx->gso_size)
+		/* And once more for each further segment. */
+		return len + (len - hdr - 1) / ctx->gso_size * hdr;
+	return len;
+}
+
 /* Computes the earliest departure time for the given aggregate and hands it to
- * the FQ qdisc of the device the packet is about to be queued on. The
- * aggregate is explicit because the chained-CNI path knows the endpoint it
- * runs for, while cil_to_netdev has to read it back from the skb (see
- * edt_sched_departure()).
+ * the FQ qdisc the packet is about to be queued on. The aggregate and its
+ * direction are explicit because the chained-CNI paths know the endpoint they
+ * run for, while cil_to_netdev has to read the aggregate back from the skb
+ * (see edt_sched_departure()).
  */
 static __always_inline int
 edt_sched_departure_aggregate(struct __ctx_buff *ctx, __be16 proto, __u32 aggregate_id,
-			      bool from_endpoint, bool *paced)
+			      __u8 direction, bool chained, __u32 *ifindex)
 {
-	__u64 delay, now, t, t_next;
+	__u64 delay, now, t, t_next, horizon;
 	struct edt_id aggregate = {};
 	struct edt_info *info;
 
@@ -87,7 +125,7 @@ edt_sched_departure_aggregate(struct __ctx_buff *ctx, __be16 proto, __u32 aggreg
 	if (!aggregate.id)
 		return CTX_ACT_OK;
 
-	aggregate.direction = DIRECTION_EGRESS;
+	aggregate.direction = direction;
 
 	info = map_lookup_elem(&cilium_throttle, &aggregate);
 	if (!info)
@@ -95,25 +133,32 @@ edt_sched_departure_aggregate(struct __ctx_buff *ctx, __be16 proto, __u32 aggreg
 	if (!info->bps)
 		goto out;
 
-	if (paced)
-		*paced = true;
+	if (ifindex)
+		*ifindex = info->ifindex;
 
 	now = ktime_get_ns();
-	/* What skb->tstamp holds depends on where the program runs. At the
-	 * egress of a device it is a departure time or zero: the forwarding
-	 * paths clear anything else. On the endpoint's own egress program,
-	 * which runs on the ingress hook of its veth, the packet has just been
-	 * received, and any skb that carries no departure time is given its
+	/* What skb->tstamp holds depends on where the program runs. In
+	 * cil_to_netdev it is a departure time or zero: the IP forwarding
+	 * path clears anything else. The egress of a chained endpoint runs on
+	 * the ingress hook of its veth, where the packet has just been
+	 * received: an skb that carries no departure time is given its
 	 * receive timestamp, in CLOCK_REALTIME, as soon as something on the
 	 * node asks for timestamps (an NTP daemon, a packet capture). Taking
 	 * that for a departure time would move t_last decades ahead of the
-	 * monotonic clock and have every later packet of the aggregate dropped
-	 * at the horizon.
+	 * monotonic clock and have every later packet of the aggregate
+	 * dropped at the horizon.
+	 *
+	 * The ingress of a chained endpoint is handed over by the chained
+	 * CNI. OVS, the bridge and IP forwarding all clear a receive
+	 * timestamp on the way, which the FQ on the veth depends on as much
+	 * as any FQ behind them does, but the computation has no use for the
+	 * value either way.
 	 */
-	t = from_endpoint ? 0 : ctx->tstamp;
+	t = chained ? 0 : ctx->tstamp;
 	if (t < now)
 		t = now;
-	delay = ((__u64)ctx_wire_len(ctx)) * NSEC_PER_SEC / info->bps;
+	delay = edt_wire_len(ctx, proto, chained && direction == DIRECTION_EGRESS) *
+		NSEC_PER_SEC / info->bps;
 	t_next = READ_ONCE(info->t_last) + delay;
 	if (t_next <= t) {
 		WRITE_ONCE(info->t_last, t);
@@ -124,7 +169,8 @@ edt_sched_departure_aggregate(struct __ctx_buff *ctx, __be16 proto, __u32 aggreg
 	 * drop horizon here to i) avoid having t_last messed up and ii) to
 	 * potentially allow for per aggregate control.
 	 */
-	if (t_next - now >= info->t_horizon_drop)
+	horizon = direction == DIRECTION_INGRESS ? info->t_horizon_ingress : info->t_horizon_drop;
+	if (t_next - now >= horizon)
 		return DROP_EDT_HORIZON;
 	WRITE_ONCE(info->t_last, t_next);
 	/* Hand the departure time over as a monotonic delivery time. Writing
@@ -153,7 +199,8 @@ out:
 static __always_inline int
 edt_sched_departure(struct __ctx_buff *ctx, __be16 proto)
 {
-	return edt_sched_departure_aggregate(ctx, proto, edt_get_aggregate(ctx), false, NULL);
+	return edt_sched_departure_aggregate(ctx, proto, edt_get_aggregate(ctx),
+					     DIRECTION_EGRESS, false, NULL);
 }
 #else
 static __always_inline void

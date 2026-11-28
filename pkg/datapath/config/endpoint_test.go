@@ -24,7 +24,7 @@ func TestEndpointCniChainingGenericVeth(t *testing.T) {
 	t.Cleanup(func() { option.Config.CNIChainingMode = old })
 
 	ep := testutils.NewTestEndpoint(t)
-	lnc := &datapath.LocalNodeConfiguration{EgressIfbIfIndex: 7}
+	lnc := &datapath.LocalNodeConfiguration{}
 
 	for mode, want := range map[string]bool{
 		"generic-veth": true,
@@ -35,8 +35,5 @@ func TestEndpointCniChainingGenericVeth(t *testing.T) {
 		option.Config.CNIChainingMode = mode
 		cfg := Endpoint(&ep, lnc).(*BPFLXC)
 		require.Equal(t, want, cfg.CniChainingGenericVeth, "chaining mode %q", mode)
-		// The datapath reads the pacing device from here: a zero ifindex
-		// turns the egress pacing redirect off.
-		require.Equal(t, uint32(7), cfg.BwmIfbIfIndex, "chaining mode %q", mode)
 	}
 }
