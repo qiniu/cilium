@@ -26,7 +26,13 @@ else
     dev=$(docker exec "$node" ip -j link | jq -er --argjson idx "$idx" '.[] | select(.ifindex==$idx) | .ifname')
 fi
 client=("${p[@]}" exec "$POD" --)
-if [[ $1 == lb ]]; then client=(docker exec "${EXTERNAL:?external client container}"); fi
+if [[ $1 == lb ]]; then
+    if [[ -n ${VIP_CLIENT_POD:-} ]]; then
+        client=("${p[@]}" exec "$VIP_CLIENT_POD" --)
+    else
+        client=(docker exec "${EXTERNAL:?external client container}")
+    fi
+fi
 out=$(mktemp -d "${TMPDIR:-/tmp}/chaining-qos.XXXXXXXX")
 printf 'case=%s/%s pod=%s/%s node=%s queue=%s target=%s artifacts=%s\n' "$1" "$2" "$NS" "$POD" "$node" "$dev" "$TARGET" "$out" | tee "$out/case.txt"
 docker exec "$node" tc -s -j qdisc show dev "$dev" > "$out/before.json"

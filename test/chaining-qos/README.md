@@ -21,6 +21,10 @@ done
 
 `in`/`out` are relative to the limited endpoint. SNAT `in` and LB `out` use `iperf3 -R` on the **same NAT path**, not a new connection to the translated address. Repeat LB cases with the backend local to and remote from the LB ingress node. Record actual ingress/backend placement, LB source-preservation setting and versions. Repeat from an internal peer to the VIP as a hairpin control (compare tuples manually; internal VIP access must not be classified external). If using unequal caps, set `CAP` per invocation.
 
+## Automated IPv4 kind fixture
+
+On an otherwise idle two-node Docker kind cluster with the above CNIs installed, run `CLUSTER=<kind-name> IMAGE=<preloaded-iperf-image> bash test/chaining-qos/kind-ipv4.sh`. The image needs iperf3, cat and iproute2 and must also exist in Docker. The script creates three Pods, one Service with a test external IP, and one external client on the kind network. It steers the VIP through each node by changing a route **only inside that client**. It compares with an internal Pod using the Service ClusterIP. Temporary client and namespace are removed on exit, including failure. This tests L4 Service DNAT, not a vendor LB provisioning controller. Do not use a cluster where the test external IP is in use.
+
 ## Evidence and limits
 
 Each run prints the artifact directory with both TCP endpoint views, receiver throughput and before/after `tc -s -j` counters on `cilium_bwm<endpoint-id>` (out) or the host peer of Pod `eth0` (in). The probe rejects missing root FQ, insufficient bulk bytes charged, wrong endpoint tuples for the chosen NAT path and throughput outside 80–105% of the specified cap. This window allows for wire headers and timing on an otherwise idle lab; it is not a QoS guarantee. For failure diagnosis inspect the raw JSON and hook attachments (`tc filter show dev <veth> ingress` and `egress` in the endpoint node). On multi-hop networks the two tuple views establish translation between endpoints, **not which hop performed it**.
