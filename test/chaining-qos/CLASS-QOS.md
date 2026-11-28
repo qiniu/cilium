@@ -30,4 +30,12 @@ export CLUSTER=qos78 IMAGE=qos74/iperf:local EXTERNAL=qos78-external
 bash test/chaining-qos/class-kind.sh
 ```
 
-The script creates a fresh namespace, a limited backend on the worker, a peer on the control-plane node, and a Service with a test external IP. Four TCP transfers run concurrently. It checks receiver throughput (90–105% of cap, allowing for headers), sender/server tuples for outbound SNAT and source-preserving Service DNAT, and before/after wire byte rates on the individual queues (95–105%). Raw iperf and `tc` JSON remain in the printed artifacts directory. A second phase installs and removes a deny policy, checks a real node-originated connection, and measures receiver intervals on one persistent external connection across a class-rate change and fallback to a legacy direction total. It checks that the class IFB is gone, the veth has its aggregate FQ again, and simultaneous internal and external uploads share one legacy ingress cap after the overrides are removed. The namespace and external peer route are removed on exit. This is a bandwidth ceiling, not a minimum-rate guarantee on an undersized cluster.
+The script creates a fresh namespace, a limited backend on the worker, a peer on the control-plane node, and a Service with a test external IP. The same four concurrent TCP connections stay open on the same Pod across three steady-state windows:
+
+| Window | Default in / out (Mbps) | North-south in / out (Mbps) |
+| --- | ---: | ---: |
+| Initial | 100 / 200 | 10 / 20 |
+| Hot update ×2 | 200 / 400 | 20 / 40 |
+| Restore original | 100 / 200 | 10 / 20 |
+
+Each transition updates all four annotations in a single request. Before measuring, the test rediscovers the endpoint IFB and waits for both direction trees to show the expected ceilings. For each of the 12 measurements it checks receiver interval throughput (90–105% of cap, allowing for headers) and byte deltas on that window's own queues (95–105%). It also verifies the connection tuples for SNAT and source-preserving DNAT. `DURATION` is the measurement time **per window** (default 15 seconds). Raw iperf JSON and per-window `tc` snapshots and timestamps remain in the printed artifacts directory. Additional lifecycle checks install and remove a deny policy, test a real node-originated connection, and measure receiver intervals on one external connection across a class-rate change and fallback to a legacy direction total. The test checks that the class IFB is gone, the veth has its aggregate FQ again, and simultaneous internal and external uploads share one legacy ingress cap after the overrides are removed. The namespace and external peer route are removed on exit. This is a bandwidth ceiling, not a minimum-rate guarantee on an undersized cluster.
